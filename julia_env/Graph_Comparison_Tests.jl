@@ -86,10 +86,42 @@
 #   Performing Checks
     summarize_ora(balikatan_2022)
 
-#####################
-#   MEASURE TESTS   #
-#####################
+######################################
+#   MEASURE TESTS: DEGREE MEASURES   #
+######################################
 
+#   Agent x Agent - All-Communication: In-Degree
+    println("\n--- In-Degree ---")
+	all_comm_in_deg = in_degree(agent_agent_all_com.edges; weighted=false)
+	println(all_comm_in_deg)
 
+#   Agent x Agent - All-Communication: Out-Degree
+	println("\n--- Out-Degree ---")
+	out_deg = out_degree(agent_agent_all_com.edges; weighted=false)
+	println(out_deg)
 
+#   Agent x Agent - All-Communication: Total Degree
+    println("\n--- Total Degree ---")
+	total_deg = total_degree(agent_agent_all_com.edges; weighted=false)
+	println(total_deg)
 
+#   Agent x Agent - All-Communication: Degree Ratio
+    println("\n--- Degree Ratio ---")
+	ratio = degree_ratio(agent_agent_all_com.edges; weighted=false)
+	println(ratio)
+   
+#   Agent x Agent - All-Communication: Weighted In-Degree
+
+#   Agent x Agent - All-Communication: Weighted Out-Degree
+
+#   Agent x Agent - All-Communication: Weighted Total Degree
+
+#   Agent x Agent - All-Communication: Weighted Degree Ratio
+
+#   Freeman Normalizations
+
+#   Compare to ORA
+
+######################################
+#   MEASURE TESTS: LOCAL STRUCTURE   #
+######################################

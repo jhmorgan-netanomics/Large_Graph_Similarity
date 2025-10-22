@@ -4,6 +4,7 @@ module Large_Graph_Similarity
     using DataFrames
     using Dates
 	using EzXML
+	using SparseArrays
 
 #   UTLITIES
 
@@ -384,6 +385,75 @@ module Large_Graph_Similarity
 			return String(net_id), meta
 	end
 
+#	Helper Function for degree calculations: edge list to sparse adjacency matrix
+	function _edgelist_to_sparse_matrix(edges::DataFrame; weighted::Bool=true)
+		"""
+		Args:
+			edges::DataFrame: DataFrame with src, dst, and optionally weight columns
+			weighted::Bool: use weights if true and available (default = true)
+		Returns:
+			Tuple{SparseMatrixCSC{Float64,Int64}, Dict{Any,Int}, Vector{Any}}
+		Notes:
+			Returns (adj_matrix, node_to_idx, idx_to_node).
+			Handles arbitrary node identifiers.
+		"""
+		
+		#	Extract unique nodes and create mappings
+			all_nodes = unique(vcat(edges.src, edges.dst))
+			n = length(all_nodes)
+			node_to_idx = Dict(node => i for (i, node) in enumerate(all_nodes))
+			idx_to_node = all_nodes
+		
+		#	Map edges to indices
+			src_idx = [node_to_idx[s] for s in edges.src]
+			dst_idx = [node_to_idx[d] for d in edges.dst]
+		
+		#	Determine weights
+			if weighted && hasproperty(edges, :weight)
+				#	Use provided weights
+					weights = Float64.(edges.weight)
+			else
+				#	Unweighted: use 1.0 for all edges
+					weights = ones(Float64, nrow(edges))
+			end
+		
+		#	Build sparse adjacency matrix
+			adj_matrix = sparse(src_idx, dst_idx, weights, n, n)
+		
+		#	Return matrix and mappings
+			return (adj_matrix, node_to_idx, idx_to_node)
+	end
+
+#	Helper Function for degree calculations: aggregate duplicate edges
+	function _aggregate_multi_edges(edges::DataFrame; agg_func::Function=sum)
+		"""
+		Args:
+			edges::DataFrame: DataFrame with src, dst, and optionally weight columns
+			agg_func::Function: aggregation function for duplicate edges (default = sum)
+		Returns:
+			DataFrame: edges with duplicates aggregated
+		Notes:
+			Handles multi-graphs by aggregating parallel edges.
+		"""
+		
+		#	Check if weights exist
+			has_weights = hasproperty(edges, :weight)
+		
+		#	Group and aggregate
+			if has_weights
+				#	Aggregate weights for duplicate edges
+					grouped = combine(groupby(edges, [:src, :dst]), 
+					                 :weight => agg_func => :weight)
+			else
+				#	Count duplicate edges
+					grouped = combine(groupby(edges, [:src, :dst]), 
+					                 nrow => :weight)
+			end
+		
+		#	Return aggregated edges
+			return grouped
+	end
+
 #   IMPORT FUNCTIONS
 
 #   ORA Meta-Network Import Function
@@ -495,12 +565,248 @@ module Large_Graph_Similarity
 #   Degree Measures 
 
 #   In-Degree
+	function in_degree(edges::DataFrame; 
+	                   weighted::Bool=true, 
+	                   normalize::Bool=false,
+	                   agg_func::Function=sum)
+		"""
+		Args:
+			edges::DataFrame: edge list with src, dst, and optionally weight columns
+			weighted::Bool: use edge weights if available (default = true)
+			normalize::Bool: normalize by max possible degree (default = false)
+			agg_func::Function: function to aggregate multi-edges (default = sum)
+		Returns:
+			DataFrame: columns [node, in_degree]
+		Notes:
+			In-degree is the sum of weights of incoming edges.
+			Matrix approach: column sums of adjacency matrix.
+		"""
+		
+		#	Validation
+			if !hasproperty(edges, :src) || !hasproperty(edges, :dst)
+				throw(ArgumentError("edges DataFrame must have src and dst columns"))
+			end
+		
+		#	Handle empty edge list
+			if nrow(edges) == 0
+				return DataFrame(node=[], in_degree=Float64[])
+			end
+		
+		#	Aggregate multi-edges
+			clean_edges = _aggregate_multi_edges(edges; agg_func=agg_func)
+		
+		#	Build adjacency matrix
+			adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=weighted)
+		
+		#	Calculate in-degree as column sums
+			in_deg_values = vec(sum(adj, dims=1))
+		
+		#	Normalize if requested
+			if normalize
+				#	Maximum possible in-degree is (n-1) * max_weight
+					n = length(idx_to_node)
+					max_weight = weighted && hasproperty(clean_edges, :weight) ? 
+					            maximum(clean_edges.weight) : 1.0
+					max_degree = (n - 1) * max_weight
+					if max_degree > 0
+						in_deg_values = in_deg_values ./ max_degree
+					end
+			end
+		
+		#	Assembling Result
+			result = DataFrame(
+				node = idx_to_node,
+				in_degree = in_deg_values
+			)
+			return result
+	end
 
 #   Out-Degree
+	function out_degree(edges::DataFrame; 
+	                    weighted::Bool=true, 
+	                    normalize::Bool=false,
+	                    agg_func::Function=sum)
+		"""
+		Args:
+			edges::DataFrame: edge list with src, dst, and optionally weight columns
+			weighted::Bool: use edge weights if available (default = true)
+			normalize::Bool: normalize by max possible degree (default = false)
+			agg_func::Function: function to aggregate multi-edges (default = sum)
+		Returns:
+			DataFrame: columns [node, out_degree]
+		Notes:
+			Out-degree is the sum of weights of outgoing edges.
+			Matrix approach: row sums of adjacency matrix.
+		"""
+		
+		#	Validation
+			if !hasproperty(edges, :src) || !hasproperty(edges, :dst)
+				throw(ArgumentError("edges DataFrame must have src and dst columns"))
+			end
+		
+		#	Handle empty edge list
+			if nrow(edges) == 0
+				return DataFrame(node=[], out_degree=Float64[])
+			end
+		
+		#	Aggregate multi-edges
+			clean_edges = _aggregate_multi_edges(edges; agg_func=agg_func)
+		
+		#	Build adjacency matrix
+			adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=weighted)
+		
+		#	Calculate out-degree as row sums
+			out_deg_values = vec(sum(adj, dims=2))
+		
+		#	Normalize if requested
+			if normalize
+				#	Maximum possible out-degree is (n-1) * max_weight
+					n = length(idx_to_node)
+					max_weight = weighted && hasproperty(clean_edges, :weight) ? 
+					            maximum(clean_edges.weight) : 1.0
+					max_degree = (n - 1) * max_weight
+					if max_degree > 0
+						out_deg_values = out_deg_values ./ max_degree
+					end
+			end
+		
+		#	Assembling Result
+			result = DataFrame(
+				node = idx_to_node,
+				out_degree = out_deg_values
+			)
+			return result
+	end
 
 #   Total Degree
+	function total_degree(edges::DataFrame; 
+	                      weighted::Bool=true, 
+	                      normalize::Bool=false,
+	                      agg_func::Function=sum,
+	                      ignore_direction::Bool=false)
+		"""
+		Args:
+			edges::DataFrame: edge list with src, dst, and optionally weight columns
+			weighted::Bool: use edge weights if available (default = true)
+			normalize::Bool: normalize by max possible degree (default = false)
+			agg_func::Function: function to aggregate multi-edges (default = sum)
+			ignore_direction::Bool: treat as undirected graph (default = false)
+		Returns:
+			DataFrame: columns [node, total_degree]
+		Notes:
+			Total degree is in-degree + out-degree.
+			For undirected interpretation, counts each edge once.
+			Matrix approach: row sums + column sums (or symmetrized matrix).
+		"""
+		
+		#	Validation
+			if !hasproperty(edges, :src) || !hasproperty(edges, :dst)
+				throw(ArgumentError("edges DataFrame must have src and dst columns"))
+			end
+		
+		#	Handle empty edge list
+			if nrow(edges) == 0
+				return DataFrame(node=[], total_degree=Float64[])
+			end
+		
+		#	Aggregate multi-edges
+			clean_edges = _aggregate_multi_edges(edges; agg_func=agg_func)
+		
+		#	Handle undirected case
+			if ignore_direction
+				#	Symmetrize edge list
+					edges_reversed = DataFrame(
+						src = clean_edges.dst,
+						dst = clean_edges.src
+					)
+					if hasproperty(clean_edges, :weight)
+						edges_reversed.weight = clean_edges.weight
+					end
+					
+				#	Combine and re-aggregate
+					combined_edges = vcat(clean_edges, edges_reversed)
+					clean_edges = _aggregate_multi_edges(combined_edges; agg_func=maximum)
+			end
+		
+		#	Build adjacency matrix
+			adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=weighted)
+		
+		#	Calculate total degree
+			if ignore_direction
+				#	For undirected, use symmetrized matrix
+					adj_sym = max.(adj, adj')
+				#	Degree is row sum (or column sum) of symmetric matrix
+					total_deg_values = vec(sum(adj_sym, dims=1))
+			else
+				#	For directed, sum in-degree and out-degree
+					in_deg = vec(sum(adj, dims=1))
+					out_deg = vec(sum(adj, dims=2))
+					total_deg_values = in_deg .+ out_deg
+			end
+		
+		#	Normalize if requested
+			if normalize
+				#	Maximum possible total degree
+					n = length(idx_to_node)
+					max_weight = weighted && hasproperty(clean_edges, :weight) ? 
+					            maximum(clean_edges.weight) : 1.0
+					if ignore_direction
+						max_degree = (n - 1) * max_weight
+					else
+						max_degree = 2 * (n - 1) * max_weight
+					end
+					if max_degree > 0
+						total_deg_values = total_deg_values ./ max_degree
+					end
+			end
+		
+		#	Assembling Result
+			result = DataFrame(
+				node = idx_to_node,
+				total_degree = total_deg_values
+			)
+			return result
+	end
 
 #   In/Out Degree Ratio
+	function degree_ratio(edges::DataFrame; 
+	                      weighted::Bool=true,
+	                      epsilon::Float64=1e-10)
+		"""
+		Args:
+			edges::DataFrame: edge list with src, dst, and optionally weight columns
+			weighted::Bool: use edge weights if available (default = true)
+			epsilon::Float64: small value to avoid division by zero (default = 1e-10)
+		Returns:
+			DataFrame: columns [node, in_degree, out_degree, in_out_ratio]
+		Notes:
+			Ratio of in-degree to out-degree.
+			Indicates authority (>1) vs hub (<1) behavior.
+		"""
+		
+		#	Calculate in and out degrees
+			in_deg_df = in_degree(edges; weighted=weighted)
+			out_deg_df = out_degree(edges; weighted=weighted)
+		
+		#	Merge on node
+			result = innerjoin(in_deg_df, out_deg_df, on=:node)
+		
+		#	Calculate ratio with epsilon to avoid division by zero
+			result.in_out_ratio = result.in_degree ./ (result.out_degree .+ epsilon)
+		
+		#	Handle pure sinks (out_degree = 0)
+			pure_sinks = result.out_degree .== 0
+			result.in_out_ratio[pure_sinks] .= Inf
+		
+		#	Handle pure sources (in_degree = 0, out_degree > 0)
+			pure_sources = (result.in_degree .== 0) .& (result.out_degree .> 0)
+			result.in_out_ratio[pure_sources] .= 0.0
+		
+		#	Assembling Result
+			return result
+	end
+
+#	Freeman Degree Normalization
 
 #   Local structure
 
@@ -556,7 +862,10 @@ module Large_Graph_Similarity
 
 
 #   Exporting Objects
-    export load_ora_xml
+    export load_ora_xml,
+		   in_degree,
+		   out_degree,
+		   total_degree,
+		   degree_ratio
    
-
 end # module julia_env
