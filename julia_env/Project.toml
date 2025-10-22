@@ -1,0 +1,4 @@
+name = "julia_env"
+uuid = "ea26a272-f07f-47af-a9f5-a16291d7eef7"
+authors = ["jhm18 <jonathan.h.morgan@gmail.com>"]
+version = "0.1.0"
