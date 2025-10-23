@@ -1,3 +1,4 @@
+__precompile__(true)
 module Large_Graph_Similarity
 #   Packages
     using CSV
@@ -6,8 +7,11 @@ module Large_Graph_Similarity
 	using EzXML
 	using LinearAlgebra
 	using SparseArrays
+	using Statistics
 
-#   UTLITIES
+################
+#   UTLITIES   #
+################
 
 #	Joiner for multi-valued string properties
 	const MULTI_SEP = " | "
@@ -496,7 +500,9 @@ module Large_Graph_Similarity
 			return (first_mode, second_mode)
 	end
 
-#   IMPORT FUNCTIONS
+########################
+#   IMPORT FUNCTIONS   #
+########################
 
 #   ORA Meta-Network Import Function
     function load_ora_xml(filepath::AbstractString)
@@ -602,9 +608,11 @@ module Large_Graph_Similarity
 		```
 	""" load_ora_xml
 
-#   MEASURES
+################
+#   MEASURES   #
+################
 
-#   Degree Measures 
+#   DEGREE MEASURES   
 
 #	In-Degree
 	function in_degree(edges::DataFrame; 
@@ -703,21 +711,37 @@ module Large_Graph_Similarity
 	                      weighted::Bool=true, 
 	                      normalize::Bool=false,
 	                      agg_func::Function=sum,
-	                      ignore_direction::Bool=false)
+	                      ignore_direction::Bool=false,
+	                      drop_self_loops::Bool=false,
+	                      count_self_loops_once::Bool=true,
+	                      atol::Float64=1e-12)
 		"""
 		Args:
 			edges::DataFrame: edge list with src, dst, and optionally weight columns
 			weighted::Bool: use edge weights if available (default = true)
-			normalize::Bool: if true, returns Freeman-normalized total-degree via freeman_degree_normalization (default = false)
+			normalize::Bool: if true, returns Freeman-normalized total-degree (default = false)
 			agg_func::Function: function to aggregate multi-edges (default = sum)
 			ignore_direction::Bool: if true, treat as undirected for the total metric
+			drop_self_loops::Bool: if true, exclude self-loops (u→u) entirely (default = false)
+			count_self_loops_once::Bool: when not dropping loops and directed, count each loop once (default = true)
+			atol::Float64: tolerance for symmetry tests (default = 1e-12)
 		Returns:
 			DataFrame: columns [node, total_degree]
 		Notes:
-			When normalize=true: delegates to freeman_degree_normalization(...; mode=:all, directed = !ignore_direction).
-			When normalize=false:
-				- ignore_direction=false: total = in-degree + out-degree.
-				- ignore_direction=true: symmetrizes edges (max(A,A')) and returns degree from the symmetric matrix.
+			Order of operations:
+			1) Build sparse adjacency (weighted or unweighted).
+			2) Symmetrize if `ignore_direction=true` (A ← max(A, A')).
+			3) If `drop_self_loops=true`, zero the diagonal once.
+			4) Compute totals.
+
+			Self-loop behavior:
+			- By default (`count_self_loops_once=true`), a self-loop contributes its weight **once**
+			  to total-degree (consistent with Freeman's numerator `row + col − diag` and ORA outputs).
+			- If `drop_self_loops=true`, loops contribute nothing.
+			- If `count_self_loops_once=false`, each self-loop contributes twice (once to in-degree,
+			  once to out-degree), matching pure graph-theoretic totals.
+
+			When `normalize=true`, the function applies Freeman’s :all normalization on the prepared matrix.
 		"""
 
 		#	Validation
@@ -733,42 +757,65 @@ module Large_Graph_Similarity
 		#	Aggregate multi-edges
 			clean_edges = _aggregate_multi_edges(edges; agg_func=agg_func)
 
-		#	Normalized path: delegate to Freeman with mode=:all
-			if normalize
-				#	Here we control the symmetry interpretation via `directed`
-					df = freeman_degree_normalization(clean_edges; mode=:all, directed = !ignore_direction, bipartite=false, weighted=weighted, agg_func=agg_func)
-				#	Freeman returns :freeman_degree; rename to :total_degree
-					rename!(df, :freeman_degree => :total_degree)
-					return df
-			end
-
-		#	Unnormalized path (original behavior)
-			if ignore_direction
-				#	Symmetrize edge list
-					edges_reversed = DataFrame(src = clean_edges.dst, dst = clean_edges.src)
-					if hasproperty(clean_edges, :weight)
-						edges_reversed.weight = clean_edges.weight
-					end
-					combined_edges = vcat(clean_edges, edges_reversed)
-					clean_edges = _aggregate_multi_edges(combined_edges; agg_func=maximum)
-			end
-
-		#	Build adjacency
+		#	Build sparse adjacency + node order
 			adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=weighted)
+			n = size(adj, 1)
 
-		#	Compute totals
+		#	Optional symmetrization
 			if ignore_direction
-				#	Degree on symmetric matrix counts each undirected edge once
-					adj_sym = max.(adj, adj')
-					total_deg_values = vec(sum(adj_sym, dims=1))
-			else
-				#	Directed: in + out
-					in_deg = vec(sum(adj, dims=1))
-					out_deg = vec(sum(adj, dims=2))
-					total_deg_values = in_deg .+ out_deg
+				adj = max.(adj, adj')
 			end
 
-		#	Assembling Result
+		#	Drop self-loops once
+			if drop_self_loops
+				adj = copy(adj)
+				for i in 1:n
+					adj[i, i] = 0.0
+				end
+				dropzeros!(adj)
+			end
+
+		#	Unnormalized path
+			if !normalize
+				if ignore_direction
+					total_deg_values = vec(sum(adj, dims=1))
+				else
+					in_deg  = vec(sum(adj, dims=1))
+					out_deg = vec(sum(adj, dims=2))
+					if drop_self_loops
+						total_deg_values = in_deg .+ out_deg
+					elseif count_self_loops_once
+						total_deg_values = (in_deg .+ out_deg) .- collect(diag(adj))
+					else
+						total_deg_values = in_deg .+ out_deg
+					end
+				end
+				return DataFrame(node = idx_to_node, total_degree = total_deg_values)
+			end
+
+		#	Normalized path
+			row_sums = vec(sum(adj, dims=2))
+			col_sums = vec(sum(adj, dims=1))
+			diag_vec = collect(diag(adj))
+			numerator = row_sums .+ col_sums .- diag_vec
+
+			is_sym = ignore_direction ? true : _is_symmetric(adj; directed=true, atol=atol)
+
+			if weighted
+				nz = nonzeros(adj)
+				V = (length(nz) > 0) ? maximum(nz) : 1.0
+			else
+				V = 1.0
+			end
+
+			N = n
+			denom = is_sym ? (V * (N - 1)) : (2 * V * (N - 1))
+			if denom == 0.0
+				return DataFrame(node = idx_to_node, total_degree = zeros(Float64, n))
+			end
+
+			total_deg_values = numerator ./ denom
+
 			return DataFrame(node = idx_to_node, total_degree = total_deg_values)
 	end
 
@@ -833,8 +880,11 @@ module Large_Graph_Similarity
 			DataFrame: columns [node, freeman_degree]
 		Notes:
 			Builds a (possibly weighted) sparse adjacency via existing helpers, then applies
-			Freeman's normalization. Matches the Python reference behavior for symmetry,
-			denominators, and (optionally) bipartite handling.
+			Freeman-style normalization *aligned to your R/Python reference*:
+			- mode=:all → symmetric:   divide by V*(N−1); asymmetric: divide by 2*V*(N−1)
+			- mode=:out → symmetric:   divide by V*(N−1); asymmetric: divide by V*N
+			- mode=:in  → symmetric:   divide by V*(N−1); asymmetric: divide by V*N
+			where N is the number of columns of A (second mode in bipartite; n in unimodal).
 		"""
 
 		#	Validation
@@ -857,13 +907,13 @@ module Large_Graph_Similarity
 		#	Compute marginals and diagonal
 			row_sums = vec(sum(adj, dims=2))               # out-strength
 			col_sums = vec(sum(adj, dims=1))               # in-strength
-			diagonal = collect(diag(adj))                  # ensure a dense Vector{<:Real}
+			diagonal = collect(diag(adj))                  # self-loop weights as dense vector
 
 		#	Determine V (max edge weight if weighted; else 1.0)
 			V = (weighted && hasproperty(clean_edges, :weight) && !isempty(clean_edges.weight)) ?
 			    maximum(clean_edges.weight) : 1.0
 
-		#	Symmetry detection (directed-but-symmetric allowed)
+		#	Symmetry detection (undirected or directed-but-symmetric)
 			is_sym = _is_symmetric(adj; directed=directed, atol=atol)
 
 		#	Determine N & R (bipartite or unimodal)
@@ -891,7 +941,7 @@ module Large_Graph_Similarity
 				return DataFrame(node = idx_to_node, freeman_degree = zeros(Float64, n))
 			end
 
-		#	Apply Freeman denominators by mode
+		#	Apply denominators by mode (match R/Python reference exactly)
 			numerator = zeros(Float64, n)
 			denom = 0.0
 			if mode == :all
@@ -902,12 +952,12 @@ module Large_Graph_Similarity
 			elseif mode == :out
 				#	Out-degree numerator
 					numerator .= row_sums
-				#	Denominator by symmetry
+				#	Symmetric → V*(N−1); Asymmetric (directed) → V*N
 					denom = is_sym ? (V * (N - 1)) : (V * N)
 			else
 				#	In-degree numerator
 					numerator .= col_sums
-				#	Denominator by symmetry
+				#	Symmetric → V*(N−1); Asymmetric (directed) → V*N
 					denom = is_sym ? (V * (N - 1)) : (V * N)
 			end
 
@@ -924,34 +974,30 @@ module Large_Graph_Similarity
 	end
 	@doc raw"""
 	**Description**
-	Compute Freeman-normalized degree centrality from an edge list using your sparse-matrix helpers. Supports weighted/unweighted, directed/undirected, and optional bipartite mode counts.
+	Compute Freeman-normalized degree centrality for an edge list (supports weighted/unweighted, directed/undirected, and optional bipartite via `types`), aligned to the R/Python reference you provided.
 
 	**Usage**
 	`freeman_degree_normalization(edges::DataFrame; mode::Symbol=:all, directed::Bool=true, bipartite::Bool=false, types::Union{Nothing,AbstractVector{Bool}}=nothing, weighted::Bool=true, agg_func::Function=sum, atol::Float64=1e-12)`
 
-	**Arguments**
-	- `edges::DataFrame`: Edge list with `:src`, `:dst`, and optional `:weight`.
-	- `mode::Symbol`: One of `:all`, `:out`, or `:in` (default `:all`).
-	- `directed::Bool`: Treat the network as directed (default `true`).
-	- `bipartite::Bool`: If `true`, use bipartite mode counts; requires `types` (default `false`).
-	- `types::Union{Nothing,AbstractVector{Bool}}`: Node-mode flags (aligned to node order; `true` = first mode).
-	- `weighted::Bool`: Use edge weights if available (default `true`).
-	- `agg_func::Function`: Aggregation for parallel edges (default `sum`).
-	- `atol::Float64`: Tolerance for symmetry when `directed=true` (default `1e-12`).
-
 	**Details**
-	The function:
-	1. Aggregates parallel edges (`agg_func`) and builds a sparse adjacency with `_edgelist_to_sparse_matrix`.
-	2. Computes row sums (out-strength), column sums (in-strength), and diagonal (self-loops).
-	3. Sets `V` to the maximum edge weight if weighted, else `1.0`.
-	4. Detects symmetry. Undirected graphs are treated as symmetric; directed-but-symmetric is allowed.
-	5. Determines `N` and `R`. If `bipartite=true`, `types` provides first/second mode counts; otherwise `N=R=n`.
-	6. Applies Freeman denominators:
-	- `:all`: numerator = out + in − self; symmetric → `V*(N−1)`, asymmetric → `2*V*(N−1)`.
-	- `:out`: numerator = out; symmetric → `V*(N−1)`, asymmetric → `V*N`.
-	- `:in`: numerator = in; symmetric → `V*(N−1)`, asymmetric → `V*N`.
+	Let `A` be the (possibly weighted) adjacency matrix. The function:
+	- Builds `A` from `edges` (uses weights if present).
+	- Determines whether the graph is **symmetric** (undirected or directed-but-symmetric).
+	- Handles bipartite graphs via `types` and sets `N` and `R` as the sizes of the two modes; otherwise `N = R = ncol(A)`.
+	- Sets `V` to the **maximum edge weight** if weighted, else `V = 1`.
 
-	Edge cases: If `N ≤ 1` or the denominator is zero, returns zeros of appropriate length.
+	**Normalization denominators (Freeman convention, matching R/Python):**
+	- **Mode `:all`**: numerator = `rowSums(A) + colSums(A) − diag(A)`.  
+	Symmetric → divide by `V*(N−1)`; Asymmetric → divide by `2*V*(N−1)`.
+	- **Mode `:out`**: numerator = `rowSums(A)`.  
+	Symmetric → divide by `V*(N−1)`; Asymmetric → divide by `V*N`.
+	- **Mode `:in`**: numerator = `colSums(A)`.  
+	Symmetric → divide by `V*(N−1)`; Asymmetric → divide by `V*N`.
+
+	For bipartite inputs, `N` is the **second-mode** size (number of columns of `A`); normalization uses this `N` for the target mode’s denominator.
+
+	**Edge Cases**
+	If `N ≤ 1` or the denominator is zero, returns zeros.
 
 	**Value**
 	A `DataFrame` with:
@@ -967,13 +1013,12 @@ module Large_Graph_Similarity
 		scores = freeman_degree_normalization(edges; mode=:all, directed=false)
 		@show scores
 
-	#	Directed with weights
+	#	Directed, weighted (in/out use V*(N−1) if symmetric, V*N if asymmetric)
 		edges_w = DataFrame(src=[1,1,2], dst=[2,3,3], weight=[2.0, 1.0, 1.5])
 		scores_out = freeman_degree_normalization(edges_w; mode=:out, directed=true, weighted=true)
 		@show scores_out
 
-	#	Bipartite (types must align with node order from helper)
-		# Suppose nodes appear in order [A,B,C,D,E] with types [true,true,true,false,false]
+	#	Bipartite example (types must align with node order from helper)
 		edges_bi = DataFrame(src=["A","B","C","B"], dst=["D","D","E","E"])
 		types = [true,true,true,false,false]
 		scores_in = freeman_degree_normalization(edges_bi; mode=:in, directed=false, bipartite=true, types=types)
@@ -983,13 +1028,590 @@ module Large_Graph_Similarity
 	Freeman, L. C. (1978). Centrality in social networks conceptual clarification. Social Networks, 1(3), 215–239.
 	""" freeman_degree_normalization
 
-#   Local structure
+#   LOCAL STRUCTURE
 
-#   Local Clustering Coefficient (Directed)
+#	Helper Function for clustering_coefficient: ego network extraction
+	function _extract_ego_network(adj::SparseMatrixCSC{Float64,Int64}, node_idx::Int; directed::Bool=true)
+		"""
+		Args:
+			adj::SparseMatrixCSC: adjacency matrix
+			node_idx::Int: index of ego node (1-based)
+			directed::Bool: whether graph is directed (default = true)
+		Returns:
+			Tuple{Vector{Int}, SparseMatrixCSC}: (neighbor_indices, ego_subnet_adjacency)
+		Notes:
+			Extracts ego network: node + neighbors + links between them.
+			For directed graphs, neighbors are nodes with any edge to/from ego.
+		"""
+		
+		#	Find all neighbors (in and out for directed)
+			if directed
+				#	Out-neighbors (ego -> neighbor)
+					out_neighbors = findnz(adj[node_idx, :])[1]
+				#	In-neighbors (neighbor -> ego)
+					in_neighbors = findnz(adj[:, node_idx])[1]
+				#	Combine and deduplicate
+					neighbors = unique(vcat(out_neighbors, in_neighbors))
+			else
+				#	For undirected, just get neighbors from row or column
+					neighbors = findnz(adj[node_idx, :])[1]
+			end
+		
+		#	Remove self-loop if present
+			neighbors = filter(n -> n != node_idx, neighbors)
+		
+		#	Include ego in the network
+			ego_nodes = vcat(node_idx, neighbors)
+		
+		#	Extract submatrix for ego network
+			ego_subnet = adj[ego_nodes, ego_nodes]
+		
+		#	Return neighbor indices and subnet
+			return (neighbors, ego_subnet)
+	end
+
+#	Helper Function for clustering_coefficient: count triangles
+	function _count_triangles_directed(adj::SparseMatrixCSC{Float64,Int64}, node_idx::Int)
+		"""
+		Args:
+			adj::SparseMatrixCSC: adjacency matrix
+			node_idx::Int: index of node (1-based)
+		Returns:
+			Tuple{Float64, Float64}: (num_triangles, max_possible_triangles)
+		Notes:
+			Counts directed triangles through node.
+			Triangle exists if i->j and j->k and (i->k or k->i).
+		"""
+		
+		#	Get out and in neighbors
+			out_neighbors = findnz(adj[node_idx, :])[1]
+			in_neighbors = findnz(adj[:, node_idx])[1]
+		
+		#	Remove self-loops
+			out_neighbors = filter(n -> n != node_idx, out_neighbors)
+			in_neighbors = filter(n -> n != node_idx, in_neighbors)
+		
+		#	All neighbors (for counting possible triangles)
+			all_neighbors = unique(vcat(out_neighbors, in_neighbors))
+			k = length(all_neighbors)
+		
+		#	Maximum possible directed triangles
+			max_triangles = k * (k - 1)
+		
+		#	Count actual triangles (edges between neighbors)
+			if k < 2
+				return (0.0, Float64(max_triangles))
+			end
+		
+		#	Count edges between neighbors
+			triangle_count = 0.0
+			for i in all_neighbors
+				for j in all_neighbors
+					if i != j && adj[i, j] > 0
+						triangle_count += 1.0
+					end
+				end
+			end
+		
+		#	Return counts
+			return (triangle_count, Float64(max_triangles))
+	end
+
+#	Local Clustering Coefficient (Node Level)
+	function local_clustering_coefficient(edges::DataFrame;
+	                                      directed::Bool=true,
+	                                      weighted::Bool=false,
+	                                      method::Symbol=:density,
+	                                      agg_func::Function=sum)
+		"""
+		Args:
+			edges::DataFrame: edge list with src, dst, and optionally weight columns
+			directed::Bool: treat graph as directed (default = true)
+			weighted::Bool: use edge weights (default = false, uses binary)
+			method::Symbol: :density (ego network density) or :transitivity (triangle-based) (default = :density)
+			agg_func::Function: aggregation for parallel edges (default = sum)
+		Returns:
+			DataFrame: columns [node, clustering_coefficient]
+		Notes:
+			Computes local clustering coefficient for each node.
+			Method :density matches ORA's approach (ego network density).
+			Method :transitivity uses triangle counting.
+		"""
+		
+		#	Validation
+			if !hasproperty(edges, :src) || !hasproperty(edges, :dst)
+				throw(ArgumentError("edges DataFrame must have src and dst columns"))
+			end
+			
+			if !(method in [:density, :transitivity])
+				throw(ArgumentError("method must be :density or :transitivity"))
+			end
+		
+		#	Handle empty edge list
+			if nrow(edges) == 0
+				return DataFrame(node=[], clustering_coefficient=Float64[])
+			end
+		
+		#	Aggregate multi-edges
+			clean_edges = _aggregate_multi_edges(edges; agg_func=agg_func)
+		
+		#	Build adjacency matrix (binary for standard clustering)
+			if weighted && hasproperty(clean_edges, :weight)
+				#	Weighted clustering (Barrat et al. 2004)
+					adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=true)
+			else
+				#	Standard binary clustering
+					adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=false)
+			end
+		
+		#	Initialize clustering coefficients
+			n = length(idx_to_node)
+			clustering_values = zeros(Float64, n)
+		
+		#	Calculate clustering coefficient for each node
+			for i in 1:n
+				if method == :density
+					#	Ego network density method (ORA approach)
+						neighbors, ego_subnet = _extract_ego_network(adj, i; directed=directed)
+						
+					#	Skip if no neighbors
+						if length(neighbors) < 2
+							clustering_values[i] = 0.0
+							continue
+						end
+					
+					#	Calculate density of ego network (excluding ego node)
+						neighbor_indices = 2:length(neighbors)+1  # Skip ego at index 1
+						neighbor_subnet = ego_subnet[neighbor_indices, neighbor_indices]
+						
+					#	Count edges between neighbors
+						if weighted
+							edge_sum = sum(neighbor_subnet)
+						else
+							edge_sum = nnz(neighbor_subnet)
+						end
+						
+					#	Maximum possible edges
+						k = length(neighbors)
+						if directed
+							max_edges = k * (k - 1)
+						else
+							max_edges = k * (k - 1) / 2
+						end
+						
+					#	Clustering coefficient is the density
+						if max_edges > 0
+							clustering_values[i] = edge_sum / max_edges
+						else
+							clustering_values[i] = 0.0
+						end
+						
+				else  # method == :transitivity
+					#	Triangle-based method
+						triangles, max_triangles = _count_triangles_directed(adj, i)
+						
+					#	Clustering coefficient
+						if max_triangles > 0
+							clustering_values[i] = triangles / max_triangles
+						else
+							clustering_values[i] = 0.0
+						end
+				end
+			end
+		
+		#	Assembling Result
+			result = DataFrame(
+				node = idx_to_node,
+				clustering_coefficient = clustering_values
+			)
+			return result
+	end
+	@doc raw"""
+	**Description**
+	Computes the local clustering coefficient for each node by measuring the density of its ego network. For directed graphs, this captures how tightly interconnected a node's immediate neighborhood is, indicating local information diffusion patterns and group cohesion.
+
+	**Usage**
+	`local_clustering_coefficient(edges::DataFrame; directed::Bool=true, weighted::Bool=false, method::Symbol=:density, agg_func::Function=sum)`
+
+	**Arguments**
+	- `edges::DataFrame`: Edge list with `:src`, `:dst`, and optional `:weight` columns.
+	- `directed::Bool`: Treat graph as directed (default `true`).
+	- `weighted::Bool`: Use edge weights if available (default `false`, uses binary).
+	- `method::Symbol`: `:density` (ego network density, ORA approach) or `:transitivity` (triangle-based) (default `:density`).
+	- `agg_func::Function`: Aggregation function for parallel edges (default `sum`).
+
+	**Details**
+	The clustering coefficient measures the degree to which nodes tend to cluster together. For each node, it calculates the density of connections in its ego network (the node, its neighbors, and edges between them).
+
+	Method `:density` (ORA approach): Computes the ratio of existing edges to possible edges among a node's neighbors. For directed graphs, max possible = k*(k-1); for undirected, max = k*(k-1)/2.
+
+	Method `:transitivity`: Counts triangles passing through the node relative to connected triples.
+
+	Higher values indicate tighter local clustering, supporting local information diffusion and decentralized infrastructure.
+
+	**Value**
+	A `DataFrame` with columns:
+	- `node`: Node identifiers
+	- `clustering_coefficient::Float64`: Local clustering coefficient [0,1]
+
+	**Examples**
+	```julia
+	# Simple directed network
+	edges = DataFrame(src=["A","A","B","B","C"], dst=["B","C","C","D","A"])
+	local_cc = local_clustering_coefficient(edges; directed=true)
+	
+	# Undirected with ego density method
+	local_cc = local_clustering_coefficient(edges; directed=false, method=:density)
+	```
+
+	**See Also**
+	`global_clustering_coefficient`, `weighted_clustering_coefficient`
+
+	**References**
+	Watts DJ, Strogatz SH (1998). "Collective dynamics of 'small-world' networks" Nature 393(6684): 440-442.
+	""" local_clustering_coefficient
+
+#	Global Clustering Coefficient (Network Level)
+	function global_clustering_coefficient(edges::DataFrame;
+	                                       directed::Bool=true,
+	                                       weighted::Bool=false,
+	                                       method::Symbol=:average,
+	                                       agg_func::Function=sum)
+		"""
+		Args:
+			edges::DataFrame: edge list with src, dst, and optionally weight columns
+			directed::Bool: treat graph as directed (default = true)
+			weighted::Bool: use edge weights (default = false, uses binary)
+			method::Symbol: :average (mean of local) or :transitivity (global ratio) (default = :average)
+			agg_func::Function: aggregation for parallel edges (default = sum)
+		Returns:
+			Float64: global clustering coefficient
+		Notes:
+			Method :average returns mean of all nodes' local clustering (ORA approach).
+			Method :transitivity returns (3 * triangles) / (connected triples).
+		"""
+		
+		#	Get local clustering coefficients
+			local_cc = local_clustering_coefficient(edges;
+			                                       directed=directed,
+			                                       weighted=weighted,
+			                                       method=:density,
+			                                       agg_func=agg_func)
+		
+		#	Calculate global measure
+			if method == :average
+				#	Average of local clustering coefficients (ORA approach)
+					return mean(local_cc.clustering_coefficient)
+					
+			else  # method == :transitivity
+				#	Global transitivity (ratio of triangles to triples)
+					clean_edges = _aggregate_multi_edges(edges; agg_func=agg_func)
+					adj, _, _ = _edgelist_to_sparse_matrix(clean_edges; weighted=false)
+					
+				#	Count triangles and triples globally
+					total_triangles = 0.0
+					total_triples = 0.0
+					
+					n = size(adj, 1)
+					for i in 1:n
+						triangles, max_triangles = _count_triangles_directed(adj, i)
+						total_triangles += triangles
+						
+						#	Count connected triples centered at i
+						out_deg = nnz(adj[i, :])
+						in_deg = nnz(adj[:, i])
+						
+						if directed
+							triples = out_deg * in_deg + out_deg * (out_deg - 1) + in_deg * (in_deg - 1)
+						else
+							deg = out_deg
+							triples = deg * (deg - 1) / 2
+						end
+						total_triples += triples
+					end
+					
+				#	Global clustering coefficient
+					if total_triples > 0
+						if directed
+							return total_triangles / total_triples
+						else
+							return (3 * total_triangles) / total_triples
+						end
+					else
+						return 0.0
+					end
+			end
+	end
+	@doc raw"""
+	**Description**
+	Computes the global (network-level) clustering coefficient, measuring the overall tendency of nodes to form tightly connected groups. This provides a single value characterizing the network's local cohesiveness.
+
+	**Usage**
+	`global_clustering_coefficient(edges::DataFrame; directed::Bool=true, weighted::Bool=false, method::Symbol=:average, agg_func::Function=sum)`
+
+	**Arguments**
+	- `edges::DataFrame`: Edge list with `:src`, `:dst`, and optional `:weight` columns.
+	- `directed::Bool`: Treat graph as directed (default `true`).
+	- `weighted::Bool`: Use edge weights if available (default `false`, uses binary).
+	- `method::Symbol`: `:average` (mean of local coefficients, ORA approach) or `:transitivity` (global triangle ratio) (default `:average`).
+	- `agg_func::Function`: Aggregation function for parallel edges (default `sum`).
+
+	**Details**
+	Two methods for global clustering:
+	1. `:average`: Mean of all nodes' local clustering coefficients (ORA's approach). Gives equal weight to all nodes regardless of degree.
+	2. `:transitivity`: Ratio of (3 × triangles) to (connected triples) for undirected, or triangles/triples for directed. Weights high-degree nodes more heavily.
+
+	Higher values indicate a network with dense local neighborhoods, supporting efficient local information spread and robust community structure.
+
+	**Value**
+	`Float64`: Global clustering coefficient [0,1]
+
+	**Examples**
+	```julia
+	# Directed network with average method (ORA approach)
+	edges = DataFrame(src=["A","B","C"], dst=["B","C","A"])
+	global_cc = global_clustering_coefficient(edges; directed=true, method=:average)
+	
+	# Undirected with transitivity method
+	global_cc = global_clustering_coefficient(edges; directed=false, method=:transitivity)
+	```
+
+	**See Also**
+	`local_clustering_coefficient`, `weighted_clustering_coefficient`
+
+	**References**
+	Newman, M. E. (2003). "The structure and function of complex networks" SIAM Review 45(2): 167-256.
+	""" global_clustering_coefficient
+
+#	Weighted Clustering Coefficient (Barrat et al. 2004)
+	function weighted_clustering_coefficient(edges::DataFrame;
+	                                        directed::Bool=true,
+	                                        agg_func::Function=sum)
+		"""
+		Args:
+			edges::DataFrame: edge list with src, dst, and (recommended) weight columns
+			directed::Bool: treat graph as directed; if true, returns C&G total (default = true)
+			agg_func::Function: aggregation for parallel edges (default = sum)
+		Returns:
+			DataFrame: columns [node, weighted_clustering]
+		Notes:
+			- If directed=true: returns Clemente & Grassi (2018) *total* directed weighted clustering.
+			- If directed=false: returns Barrat et al. (2004) undirected weighted clustering.
+			- Loops removed, multi-edges aggregated. Weights are used as given (no rescaling).
+		"""
+
+		#	Validation
+			if !hasproperty(edges, :src) || !hasproperty(edges, :dst)
+				throw(ArgumentError("edges DataFrame must have :src and :dst columns"))
+			end
+
+		#	Directed branch: delegate to C&G (total)
+			if directed
+				df = directed_clustering_cg(edges; isolates=:zero, agg_func=agg_func)
+				rename!(df, :total_cc => :weighted_clustering)
+				select!(df, [:node, :weighted_clustering])
+				return df
+			end
+
+		#	Undirected (Barrat): build symmetric W and binary A
+			clean_edges = _aggregate_multi_edges(edges; agg_func=agg_func)
+			W, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=true)
+
+		#	Symmetrize weights (collapse) and drop self-loops
+			W = max.(W, transpose(W))
+			for i in 1:size(W,1)
+				W[i,i] = 0.0
+			end
+			dropzeros!(W)
+
+		#	Binary adjacency from W
+			A = spzeros(Float64, size(W,1), size(W,2))
+			A[findnz(W)[1], findnz(W)[2]] .= 1.0
+
+		#	Barrat (2004): C_i^w = (diag(W * A * A)) / ( s_i * (k_i - 1) )
+			s = vec(sum(W, dims=2))
+			k = vec(sum(A, dims=2))
+			num = Vector(diagonal(W * A * A))
+			den = s .* (k .- 1)
+
+		#	Safe division (isolates → 0)
+			res = similar(num)
+			@inbounds for i in eachindex(num)
+				if den[i] > 0
+					res[i] = num[i] / den[i]
+				else
+					res[i] = 0.0
+				end
+			end
+
+		#	Result
+			return DataFrame(node = idx_to_node, weighted_clustering = res)
+	end
+	@doc raw"""
+	**Description**
+	Weighted local clustering:
+	- `directed=true`: **Clemente & Grassi (2018)** total directed weighted clustering.
+	- `directed=false`: **Barrat et al. (2004)** undirected weighted clustering.
+
+	**Usage**
+	`weighted_clustering_coefficient(edges::DataFrame; directed::Bool=true, agg_func::Function=sum)`
+
+	**Arguments**
+	- `edges::DataFrame`: Edge list with `:src`, `:dst`, and optional `:weight`.
+	- `directed::Bool`: If `true`, return C&G **total**; if `false`, Barrat (default `true`).
+	- `agg_func::Function`: Aggregation for parallel edges.
+
+	**Notes**
+	- Loops removed; multi-edges aggregated.
+	- Undirected weights are symmetrized via `max(W, W')` before Barrat.
+	- No weight rescaling is performed.
+
+	**Value**
+	A `DataFrame`:
+	- `node`: Node identifiers
+	- `weighted_clustering::Float64`: Local clustering score
+
+	**References**
+	- Barrat, A., Barthélemy, M., Pastor-Satorras, R., & Vespignani, A. (2004).
+	  *The architecture of complex weighted networks*. PNAS, 101(11), 3747–3752.
+	- Clemente, G. P., & Grassi, R. (2018).
+	  *Directed clustering in weighted networks: a new perspective*. Chaos, Solitons & Fractals, 107, 26–38.
+	""" weighted_clustering_coefficient
+
+#	Directed Weighted Clustering (Clemente & Grassi, 2018)
+	function directed_clustering_cg(edges::DataFrame;
+	                                isolates::Symbol = :zero,
+	                                agg_func::Function = sum)
+		"""
+		Args:
+			edges::DataFrame: edge list with :src, :dst, and optional :weight
+			isolates::Symbol: :zero (set NaN denominators to 0) or :NaN (propagate NaN) (default = :zero)
+			agg_func::Function: aggregation for parallel edges (default = sum)
+		Returns:
+			DataFrame: columns [node, cycle_cc, middleman_cc, in_cc, out_cc, total_cc]
+		Notes:
+			Implements Clemente & Grassi (2018) directed, weighted local clustering:
+			- cycle, middleman, in, out, and total components
+			- loops removed; multiedges aggregated via `agg_func`
+			- weights used as provided (no rescaling)
+			- denominators per C&G; entries with nonpositive denom are 0 if isolates=:zero, else NaN
+		"""
+
+		#	Validation
+			if !hasproperty(edges, :src) || !hasproperty(edges, :dst)
+				throw(ArgumentError("edges DataFrame must have :src and :dst columns"))
+			end
+
+		#	Aggregate duplicates
+			clean_edges = _aggregate_multi_edges(edges; agg_func=agg_func)
+
+		#	Build weighted and binary adjacencies (directed)
+			W, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=true)
+			A, _, _ = _edgelist_to_sparse_matrix(clean_edges; weighted=false)
+
+		#	Drop self-loops explicitly
+			n = size(W, 1)
+			for i in 1:n
+				W[i, i] = 0.0
+				A[i, i] = 0.0
+			end
+			dropzeros!(W); dropzeros!(A)
+
+		#	Common vectors/matrices
+			one = ones(Float64, n)
+
+		#	In/Out degree (binary), total degree, bilateral dyads count
+			degin  = vec(transpose(A) * one)              # k_in
+			degout = vec(A * one)                         # k_out
+			dtot   = vec((transpose(A) .+ A) * one)       # k_in + k_out
+			dbil   = Vector(diagonal(A * A))              # sum_j a_ij a_ji
+
+		#	Strengths (weighted): s_in, s_out, s_total
+		#	Note: diag(A' * W) picks incoming edges to i weighted; diag(A * W') picks outgoing weights.
+			sin   = Vector(diagonal(transpose(A) * W))    # s_in
+			sout  = Vector(diagonal(A * transpose(W)))    # s_out
+			stot  = sin .+ sout                           # s_total
+
+		#	Bilateral strength term (C&G): sbil = diag(W*A + A*W)/2
+			sbil = Vector(diagonal(W * A .+ A * W)) ./ 2
+
+		#	Numerators (each is 0.5 * diag(...))
+			WA   = W * A
+			AT   = transpose(A)
+			WT   = transpose(W)
+
+			num_cyc = 0.5 .* Vector(diagonal( W * A * A .+ WT * AT * AT ))
+			num_mid = 0.5 .* Vector(diagonal( WT * A * AT .+ W * AT * A ))
+			num_in  = 0.5 .* Vector(diagonal( WT * (A .+ AT) * A ))
+			num_out = 0.5 .* Vector(diagonal( W * (A .+ AT) * AT ))
+			num_tot = 0.5 .* Vector(diagonal( (W .+ WT) * (A .+ AT) * (A .+ AT) ))
+
+		#	Denominators (C&G)
+			den_cymid = 0.5 .* (sin .* degout .+ sout .* degin) .- sbil
+			den_in    = sin  .* (degin  .- 1)
+			den_out   = sout .* (degout .- 1)
+			den_tot   = stot .* (dtot   .- 1) .- 2 .* sbil
+
+		#	Safe division helper
+			function _safe_div(num::Vector{Float64}, den::Vector{Float64}; isolates::Symbol=:zero)
+				res = similar(num)
+				@inbounds for i in eachindex(num)
+					if den[i] > 0
+						res[i] = num[i] / den[i]
+					else
+						res[i] = (isolates === :zero) ? 0.0 : NaN
+					end
+				end
+				return res
+			end
+
+		#	Per-node coefficients
+			cyc  = _safe_div(num_cyc, den_cymid; isolates=isolates)
+			mid  = _safe_div(num_mid, den_cymid; isolates=isolates)
+			incc = _safe_div(num_in,  den_in;    isolates=isolates)
+			outc = _safe_div(num_out, den_out;   isolates=isolates)
+			totc = _safe_div(num_tot, den_tot;   isolates=isolates)
+
+		#	Result
+			return DataFrame(
+				node = idx_to_node,
+				cycle_cc = cyc,
+				middleman_cc = mid,
+				in_cc = incc,
+				out_cc = outc,
+				total_cc = totc
+			)
+	end
+	@doc raw"""
+	**Description**
+	Directed, weighted local clustering coefficients per Clemente & Grassi (2018), returning the five components:
+	*cycle*, *middleman*, *in*, *out*, and *total*.
+
+	**Usage**
+	`directed_clustering_cg(edges::DataFrame; isolates::Symbol=:zero, agg_func::Function=sum)`
+
+	**Arguments**
+	- `edges::DataFrame`: Edge list with `:src`, `:dst`, and optional `:weight` (weights used as given).
+	- `isolates::Symbol`: `:zero` (default) sets coefficients to 0.0 when denominators are nonpositive; `:NaN` preserves `NaN`.
+	- `agg_func::Function`: Aggregation for parallel edges (default `sum`).
+
+	**Details**
+	- Loops are removed; multi-edges aggregated.
+	- Binary adjacency `A` derives from the presence of an edge.
+	- Strength and degree terms follow the directed in/out definitions in C&G (2018).
+	- Denominators: see paper; we set coefficients to 0 when denominators ≤ 0 and `isolates=:zero`.
+
+	**Value**
+	A `DataFrame` with columns:
+	- `node`, `cycle_cc`, `middleman_cc`, `in_cc`, `out_cc`, `total_cc`.
+
+	**References**
+	- Clemente, G. P., & Grassi, R. (2018). *Directed clustering in weighted networks: a new perspective*. Chaos, Solitons & Fractals, 107, 26–38.
+	""" directed_clustering_cg
 
 #   Local Reciprocity (Fraction of Reciprocated Edges)
 
-#   Influence Centrality Measures
+#   INFLUENCE CENTRALITY MEASURES
 
 #   Component Scaled Page Rank
 
@@ -997,7 +1619,7 @@ module Large_Graph_Similarity
 
 #   Authority Scores
 
-#   Core Decomposition (Considering Using ORA K-Core Decomposition Here)
+#   CORE DECOMPOSITION (Considering Using ORA K-Core Decomposition Here)
 
 #   In-Core Number
 
@@ -1005,7 +1627,7 @@ module Large_Graph_Similarity
 
 #   Combined Core Number
 
-#   Local Reach
+#   LOCAL REACH
 
 #   2-Hop In-Reach (How Many Can Reach this Node in 2 Steps)
 
@@ -1015,7 +1637,7 @@ module Large_Graph_Similarity
 
 #   Sample Triads
 
-#   Component structure
+#   COMPONENT STRUCTURE
 
 #   SCC Size Distribution (Largest & Second Largest)
 
@@ -1031,9 +1653,15 @@ module Large_Graph_Similarity
 
 #   Modularity
 
-#   FEATURE CONSTRUCTORS
+############################
+#   FEATURE CONSTRUCTORS   #
+############################
 
-#   COMPARISON FUNCTIONS
+
+############################
+#   COMPARISON FUNCTIONS   #
+############################
+
 
 
 #   Exporting Objects
@@ -1042,6 +1670,12 @@ module Large_Graph_Similarity
 		   out_degree,
 		   total_degree,
 		   degree_ratio,
-		   freeman_degree_normalization
+		   freeman_degree_normalization,
+		   local_clustering_coefficient,
+		   global_clustering_coefficient,
+           weighted_clustering_coefficient,
+           directed_clustering_cg
+		   
+
 
 end # module julia_env

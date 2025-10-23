@@ -104,7 +104,8 @@
 
 #   Agent x Agent - All-Communication: Total Degree
     println("\n--- Total Degree ---")
-	total_deg = total_degree(agent_agent_all_com.edges; weighted=false)
+	total_deg = total_degree(agent_agent_all_com.edges; weighted=false, drop_self_loops=false,
+							 count_self_loops_once=true)
 	println(total_deg)
 
 #   Agent x Agent - All-Communication: Degree Ratio
@@ -125,7 +126,10 @@
 
 #   Agent x Agent - All-Communication: Weighted Total Degree
 	println("\n--- Weighted Total Degree ---")
-	wgt_total_deg = total_degree(agent_agent_all_com.edges; weighted=true)
+	wgt_total_deg = total_degree(agent_agent_all_com.edges; weighted=true,
+	                      		 normalize=false, agg_func = sum,
+	                      	     ignore_direction=false, drop_self_loops=false,
+								 count_self_loops_once=true)
 	println(wgt_total_deg)
 	wgt_total_deg[(1:10),:]
 
@@ -136,9 +140,10 @@
 	wgt_ratio[(1:10),:]
 
 #   Freeman Normalizations
-	in_deg_norm = in_degree(agent_agent_all_com.edges; weighted=false, normalize=true)
-	out_deg_norm = out_degree(agent_agent_all_com.edges; weighted=false, normalize=true)
-	total_deg_norm = total_degree(agent_agent_all_com.edges; weighted=false, normalize=true)
+	in_deg_norm = in_degree(agent_agent_all_com.edges; weighted=true, normalize=true)
+	out_deg_norm = out_degree(agent_agent_all_com.edges; weighted=true, normalize=true)
+	total_deg_norm = total_degree(agent_agent_all_com.edges; weighted=true, normalize=true, drop_self_loops=false,
+								 count_self_loops_once=true)
 
 #   COMPARE TO ORA
 
@@ -149,13 +154,61 @@
  								"Centrality, In-Degree_Scaled", "Centrality, Total-Degree", "Centrality, In-Degree",
  								"Centrality, Out-Degree"])
 
-#	Comparing In-Degree Scores
-	leftjoin!(all_comm_in_deg, ora_degree_scores[:,[1,6]], on=:node)
-	all_comm_in_deg[!,3] = convert.(Int64, all_comm_in_deg[:,3])
+#	Comparing Weighted In-Degree Scores
+	leftjoin!(all_comm_wgt_in_deg, ora_degree_scores[:,[1,6]], on=:node)
+	all_comm_wgt_in_deg[!,3] = convert.(Int64, all_comm_wgt_in_deg[:,3])
+	all_comm_wgt_in_deg.delta = all_comm_wgt_in_deg[:,2] -  all_comm_wgt_in_deg[:,3]
+	sum(all_comm_wgt_in_deg.delta)
 
-#	COME BACK HERE!!!
+#	Comparing Weighted Out-Degree Scores
+	leftjoin!(wgt_out_deg, ora_degree_scores[:,[1,7]], on=:node)
+	wgt_out_deg[!,3] = convert.(Int64, wgt_out_deg[:,3])
+	wgt_out_deg.delta = wgt_out_deg[:,2] - wgt_out_deg[:,3]
+	sum(wgt_out_deg.delta)
 
+#	Comparing Weighted Total-Degree Scores
+	leftjoin!(wgt_total_deg, ora_degree_scores[:,[1,5]], on=:node)
+	wgt_total_deg[!,3] = convert.(Int64, wgt_total_deg[:,3])
+	wgt_total_deg.delta = wgt_total_deg[:,2] - wgt_total_deg[:,3]
+	sum(wgt_total_deg.delta)
+
+#	Comparing Normalized In-Degree
+	leftjoin!(in_deg_norm, ora_degree_scores[:,[1,4]], on=:node)
+	in_deg_norm[!,3] = convert.(Float64, in_deg_norm[:,3])
+	in_deg_norm.delta = in_deg_norm[:,2] - in_deg_norm[:,3]
+	sum(in_deg_norm.delta)
+
+#	Comparing Normalized Out-Degree
+	leftjoin!(out_deg_norm, ora_degree_scores[:,[1,3]], on=:node)
+	out_deg_norm[!,3] = convert.(Float64, out_deg_norm[:,3])
+	out_deg_norm.delta = out_deg_norm[:,2] - out_deg_norm[:,3]
+	sum(out_deg_norm.delta)
+
+#	Comparing Normalized Total-Degree
+	leftjoin!(total_deg_norm, ora_degree_scores[:,[1,2]], on=:node)
+	total_deg_norm[!,3] = convert.(Float64, total_deg_norm[:,3])
+	total_deg_norm.delta = total_deg_norm[:,2] - total_deg_norm[:,3]
+	sum(total_deg_norm.delta)
 
 ######################################
 #   MEASURE TESTS: LOCAL STRUCTURE   #
 ######################################
+
+#   CALCULATE LOCAL STRUCTURE MESURES
+
+#	Local Clustering Coefficient: Watts DJ, Strogatz SH (1998)
+
+#	Global Clustering Coefficient
+
+#	Weighted Global Clustering Coefficient: Barrat et al. (2004)
+
+#	Directed Weighted Clustering (Clemente & Grassi, 2018)
+
+#   Local Reciprocity (Fraction of Reciprocated Edges)
+
+#   COMPARISON TESTS
+
+
+####################################################
+#   MEASURE TESTS: INFLUENCE CENTRALITY MEASURES   #
+####################################################
