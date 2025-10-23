@@ -90,6 +90,8 @@
 #   MEASURE TESTS: DEGREE MEASURES   #
 ######################################
 
+#	CALCULATE DEGREE MEASURES
+
 #   Agent x Agent - All-Communication: In-Degree
     println("\n--- In-Degree ---")
 	all_comm_in_deg = in_degree(agent_agent_all_com.edges; weighted=false)
@@ -111,16 +113,48 @@
 	println(ratio)
    
 #   Agent x Agent - All-Communication: Weighted In-Degree
+	println("\n--- Weighted In-Degree ---")
+	all_comm_wgt_in_deg = in_degree(agent_agent_all_com.edges; weighted=true)
+	println(all_comm_wgt_in_deg)
 
 #   Agent x Agent - All-Communication: Weighted Out-Degree
+	println("\n--- Weighted Out-Degree ---")
+	wgt_out_deg = out_degree(agent_agent_all_com.edges; weighted=true)
+	println(wgt_out_deg)
+	wgt_out_deg[(1:10),:]
 
 #   Agent x Agent - All-Communication: Weighted Total Degree
+	println("\n--- Weighted Total Degree ---")
+	wgt_total_deg = total_degree(agent_agent_all_com.edges; weighted=true)
+	println(wgt_total_deg)
+	wgt_total_deg[(1:10),:]
 
 #   Agent x Agent - All-Communication: Weighted Degree Ratio
+	println("\n--- Weighted Degree Ratio ---")
+	wgt_ratio = degree_ratio(agent_agent_all_com.edges; weighted=true)
+	println(wgt_ratio)
+	wgt_ratio[(1:10),:]
 
 #   Freeman Normalizations
+	in_deg_norm = in_degree(agent_agent_all_com.edges; weighted=false, normalize=true)
+	out_deg_norm = out_degree(agent_agent_all_com.edges; weighted=false, normalize=true)
+	total_deg_norm = total_degree(agent_agent_all_com.edges; weighted=false, normalize=true)
 
-#   Compare to ORA
+#   COMPARE TO ORA
+
+#	Import ORA Degree Scores
+	file_location = "/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data/Agent_Agent_AllCommunication_DegreeMeasures.csv"
+	ora_degree_scores = CSV.read(file_location, DataFrame; types=Dict(1 => String))
+	rename!(ora_degree_scores, ["node", "Centrality, Total-Degree_Scale", "Centrality, Out-Degree_Scaled",
+ 								"Centrality, In-Degree_Scaled", "Centrality, Total-Degree", "Centrality, In-Degree",
+ 								"Centrality, Out-Degree"])
+
+#	Comparing In-Degree Scores
+	leftjoin!(all_comm_in_deg, ora_degree_scores[:,[1,6]], on=:node)
+	all_comm_in_deg[!,3] = convert.(Int64, all_comm_in_deg[:,3])
+
+#	COME BACK HERE!!!
+
 
 ######################################
 #   MEASURE TESTS: LOCAL STRUCTURE   #

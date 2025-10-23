@@ -4,6 +4,7 @@ module Large_Graph_Similarity
     using DataFrames
     using Dates
 	using EzXML
+	using LinearAlgebra
 	using SparseArrays
 
 #   UTLITIES
@@ -454,6 +455,47 @@ module Large_Graph_Similarity
 			return grouped
 	end
 
+#	Helper Function for freeman_degree_normalization: symmetry check
+	function _is_symmetric(adj::SparseMatrixCSC{<:Real,Int}; directed::Bool=true, atol::Float64=1e-12)
+		#	Validation
+			if size(adj, 1) != size(adj, 2)
+				throw(ArgumentError("Adjacency must be square"))
+			end
+
+		#	Undirected => symmetric by convention
+			if !directed
+				return true
+			end
+
+		#	Numerical symmetry check
+			delta = adj - adj'
+			return LinearAlgebra.norm(delta, 1) <= atol
+	end
+
+#	Helper Function for freeman_degree_normalization: bipartite mode counts
+	function _bipartite_counts(types::AbstractVector{Bool})
+		"""
+		Args:
+			types::AbstractVector{Bool}: vertex modes; true = first mode, false = second
+		Returns:
+			Tuple{Int,Int}: (first_mode_count, second_mode_count)
+		Notes:
+			Aligns with Python reference where counts are derived from V(type).
+		"""
+
+		#	Validation
+			if isempty(types)
+				throw(ArgumentError("types vector must not be empty"))
+			end
+
+		#	Count modes
+			first_mode = count(types)
+			second_mode = length(types) - first_mode
+
+		#	Return counts
+			return (first_mode, second_mode)
+	end
+
 #   IMPORT FUNCTIONS
 
 #   ORA Meta-Network Import Function
@@ -564,7 +606,7 @@ module Large_Graph_Similarity
 
 #   Degree Measures 
 
-#   In-Degree
+#	In-Degree
 	function in_degree(edges::DataFrame; 
 	                   weighted::Bool=true, 
 	                   normalize::Bool=false,
@@ -573,55 +615,44 @@ module Large_Graph_Similarity
 		Args:
 			edges::DataFrame: edge list with src, dst, and optionally weight columns
 			weighted::Bool: use edge weights if available (default = true)
-			normalize::Bool: normalize by max possible degree (default = false)
+			normalize::Bool: if true, returns Freeman-normalized in-degree via freeman_degree_normalization (default = false)
 			agg_func::Function: function to aggregate multi-edges (default = sum)
 		Returns:
 			DataFrame: columns [node, in_degree]
 		Notes:
-			In-degree is the sum of weights of incoming edges.
-			Matrix approach: column sums of adjacency matrix.
+			When normalize=false: in-degree is the sum of weights of incoming edges (column sums).
+			When normalize=true: uses freeman_degree_normalization(...; mode=:in, directed=true) and renames the score to :in_degree.
 		"""
-		
+
 		#	Validation
 			if !hasproperty(edges, :src) || !hasproperty(edges, :dst)
 				throw(ArgumentError("edges DataFrame must have src and dst columns"))
 			end
-		
+
 		#	Handle empty edge list
 			if nrow(edges) == 0
 				return DataFrame(node=[], in_degree=Float64[])
 			end
-		
+
 		#	Aggregate multi-edges
 			clean_edges = _aggregate_multi_edges(edges; agg_func=agg_func)
-		
-		#	Build adjacency matrix
-			adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=weighted)
-		
-		#	Calculate in-degree as column sums
-			in_deg_values = vec(sum(adj, dims=1))
-		
-		#	Normalize if requested
+
+		#	Normalized path: delegate to Freeman with mode=:in
 			if normalize
-				#	Maximum possible in-degree is (n-1) * max_weight
-					n = length(idx_to_node)
-					max_weight = weighted && hasproperty(clean_edges, :weight) ? 
-					            maximum(clean_edges.weight) : 1.0
-					max_degree = (n - 1) * max_weight
-					if max_degree > 0
-						in_deg_values = in_deg_values ./ max_degree
-					end
+				df = freeman_degree_normalization(clean_edges; mode=:in, directed=true, bipartite=false, weighted=weighted, agg_func=agg_func)
+				rename!(df, :freeman_degree => :in_degree)
+				return df
 			end
-		
+
+		#	Unnormalized path: build adjacency and sum columns
+			adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=weighted)
+			in_deg_values = vec(sum(adj, dims=1))
+
 		#	Assembling Result
-			result = DataFrame(
-				node = idx_to_node,
-				in_degree = in_deg_values
-			)
-			return result
+			return DataFrame(node = idx_to_node, in_degree = in_deg_values)
 	end
 
-#   Out-Degree
+#	Out-Degree
 	function out_degree(edges::DataFrame; 
 	                    weighted::Bool=true, 
 	                    normalize::Bool=false,
@@ -630,55 +661,44 @@ module Large_Graph_Similarity
 		Args:
 			edges::DataFrame: edge list with src, dst, and optionally weight columns
 			weighted::Bool: use edge weights if available (default = true)
-			normalize::Bool: normalize by max possible degree (default = false)
+			normalize::Bool: if true, returns Freeman-normalized out-degree via freeman_degree_normalization (default = false)
 			agg_func::Function: function to aggregate multi-edges (default = sum)
 		Returns:
 			DataFrame: columns [node, out_degree]
 		Notes:
-			Out-degree is the sum of weights of outgoing edges.
-			Matrix approach: row sums of adjacency matrix.
+			When normalize=false: out-degree is the sum of weights of outgoing edges (row sums).
+			When normalize=true: uses freeman_degree_normalization(...; mode=:out, directed=true) and renames the score to :out_degree.
 		"""
-		
+
 		#	Validation
 			if !hasproperty(edges, :src) || !hasproperty(edges, :dst)
 				throw(ArgumentError("edges DataFrame must have src and dst columns"))
 			end
-		
+
 		#	Handle empty edge list
 			if nrow(edges) == 0
 				return DataFrame(node=[], out_degree=Float64[])
 			end
-		
+
 		#	Aggregate multi-edges
 			clean_edges = _aggregate_multi_edges(edges; agg_func=agg_func)
-		
-		#	Build adjacency matrix
-			adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=weighted)
-		
-		#	Calculate out-degree as row sums
-			out_deg_values = vec(sum(adj, dims=2))
-		
-		#	Normalize if requested
+
+		#	Normalized path: delegate to Freeman with mode=:out
 			if normalize
-				#	Maximum possible out-degree is (n-1) * max_weight
-					n = length(idx_to_node)
-					max_weight = weighted && hasproperty(clean_edges, :weight) ? 
-					            maximum(clean_edges.weight) : 1.0
-					max_degree = (n - 1) * max_weight
-					if max_degree > 0
-						out_deg_values = out_deg_values ./ max_degree
-					end
+				df = freeman_degree_normalization(clean_edges; mode=:out, directed=true, bipartite=false, weighted=weighted, agg_func=agg_func)
+				rename!(df, :freeman_degree => :out_degree)
+				return df
 			end
-		
+
+		#	Unnormalized path: build adjacency and sum rows
+			adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=weighted)
+			out_deg_values = vec(sum(adj, dims=2))
+
 		#	Assembling Result
-			result = DataFrame(
-				node = idx_to_node,
-				out_degree = out_deg_values
-			)
-			return result
+			return DataFrame(node = idx_to_node, out_degree = out_deg_values)
 	end
 
-#   Total Degree
+#	Total Degree
 	function total_degree(edges::DataFrame; 
 	                      weighted::Bool=true, 
 	                      normalize::Bool=false,
@@ -688,84 +708,68 @@ module Large_Graph_Similarity
 		Args:
 			edges::DataFrame: edge list with src, dst, and optionally weight columns
 			weighted::Bool: use edge weights if available (default = true)
-			normalize::Bool: normalize by max possible degree (default = false)
+			normalize::Bool: if true, returns Freeman-normalized total-degree via freeman_degree_normalization (default = false)
 			agg_func::Function: function to aggregate multi-edges (default = sum)
-			ignore_direction::Bool: treat as undirected graph (default = false)
+			ignore_direction::Bool: if true, treat as undirected for the total metric
 		Returns:
 			DataFrame: columns [node, total_degree]
 		Notes:
-			Total degree is in-degree + out-degree.
-			For undirected interpretation, counts each edge once.
-			Matrix approach: row sums + column sums (or symmetrized matrix).
+			When normalize=true: delegates to freeman_degree_normalization(...; mode=:all, directed = !ignore_direction).
+			When normalize=false:
+				- ignore_direction=false: total = in-degree + out-degree.
+				- ignore_direction=true: symmetrizes edges (max(A,A')) and returns degree from the symmetric matrix.
 		"""
-		
+
 		#	Validation
 			if !hasproperty(edges, :src) || !hasproperty(edges, :dst)
 				throw(ArgumentError("edges DataFrame must have src and dst columns"))
 			end
-		
+
 		#	Handle empty edge list
 			if nrow(edges) == 0
 				return DataFrame(node=[], total_degree=Float64[])
 			end
-		
+
 		#	Aggregate multi-edges
 			clean_edges = _aggregate_multi_edges(edges; agg_func=agg_func)
-		
-		#	Handle undirected case
+
+		#	Normalized path: delegate to Freeman with mode=:all
+			if normalize
+				#	Here we control the symmetry interpretation via `directed`
+					df = freeman_degree_normalization(clean_edges; mode=:all, directed = !ignore_direction, bipartite=false, weighted=weighted, agg_func=agg_func)
+				#	Freeman returns :freeman_degree; rename to :total_degree
+					rename!(df, :freeman_degree => :total_degree)
+					return df
+			end
+
+		#	Unnormalized path (original behavior)
 			if ignore_direction
 				#	Symmetrize edge list
-					edges_reversed = DataFrame(
-						src = clean_edges.dst,
-						dst = clean_edges.src
-					)
+					edges_reversed = DataFrame(src = clean_edges.dst, dst = clean_edges.src)
 					if hasproperty(clean_edges, :weight)
 						edges_reversed.weight = clean_edges.weight
 					end
-					
-				#	Combine and re-aggregate
 					combined_edges = vcat(clean_edges, edges_reversed)
 					clean_edges = _aggregate_multi_edges(combined_edges; agg_func=maximum)
 			end
-		
-		#	Build adjacency matrix
+
+		#	Build adjacency
 			adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=weighted)
-		
-		#	Calculate total degree
+
+		#	Compute totals
 			if ignore_direction
-				#	For undirected, use symmetrized matrix
+				#	Degree on symmetric matrix counts each undirected edge once
 					adj_sym = max.(adj, adj')
-				#	Degree is row sum (or column sum) of symmetric matrix
 					total_deg_values = vec(sum(adj_sym, dims=1))
 			else
-				#	For directed, sum in-degree and out-degree
+				#	Directed: in + out
 					in_deg = vec(sum(adj, dims=1))
 					out_deg = vec(sum(adj, dims=2))
 					total_deg_values = in_deg .+ out_deg
 			end
-		
-		#	Normalize if requested
-			if normalize
-				#	Maximum possible total degree
-					n = length(idx_to_node)
-					max_weight = weighted && hasproperty(clean_edges, :weight) ? 
-					            maximum(clean_edges.weight) : 1.0
-					if ignore_direction
-						max_degree = (n - 1) * max_weight
-					else
-						max_degree = 2 * (n - 1) * max_weight
-					end
-					if max_degree > 0
-						total_deg_values = total_deg_values ./ max_degree
-					end
-			end
-		
+
 		#	Assembling Result
-			result = DataFrame(
-				node = idx_to_node,
-				total_degree = total_deg_values
-			)
-			return result
+			return DataFrame(node = idx_to_node, total_degree = total_deg_values)
 	end
 
 #   In/Out Degree Ratio
@@ -806,7 +810,178 @@ module Large_Graph_Similarity
 			return result
 	end
 
-#	Freeman Degree Normalization
+#	Freeman Degree Normalization (edges → sparse; uni/bipartite; directed/undirected)
+	function freeman_degree_normalization(edges::DataFrame;
+	                                      mode::Symbol = :all,
+	                                      directed::Bool = true,
+	                                      bipartite::Bool = false,
+	                                      types::Union{Nothing,AbstractVector{Bool}} = nothing,
+	                                      weighted::Bool = true,
+	                                      agg_func::Function = sum,
+	                                      atol::Float64 = 1e-12)
+		"""
+		Args:
+			edges::DataFrame: edge list with :src, :dst, and optional :weight
+			mode::Symbol: :all | :out | :in (default = :all)
+			directed::Bool: treat network as directed (default = true)
+			bipartite::Bool: indicate bipartite network; requires `types` (default = false)
+			types::Union{Nothing,AbstractVector{Bool}}: node-mode flags aligned to node order (true = first mode)
+			weighted::Bool: use edge weights if available (default = true)
+			agg_func::Function: aggregation for parallel edges (default = sum)
+			atol::Float64: tolerance for symmetry test when `directed=true` (default = 1e-12)
+		Returns:
+			DataFrame: columns [node, freeman_degree]
+		Notes:
+			Builds a (possibly weighted) sparse adjacency via existing helpers, then applies
+			Freeman's normalization. Matches the Python reference behavior for symmetry,
+			denominators, and (optionally) bipartite handling.
+		"""
+
+		#	Validation
+			if !hasproperty(edges, :src) || !hasproperty(edges, :dst)
+				throw(ArgumentError("edges must have :src and :dst columns"))
+			end
+			if !(mode in (:all, :out, :in))
+				throw(ArgumentError("mode must be :all, :out, or :in"))
+			end
+			if nrow(edges) == 0
+				return DataFrame(node=Any[], freeman_degree=Float64[])
+			end
+
+		#	Aggregate multi-edges via existing helper
+			clean_edges = _aggregate_multi_edges(edges; agg_func=agg_func)
+
+		#	Build sparse adjacency and node order via existing helper
+			adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=weighted)
+
+		#	Compute marginals and diagonal
+			row_sums = vec(sum(adj, dims=2))               # out-strength
+			col_sums = vec(sum(adj, dims=1))               # in-strength
+			diagonal = collect(diag(adj))                  # ensure a dense Vector{<:Real}
+
+		#	Determine V (max edge weight if weighted; else 1.0)
+			V = (weighted && hasproperty(clean_edges, :weight) && !isempty(clean_edges.weight)) ?
+			    maximum(clean_edges.weight) : 1.0
+
+		#	Symmetry detection (directed-but-symmetric allowed)
+			is_sym = _is_symmetric(adj; directed=directed, atol=atol)
+
+		#	Determine N & R (bipartite or unimodal)
+			n = size(adj, 1)
+
+		#	Initialize defaults (unimodal)
+			N = n
+			R = n
+
+		#	Override for bipartite if requested
+			if bipartite
+				if types === nothing
+					throw(ArgumentError("bipartite=true requires a `types::Vector{Bool}`"))
+				end
+				if length(types) != n
+					throw(ArgumentError("length(types) must equal number of nodes ($n)"))
+				end
+				first_mode, second_mode = _bipartite_counts(types)
+				R = first_mode
+				N = second_mode
+			end
+
+		#	Edge cases: insufficient neighbors
+			if N ≤ 1
+				return DataFrame(node = idx_to_node, freeman_degree = zeros(Float64, n))
+			end
+
+		#	Apply Freeman denominators by mode
+			numerator = zeros(Float64, n)
+			denom = 0.0
+			if mode == :all
+				#	Total-degree numerator
+					numerator .= row_sums .+ col_sums .- diagonal
+				#	Denominator by symmetry
+					denom = is_sym ? (V * (N - 1)) : (2 * V * (N - 1))
+			elseif mode == :out
+				#	Out-degree numerator
+					numerator .= row_sums
+				#	Denominator by symmetry
+					denom = is_sym ? (V * (N - 1)) : (V * N)
+			else
+				#	In-degree numerator
+					numerator .= col_sums
+				#	Denominator by symmetry
+					denom = is_sym ? (V * (N - 1)) : (V * N)
+			end
+
+		#	Protect against zero denominator
+			if denom == 0.0
+				return DataFrame(node = idx_to_node, freeman_degree = zeros(Float64, n))
+			end
+
+		#	Compute normalized scores
+			scores = numerator ./ denom
+
+		#	Assembling Result
+			return DataFrame(node = idx_to_node, freeman_degree = scores)
+	end
+	@doc raw"""
+	**Description**
+	Compute Freeman-normalized degree centrality from an edge list using your sparse-matrix helpers. Supports weighted/unweighted, directed/undirected, and optional bipartite mode counts.
+
+	**Usage**
+	`freeman_degree_normalization(edges::DataFrame; mode::Symbol=:all, directed::Bool=true, bipartite::Bool=false, types::Union{Nothing,AbstractVector{Bool}}=nothing, weighted::Bool=true, agg_func::Function=sum, atol::Float64=1e-12)`
+
+	**Arguments**
+	- `edges::DataFrame`: Edge list with `:src`, `:dst`, and optional `:weight`.
+	- `mode::Symbol`: One of `:all`, `:out`, or `:in` (default `:all`).
+	- `directed::Bool`: Treat the network as directed (default `true`).
+	- `bipartite::Bool`: If `true`, use bipartite mode counts; requires `types` (default `false`).
+	- `types::Union{Nothing,AbstractVector{Bool}}`: Node-mode flags (aligned to node order; `true` = first mode).
+	- `weighted::Bool`: Use edge weights if available (default `true`).
+	- `agg_func::Function`: Aggregation for parallel edges (default `sum`).
+	- `atol::Float64`: Tolerance for symmetry when `directed=true` (default `1e-12`).
+
+	**Details**
+	The function:
+	1. Aggregates parallel edges (`agg_func`) and builds a sparse adjacency with `_edgelist_to_sparse_matrix`.
+	2. Computes row sums (out-strength), column sums (in-strength), and diagonal (self-loops).
+	3. Sets `V` to the maximum edge weight if weighted, else `1.0`.
+	4. Detects symmetry. Undirected graphs are treated as symmetric; directed-but-symmetric is allowed.
+	5. Determines `N` and `R`. If `bipartite=true`, `types` provides first/second mode counts; otherwise `N=R=n`.
+	6. Applies Freeman denominators:
+	- `:all`: numerator = out + in − self; symmetric → `V*(N−1)`, asymmetric → `2*V*(N−1)`.
+	- `:out`: numerator = out; symmetric → `V*(N−1)`, asymmetric → `V*N`.
+	- `:in`: numerator = in; symmetric → `V*(N−1)`, asymmetric → `V*N`.
+
+	Edge cases: If `N ≤ 1` or the denominator is zero, returns zeros of appropriate length.
+
+	**Value**
+	A `DataFrame` with:
+	- `node`: Node identifiers (same order as produced by `_edgelist_to_sparse_matrix`).
+	- `freeman_degree::Vector{Float64}`: Normalized degree centrality scores.
+
+	**Examples**
+	```julia
+	using DataFrames, SparseArrays
+
+	#	Undirected, unweighted triangle
+		edges = DataFrame(src=[1,2,3], dst=[2,3,1])
+		scores = freeman_degree_normalization(edges; mode=:all, directed=false)
+		@show scores
+
+	#	Directed with weights
+		edges_w = DataFrame(src=[1,1,2], dst=[2,3,3], weight=[2.0, 1.0, 1.5])
+		scores_out = freeman_degree_normalization(edges_w; mode=:out, directed=true, weighted=true)
+		@show scores_out
+
+	#	Bipartite (types must align with node order from helper)
+		# Suppose nodes appear in order [A,B,C,D,E] with types [true,true,true,false,false]
+		edges_bi = DataFrame(src=["A","B","C","B"], dst=["D","D","E","E"])
+		types = [true,true,true,false,false]
+		scores_in = freeman_degree_normalization(edges_bi; mode=:in, directed=false, bipartite=true, types=types)
+		@show scores_in
+
+	**References**
+	Freeman, L. C. (1978). Centrality in social networks conceptual clarification. Social Networks, 1(3), 215–239.
+	""" freeman_degree_normalization
 
 #   Local structure
 
@@ -866,6 +1041,7 @@ module Large_Graph_Similarity
 		   in_degree,
 		   out_degree,
 		   total_degree,
-		   degree_ratio
-   
+		   degree_ratio,
+		   freeman_degree_normalization
+
 end # module julia_env
