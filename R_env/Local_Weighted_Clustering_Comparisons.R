@@ -24,6 +24,14 @@
   ROUND    <- 6                                       # rounding for display
   OUT_CSV  <- "clustering_comparison.csv"
   
+################################################
+#   IMPORT AGENT X AGENT - ALL-COMMUNICATION   #
+################################################
+
+# Import & Check Graph
+  all_comm <- igraph::read_graph("D:/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data/agent_agent_all_communication.graphml", format = "graphml")
+  summary(all_comm)
+  
 ################
 #   PACKAGES   #
 ################
@@ -68,6 +76,16 @@ suppressPackageStartupMessages({
   comb <- list(weight = "max")
   g_undir <- as_undirected(g_dir, mode = "collapse", edge.attr.comb = comb)
   A_undir <- as.matrix(as_adjacency_matrix(g_undir, sparse = FALSE, attr = "weight"))
+  
+##############################
+#   CALCULATING TRANSIVITY   #
+##############################
+
+# Calculating Classic Transitivity Measure
+  igraph::transitivity(all_comm, type ="global")
+  
+# Calculating Local
+  igraph::transitivity(all_comm, type ="localaverage")
 
 #################################################
 #   CALCULATING LOCAL CLUSTERING COEFFICIENTS   #
