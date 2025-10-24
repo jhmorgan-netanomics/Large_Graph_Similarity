@@ -697,11 +697,19 @@
 
 	ora_local_clustering = CSV.read("/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data/Density_Local_Clustering.csv", DataFrame; types=Dict(1 => String))
 	ora_local_clustering = ora_local_clustering[:,(1:3)]
+	rename!(ora_local_clustering, ["node", "screen_name", "clusteringCoefficient-1-Balikatan_2022"])
 
 #	Construct CG Clustering Toy Graph
 	test_edges = DataFrame(src = ["A","A","B","B","C","D","E"], dst = ["B","C","C","D","A","A","B"],
       				       weight = [1.0, 5.0, 2.0, 3.0, 1.0, 4.0, 1.0])
 
+#	Local Clustering
+	leftjoin!(strogatz_local_clustering, ora_local_clustering, on=:node)
+	strogatz_local_clustering = strogatz_local_clustering[:,[1,3,4,2]]
+	strogatz_local_clustering[!,3] = convert.(Float64, strogatz_local_clustering[:,3])
+	strogatz_local_clustering.delta = strogatz_local_clustering[:,3] .- strogatz_local_clustering[:,4] 
+
+#	Weighted Directed Clustering
 	julia_results = weighted_clustering_coefficient(test_edges; directed=true, agg_func=sum)
 	delta_scores = DataFrame(cg_cycle_delta = wgt_local_clustering.cg_cycle .- julia_results.cg_cycle,
 							 cg_middleman_delta = wgt_local_clustering.cg_middleman .- julia_results.cg_middleman,
@@ -710,10 +718,13 @@
 							 cg_total_delta = wgt_local_clustering.cg_total .- julia_results.cg_total,
 							 barrat_local_delta = wgt_local_clustering.barrat_local .- julia_results.barrat_local)
 
-	weighted_clustering_coefficient(edges; directed=false, agg_func=sum)
+	weighted_clustering_coefficient(test_edges; directed=false, agg_func=sum)
 
-  
-
+#	TO DO:
+#	1) Investigate source of Local Clustering Differences
+#	2) Perform Weighted Directed Clustering Coeffiecent Test in R on the Agent x Agent -All Communication Network to Make supported
+#      the differences are at the same scale as the Toy example.
+#	3) Implement Local Reciprocity (Fraction of Reciprocated Edges) Measure
 
 ####################################################
 #   MEASURE TESTS: INFLUENCE CENTRALITY MEASURES   #
