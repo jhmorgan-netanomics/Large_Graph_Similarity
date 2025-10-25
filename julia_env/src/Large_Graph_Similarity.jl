@@ -1148,7 +1148,7 @@ module Large_Graph_Similarity
 			DataFrame: columns [node, clustering_coefficient]
 		Notes:
 			Computes local clustering coefficient for each node.
-			Method :density matches ORA's approach (ego network density).
+			Method :density matches ORA's approach (includes self-loops).
 			Method :transitivity uses triangle counting.
 		"""
 		
@@ -1198,19 +1198,19 @@ module Large_Graph_Similarity
 						neighbor_indices = 2:length(neighbors)+1  # Skip ego at index 1
 						neighbor_subnet = ego_subnet[neighbor_indices, neighbor_indices]
 						
-					#	Count edges between neighbors
+					#	Count edges between neighbors (including self-loops)
 						if weighted
 							edge_sum = sum(neighbor_subnet)
 						else
 							edge_sum = nnz(neighbor_subnet)
 						end
 						
-					#	Maximum possible edges
+					#	Maximum possible edges (ORA includes self-loops)
 						k = length(neighbors)
 						if directed
-							max_edges = k * (k - 1)
+							max_edges = k * k  # Changed from k*(k-1) to match ORA
 						else
-							max_edges = k * (k - 1) / 2
+							max_edges = k * (k + 1) / 2  # Changed to include self-loops
 						end
 						
 					#	Clustering coefficient is the density

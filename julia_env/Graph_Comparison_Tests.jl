@@ -534,6 +534,282 @@
 	Seidman, S. B. (1983). Network structure and minimum degree. Social Networks, 5(3), 269–287. (k-core)
 	""" transitivity_after_kcore
 
+#	Helper Function for local_clustering_coefficient: extract ego network with diagnostics
+	function _extract_ego_network_debug(adj::SparseMatrixCSC, node_idx::Int; directed::Bool=true)
+		"""
+		Args:
+			adj::SparseMatrixCSC: adjacency matrix
+			node_idx::Int: index of ego node
+			directed::Bool: whether graph is directed
+		Returns:
+			Tuple: (neighbors, ego_subnet, ego_edges_info)
+		Notes:
+			Enhanced version that returns diagnostic information.
+		"""
+		
+		#	Get neighbors based on direction
+			if directed
+				out_neighbors = findall(!iszero, adj[node_idx, :])
+				in_neighbors = findall(!iszero, adj[:, node_idx])
+				neighbors = unique(vcat(out_neighbors, in_neighbors))
+			else
+				neighbors = findall(!iszero, adj[node_idx, :])
+			end
+			
+		#	Remove self-loops
+			filter!(n -> n != node_idx, neighbors)
+			
+		#	Build ego network submatrix
+			ego_nodes = vcat([node_idx], neighbors)
+			ego_subnet = adj[ego_nodes, ego_nodes]
+			
+		#	Count different edge types
+			n_neighbors = length(neighbors)
+			edges_from_ego = nnz(adj[node_idx, neighbors])
+			edges_to_ego = nnz(adj[neighbors, node_idx])
+			edges_between_neighbors = nnz(adj[neighbors, neighbors])
+			
+		#	Diagnostic info
+			ego_edges_info = Dict(
+				"n_neighbors" => n_neighbors,
+				"edges_from_ego" => edges_from_ego,
+				"edges_to_ego" => edges_to_ego,
+				"edges_between_neighbors" => edges_between_neighbors,
+				"total_ego_edges" => edges_from_ego + edges_to_ego + edges_between_neighbors
+			)
+			
+		#	Return results
+			return neighbors, ego_subnet, ego_edges_info
+	end
+
+#	Local Clustering Coefficient with ORA-compatible calculation
+	function local_clustering_coefficient_ora(edges::DataFrame;
+	                                          directed::Bool=true,
+	                                          weighted::Bool=false,
+	                                          include_ego_edges::Bool=false,
+	                                          ora_method::Symbol=:standard,
+	                                          agg_func::Function=sum)
+		"""
+		Args:
+			edges::DataFrame: edge list with src, dst, and optionally weight columns
+			directed::Bool: treat graph as directed (default = true)
+			weighted::Bool: use edge weights (default = false, uses binary)
+			include_ego_edges::Bool: include edges to/from ego in density (default = false)
+			ora_method::Symbol: :standard, :double_denom, :with_selfloops, :half_triangles
+			agg_func::Function: aggregation for parallel edges (default = sum)
+		Returns:
+			DataFrame: columns [node, clustering_coefficient, debug_info]
+		Notes:
+			Tests different ORA calculation methods:
+			- :standard = k*(k-1)
+			- :double_denom = 2*k*(k-1)  
+			- :with_selfloops = k*k
+			- :half_triangles = counts partial triangles as 0.5
+		"""
+		
+		#	Validation
+			if !hasproperty(edges, :src) || !hasproperty(edges, :dst)
+				throw(ArgumentError("edges DataFrame must have src and dst columns"))
+			end
+		
+		#	Handle empty edge list
+			if nrow(edges) == 0
+				return DataFrame(node=[], clustering_coefficient=Float64[], debug_info=[])
+			end
+		
+		#	Aggregate multi-edges
+			clean_edges = _aggregate_multi_edges(edges; agg_func=agg_func)
+		
+		#	Build adjacency matrix
+			adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=false)
+		
+		#	Initialize results
+			n = length(idx_to_node)
+			clustering_values = zeros(Float64, n)
+			debug_info = Vector{Dict{String,Any}}(undef, n)  # Changed to Dict{String,Any}
+		
+		#	Calculate clustering coefficient for each node
+			for i in 1:n
+				#	Extract ego network with diagnostics
+					neighbors, ego_subnet, ego_edges_info = _extract_ego_network_debug(adj, i; directed=directed)
+					
+				#	Convert to Any type dict for flexibility
+					debug_dict = Dict{String,Any}()
+					for (k, v) in ego_edges_info
+						debug_dict[k] = v
+					end
+					
+				#	Skip if insufficient neighbors
+					k = length(neighbors)
+					if k < 2
+						clustering_values[i] = 0.0
+						debug_dict["method"] = string(ora_method)
+						debug_dict["max_edges"] = 0
+						debug_dict["actual_edges"] = 0
+						debug_info[i] = debug_dict
+						continue
+					end
+					
+				#	Get actual edges count
+					actual_edges = Float64(ego_edges_info["edges_between_neighbors"])
+					
+				#	Calculate max edges based on method
+					if ora_method == :standard
+						#	Standard directed/undirected
+							if directed
+								max_edges = k * (k - 1)
+							else
+								max_edges = k * (k - 1) / 2
+							end
+							
+					elseif ora_method == :double_denom
+						#	Double denominator for directed
+							if directed
+								max_edges = 2 * k * (k - 1)
+							else
+								max_edges = k * (k - 1)
+							end
+							
+					elseif ora_method == :with_selfloops
+						#	Include self-loops in max count
+							if directed
+								max_edges = k * k
+							else
+								max_edges = k * (k + 1) / 2
+							end
+							
+					elseif ora_method == :half_triangles
+						#	Count partial triangles as 0.5
+							if directed
+								#	Check for complete vs partial triangles
+									complete_triangles = 0
+									partial_triangles = 0
+									for ni in 1:k
+										for nj in (ni+1):k
+											n_i = neighbors[ni]
+											n_j = neighbors[nj]
+											edge_ij = adj[n_i, n_j] > 0
+											edge_ji = adj[n_j, n_i] > 0
+											if edge_ij && edge_ji
+												complete_triangles += 2
+											elseif edge_ij || edge_ji
+												partial_triangles += 1
+											end
+										end
+									end
+									actual_edges = complete_triangles + 0.5 * partial_triangles
+								max_edges = k * (k - 1)
+							else
+								max_edges = k * (k - 1) / 2
+							end
+							
+					else
+						throw(ArgumentError("Unknown ora_method: $ora_method"))
+					end
+					
+				#	Include ego edges if requested
+					if include_ego_edges
+						#	Add edges to/from ego
+							total_nodes = k + 1
+							if directed
+								max_edges = total_nodes * (total_nodes - 1)
+							else
+								max_edges = total_nodes * (total_nodes - 1) / 2
+							end
+							actual_edges = Float64(ego_edges_info["total_ego_edges"])
+					end
+					
+				#	Calculate clustering
+					if max_edges > 0
+						clustering_values[i] = actual_edges / max_edges
+					else
+						clustering_values[i] = 0.0
+					end
+					
+				#	Add method info to debug
+					debug_dict["method"] = string(ora_method)
+					debug_dict["max_edges"] = max_edges
+					debug_dict["actual_edges"] = actual_edges
+					debug_info[i] = debug_dict
+			end
+		
+		#	Assembling Result
+			result = DataFrame(
+				node = idx_to_node,
+				clustering_coefficient = clustering_values,
+				debug_info = debug_info
+			)
+			return result
+	end
+
+#	Diagnostic Function for Special Nodes
+	function diagnose_node_clustering(edges::DataFrame, node_id::String; directed::Bool=true)
+		"""
+		Args:
+			edges::DataFrame: edge list
+			node_id::String: node to diagnose
+			directed::Bool: graph directionality
+		Returns:
+			Dict: detailed diagnostics
+		Notes:
+			Helps identify why a node's clustering differs from ORA.
+		"""
+		
+		#	Filter ego network edges
+			ego_edges_out = edges[edges.src .== node_id, :]
+			ego_edges_in = edges[edges.dst .== node_id, :]
+			
+		#	Get neighbors
+			out_neighbors = unique(ego_edges_out.dst)
+			in_neighbors = unique(ego_edges_in.src)
+			all_neighbors = unique(vcat(out_neighbors, in_neighbors))
+			
+		#	Get edges between neighbors
+			neighbor_edges = edges[
+				(edges.src .∈ Ref(all_neighbors)) .& 
+				(edges.dst .∈ Ref(all_neighbors)),
+				:
+			]
+			
+		#	Calculate different clustering variants
+			k = length(all_neighbors)
+			n_neighbor_edges = nrow(neighbor_edges)
+			
+		#	Standard clustering (neighbors only)
+			if k >= 2
+				max_edges_neighbors = directed ? k * (k - 1) : k * (k - 1) / 2
+				clustering_neighbors_only = n_neighbor_edges / max_edges_neighbors
+			else
+				clustering_neighbors_only = 0.0
+			end
+			
+		#	Full ego network clustering
+			total_ego_edges = nrow(ego_edges_out) + nrow(ego_edges_in) + n_neighbor_edges
+			if k >= 1
+				max_edges_full = directed ? (k + 1) * k : (k + 1) * k / 2  
+				clustering_full_ego = total_ego_edges / max_edges_full
+			else
+				clustering_full_ego = 0.0
+			end
+			
+		#	Alternative calculation (may match ORA for small networks)
+			clustering_alt = k >= 2 ? n_neighbor_edges / (2 * k * (k - 1)) : 0.0
+			
+		#	Assembling diagnostics
+			return Dict(
+				"node" => node_id,
+				"n_neighbors" => k,
+				"out_neighbors" => length(out_neighbors),
+				"in_neighbors" => length(in_neighbors),
+				"edges_between_neighbors" => n_neighbor_edges,
+				"total_ego_edges" => total_ego_edges,
+				"clustering_neighbors_only" => clustering_neighbors_only,
+				"clustering_full_ego" => clustering_full_ego,
+				"clustering_alternative" => clustering_alt,
+				"neighbor_list" => all_neighbors
+			)
+	end
+
 ##########################
 #   GRAPH IMPORT TESTS   #
 ##########################
@@ -693,21 +969,27 @@
 #   COMPARISON TESTS
 
 #	Import Comparison Data
-	wgt_local_clustering = CSV.read("/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data/clustering_comparison.csv", DataFrame)
-
 	ora_local_clustering = CSV.read("/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data/Density_Local_Clustering.csv", DataFrame; types=Dict(1 => String))
 	ora_local_clustering = ora_local_clustering[:,(1:3)]
 	rename!(ora_local_clustering, ["node", "screen_name", "clusteringCoefficient-1-Balikatan_2022"])
+
+	wgt_local_clustering = CSV.read("/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data/clustering_comparison.csv", DataFrame)
+	
+	igraph_wgt_local_clustering = CSV.read("/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data/Balikatan_Clemente_Grassi.csv",DataFrame; types=Dict(1 => String))
+	rename!(igraph_wgt_local_clustering, ["node", "cg_cycle_ig", "cg_middleman_ig",  "cg_in_ig", "cg_out_ig", "cg_total_ig", "barrat_local_ig"])
 
 #	Construct CG Clustering Toy Graph
 	test_edges = DataFrame(src = ["A","A","B","B","C","D","E"], dst = ["B","C","C","D","A","A","B"],
       				       weight = [1.0, 5.0, 2.0, 3.0, 1.0, 4.0, 1.0])
 
 #	Local Clustering
+	strogatz_local_clustering = local_clustering_coefficient(agent_agent_all_com.edges, directed=true, weighted=false)
 	leftjoin!(strogatz_local_clustering, ora_local_clustering, on=:node)
 	strogatz_local_clustering = strogatz_local_clustering[:,[1,3,4,2]]
 	strogatz_local_clustering[!,3] = convert.(Float64, strogatz_local_clustering[:,3])
 	strogatz_local_clustering.delta = strogatz_local_clustering[:,3] .- strogatz_local_clustering[:,4] 
+
+#	NEED TO RESOLVE Local Clustering SCORE DIFFERENCES
 
 #	Weighted Directed Clustering
 	julia_results = weighted_clustering_coefficient(test_edges; directed=true, agg_func=sum)
@@ -720,10 +1002,24 @@
 
 	weighted_clustering_coefficient(test_edges; directed=false, agg_func=sum)
 
+	leftjoin!(cg_clustering_coefficients, igraph_wgt_local_clustering, on=:node)
+	cg_clustering_coefficients.cg_cycle_ig = convert.(Float64, cg_clustering_coefficients.cg_cycle_ig)
+	cg_clustering_coefficients.cg_middleman_ig = convert.(Float64, cg_clustering_coefficients.cg_middleman_ig)
+	cg_clustering_coefficients.cg_in_ig = convert.(Float64, cg_clustering_coefficients.cg_in_ig)
+	cg_clustering_coefficients.cg_out_ig = convert.(Float64, cg_clustering_coefficients.cg_out_ig)
+	cg_clustering_coefficients.cg_total_ig = convert.(Float64, cg_clustering_coefficients.cg_total_ig)
+	cg_clustering_coefficients.barrat_local_ig = convert.(Float64, cg_clustering_coefficients.barrat_local_ig)
+
+	all_comm_delta_scores = DataFrame(node = cg_clustering_coefficients.node,
+									  cg_cycle_delta = cg_clustering_coefficients.cg_cycle .- cg_clustering_coefficients.cg_cycle_ig,
+			  						  cg_middleman_delta = cg_clustering_coefficients.cg_middleman .- cg_clustering_coefficients.cg_middleman_ig,
+									  cg_in_delta = cg_clustering_coefficients.cg_in .- cg_clustering_coefficients.cg_in_ig,
+									  cg_out_delta = cg_clustering_coefficients.cg_out .- cg_clustering_coefficients.cg_out_ig,
+									  cg_total_delta = cg_clustering_coefficients.cg_total .- cg_clustering_coefficients.cg_total_ig,
+									  barrat_local_delta = cg_clustering_coefficients.barrat_local .- cg_clustering_coefficients.barrat_local_ig)
+
 #	TO DO:
 #	1) Investigate source of Local Clustering Differences
-#	2) Perform Weighted Directed Clustering Coeffiecent Test in R on the Agent x Agent -All Communication Network to Make supported
-#      the differences are at the same scale as the Toy example.
 #	3) Implement Local Reciprocity (Fraction of Reciprocated Edges) Measure
 
 ####################################################

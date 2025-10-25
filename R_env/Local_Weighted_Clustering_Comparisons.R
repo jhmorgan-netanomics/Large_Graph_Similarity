@@ -41,6 +41,16 @@ suppressPackageStartupMessages({
   library(DirectedClustering)
 })
   
+##############################
+#   CALCULATING TRANSIVITY   #
+##############################
+  
+# Calculating Classic Transitivity Measure
+  igraph::transitivity(all_comm, type ="global")
+  
+# Calculating Local
+  igraph::transitivity(all_comm, type ="localaverage")
+  
 ############################
 #   CREATING TEST GRAPHS   #
 ############################
@@ -76,16 +86,6 @@ suppressPackageStartupMessages({
   comb <- list(weight = "max")
   g_undir <- as_undirected(g_dir, mode = "collapse", edge.attr.comb = comb)
   A_undir <- as.matrix(as_adjacency_matrix(g_undir, sparse = FALSE, attr = "weight"))
-  
-##############################
-#   CALCULATING TRANSIVITY   #
-##############################
-
-# Calculating Classic Transitivity Measure
-  igraph::transitivity(all_comm, type ="global")
-  
-# Calculating Local
-  igraph::transitivity(all_comm, type ="localaverage")
 
 #################################################
 #   CALCULATING LOCAL CLUSTERING COEFFICIENTS   #
@@ -147,3 +147,72 @@ suppressPackageStartupMessages({
   cat("- barrat_local is Barrat (2004) undirected weighted local clustering (LocalCC).\n")
   cat("- Undirected edge weights were combined with 'max' when collapsing directions.\n")
   cat("- If your study prefers 'sum' or 'mean', change edge.attr.comb above.\n")
+  
+#############################################################################
+#   CALCULATING WEIGHTED DIRECTED CLUSTERING: BALIKATAN ALL COMMUNICATION   #
+#############################################################################
+  
+# Creating Adjacency Matrix
+  name_index = data.frame(node_id = as.character(V(all_comm)$name), node = as.character(V(all_comm)$label))
+  all_com_adj <- as.matrix(as_adjacency_matrix(all_comm, sparse = FALSE,
+                           attr = if (has_wt) "weight" else NULL))
+  
+# Directed: Clemente & Grassi (returns cycle/middleman/in/out/total)
+  all_comm_cg <- ClustBCG(all_com_adj, type = "directed")
+  print(c(all_comm_cg$GlobalcycleCC, all_comm_cg$GlobalmiddlemanCC, all_comm_cg$GlobalinCC, 
+          all_comm_cg$GlobaloutCC, all_comm_cg$GlobaltotalCC))
+  
+# Barret Local Weighted Clustering Coefficient 
+  comb <- list(weight = "max")
+  all_comm_undir <- as_undirected(all_comm, mode = "collapse", edge.attr.comb = comb)
+  all_comm_undir_adj <- as.matrix(as_adjacency_matrix(all_comm_undir, sparse = FALSE, attr = "weight"))
+  
+  barr <- ClustBCG(all_comm_undir_adj, type = "undirected")  
+  barr_local <- barr$LocalCC
+  
+# Isolating Vertex names
+  nodes_dir  <- rownames(all_com_adj)
+  nodes_u    <- rownames(all_comm_undir_adj)
+  
+# Align by node name
+  all_nodes <- sort(unique( as.numeric(c(nodes_dir, nodes_u))))
+  all_nodes <- data.frame(node_id = as.character(all_nodes))
+  all_nodes <- dplyr::left_join(all_nodes, name_index, by=c("node_id"))
+  
+# Create Comparison Table
+  cmp <- data.frame(
+    node = all_nodes$node,
+    cg_cycle = all_comm_cg$cycleCC,
+    cg_middleman = all_comm_cg$middlemanCC,
+    cg_in = all_comm_cg$inCC,
+    cg_out =  all_comm_cg$outCC,
+    cg_total = all_comm_cg$totalCC,
+    barrat_local = barr_local,
+    stringsAsFactors = FALSE
+  )
+  
+# Writing-Out File for Comarison
+  save_dir <- c("D:/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data")
+  file_name <- c("Balikatan_Clemente_Grassi.csv")
+  readr::write_csv(cmp, file=paste0(save_dir,"/",file_name))
+  
+###########################################################
+#   Calculating Local Clustering Coefficients: Strogatz   #
+###########################################################
+  
+# Transforming the Directed Graph to Meet the Measure Requirements
+  all_comm_no_loops <- simplify(all_comm, remove.multiple = TRUE, remove.loops = TRUE)
+  all_comm_no_loops <- as_undirected(all_comm_no_loops, mode = "collapse")  # ignore direction for WS local CC
+
+# Calculating Strogratz's Local Clustering Coefficients
+  lc <- transitivity(all_comm_no_loops, type = "local", vids = V(all_comm_no_loops), isolates = "zero")
+  
+# Creating Output Table
+  name_index = data.frame(node_id = as.character(V(all_comm_no_loops)$name), node = as.character(V(all_comm_no_loops)$label))
+  local_clustering_scores <- data.frame(node_id=names(lc), local_clustering = as.numeric(lc))
+  local_clustering_scores <- dplyr::left_join(local_clustering_scores, name_index, by=c("node_id"))
+  local_clustering_scores <- local_clustering_scores[c(3,2)]
+  
+# Outputting for Comparison with Julia Functions
+  file_name <- c("Balikatan_Local_Clustering.csv")
+  readr::write_csv(local_clustering_scores, file= paste0(save_dir,"/",file_name)) 
