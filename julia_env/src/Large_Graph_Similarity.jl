@@ -1133,112 +1133,112 @@ module Large_Graph_Similarity
 
 #	Local Clustering Coefficient (Node Level)
 	function local_clustering_coefficient(edges::DataFrame;
-	                                      directed::Bool=true,
-	                                      weighted::Bool=false,
-	                                      method::Symbol=:density,
-	                                      agg_func::Function=sum)
+	                                     directed::Bool=true,
+	                                     weighted::Bool=false,
+	                                     method::Symbol=:density,
+	                                     agg_func::Function=sum,
+	                                     include_neighbor_selfloops::Bool=true)
 		"""
 		Args:
-			edges::DataFrame: edge list with src, dst, and optionally weight columns
+			edges::DataFrame: edge list with :src, :dst, and optional :weight columns
 			directed::Bool: treat graph as directed (default = true)
-			weighted::Bool: use edge weights (default = false, uses binary)
+			weighted::Bool: use edge weights if available (default = false, uses binary)
 			method::Symbol: :density (ego network density) or :transitivity (triangle-based) (default = :density)
 			agg_func::Function: aggregation for parallel edges (default = sum)
+			include_neighbor_selfloops::Bool:
+				- true  => include neighbor self-loops in numerator and denominator
+				           (ORA parity; directed uses k*k, undirected k*(k+1)/2)
+				- false => exclude neighbor self-loops in numerator and denominator
+				           (directed uses k*(k-1), undirected k*(k-1)/2)
 		Returns:
 			DataFrame: columns [node, clustering_coefficient]
 		Notes:
-			Computes local clustering coefficient for each node.
-			Method :density matches ORA's approach (includes self-loops).
-			Method :transitivity uses triangle counting.
+			:density computes the density of the ego's neighbor subgraph (ego excluded).
+			For ORA parity on directed graphs, set include_neighbor_selfloops=true (default),
+			which counts neighbor self-loops and divides by k*k where k = number of neighbors.
+			:transitivity computes a standard triangle-based local coefficient.
 		"""
-		
-		#	Validation
+
+		# 	Validation
 			if !hasproperty(edges, :src) || !hasproperty(edges, :dst)
-				throw(ArgumentError("edges DataFrame must have src and dst columns"))
+				throw(ArgumentError("edges DataFrame must have :src and :dst columns"))
 			end
-			
-			if !(method in [:density, :transitivity])
+			if !(method in (:density, :transitivity))
 				throw(ArgumentError("method must be :density or :transitivity"))
 			end
-		
-		#	Handle empty edge list
+
+		# 	Handle empty edge list
 			if nrow(edges) == 0
 				return DataFrame(node=[], clustering_coefficient=Float64[])
 			end
-		
-		#	Aggregate multi-edges
+
+		# 	Aggregate multi-edges
 			clean_edges = _aggregate_multi_edges(edges; agg_func=agg_func)
-		
-		#	Build adjacency matrix (binary for standard clustering)
+
+		# 	Build adjacency matrix (binary unless weighted=true & :weight present)
 			if weighted && hasproperty(clean_edges, :weight)
-				#	Weighted clustering (Barrat et al. 2004)
-					adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=true)
+				adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=true)
 			else
-				#	Standard binary clustering
-					adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=false)
+				adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=false)
 			end
-		
-		#	Initialize clustering coefficients
+
+		# 	Initialize clustering coefficients
 			n = length(idx_to_node)
 			clustering_values = zeros(Float64, n)
-		
-		#	Calculate clustering coefficient for each node
+
+		# 	Compute per node
 			for i in 1:n
 				if method == :density
-					#	Ego network density method (ORA approach)
-						neighbors, ego_subnet = _extract_ego_network(adj, i; directed=directed)
-						
-					#	Skip if no neighbors
-						if length(neighbors) < 2
+					# 	Ego network: ego_subnet has ego at index 1; neighbors at 2:end
+						_, ego_subnet = _extract_ego_network(adj, i; directed=directed)
+
+					# 	No neighbors at all (ego_subnet is 1x1)
+						if size(ego_subnet, 1) <= 1
 							clustering_values[i] = 0.0
 							continue
 						end
-					
-					#	Calculate density of ego network (excluding ego node)
-						neighbor_indices = 2:length(neighbors)+1  # Skip ego at index 1
-						neighbor_subnet = ego_subnet[neighbor_indices, neighbor_indices]
-						
-					#	Count edges between neighbors (including self-loops)
-						if weighted
-							edge_sum = sum(neighbor_subnet)
+
+					# 	Neighbor block (exclude ego row/col)
+						neighbor_block_indices = 2:size(ego_subnet, 1)
+						neighbor_subnet = ego_subnet[neighbor_block_indices, neighbor_block_indices]
+
+					# 	k = number of neighbors
+						k = size(neighbor_subnet, 1)
+
+					# 	Numerator: edges among neighbors (match loop convention)
+						if include_neighbor_selfloops
+							edge_sum = weighted ? sum(neighbor_subnet) : nnz(neighbor_subnet)
 						else
-							edge_sum = nnz(neighbor_subnet)
+							neighbor_subnet_nodiag = copy(neighbor_subnet)
+							for d in 1:k
+								neighbor_subnet_nodiag[d, d] = 0
+							end
+							edge_sum = weighted ? sum(neighbor_subnet_nodiag) : nnz(neighbor_subnet_nodiag)
 						end
-						
-					#	Maximum possible edges (ORA includes self-loops)
-						k = length(neighbors)
+
+					# 	Denominator: max possible edges among neighbors (aligned with numerator)
+						max_edges = 0.0
 						if directed
-							max_edges = k * k  # Changed from k*(k-1) to match ORA
+							max_edges = include_neighbor_selfloops ? (k * k) : (k * (k - 1))
 						else
-							max_edges = k * (k + 1) / 2  # Changed to include self-loops
+							max_edges = include_neighbor_selfloops ? (k * (k + 1) / 2) : (k * (k - 1) / 2)
 						end
-						
-					#	Clustering coefficient is the density
-						if max_edges > 0
-							clustering_values[i] = edge_sum / max_edges
-						else
-							clustering_values[i] = 0.0
-						end
-						
-				else  # method == :transitivity
-					#	Triangle-based method
+
+					# 	Density
+						clustering_values[i] = (max_edges > 0) ? (edge_sum / max_edges) : 0.0
+
+				else
+					# 	Triangle-based local clustering (directed variant assumed by helper)
 						triangles, max_triangles = _count_triangles_directed(adj, i)
-						
-					#	Clustering coefficient
-						if max_triangles > 0
-							clustering_values[i] = triangles / max_triangles
-						else
-							clustering_values[i] = 0.0
-						end
+						clustering_values[i] = (max_triangles > 0) ? (triangles / max_triangles) : 0.0
 				end
 			end
-		
-		#	Assembling Result
-			result = DataFrame(
+
+		# 	Result
+			return DataFrame(
 				node = idx_to_node,
 				clustering_coefficient = clustering_values
 			)
-			return result
 	end
 	@doc raw"""
 	**Description**

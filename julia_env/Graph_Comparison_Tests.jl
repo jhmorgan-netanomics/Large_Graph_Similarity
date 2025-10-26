@@ -989,8 +989,6 @@
 	strogatz_local_clustering[!,3] = convert.(Float64, strogatz_local_clustering[:,3])
 	strogatz_local_clustering.delta = strogatz_local_clustering[:,3] .- strogatz_local_clustering[:,4] 
 
-#	NEED TO RESOLVE Local Clustering SCORE DIFFERENCES
-
 #	Weighted Directed Clustering
 	julia_results = weighted_clustering_coefficient(test_edges; directed=true, agg_func=sum)
 	delta_scores = DataFrame(cg_cycle_delta = wgt_local_clustering.cg_cycle .- julia_results.cg_cycle,
@@ -1019,7 +1017,6 @@
 									  barrat_local_delta = cg_clustering_coefficients.barrat_local .- cg_clustering_coefficients.barrat_local_ig)
 
 #	TO DO:
-#	1) Investigate source of Local Clustering Differences
 #	3) Implement Local Reciprocity (Fraction of Reciprocated Edges) Measure
 
 ####################################################
