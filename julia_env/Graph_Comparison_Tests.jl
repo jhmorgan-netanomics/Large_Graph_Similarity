@@ -964,7 +964,244 @@
 #	Directed Weighted Clustering (Clemente & Grassi, 2018)
 	cg_clustering_coefficients = weighted_clustering_coefficient(agent_agent_all_com.edges; directed=true, agg_func=sum)
 
-#   Local Reciprocity (Fraction of Reciprocated Edges)
+#   Local Reciprocity (Fraction of Reciprocated Edges): 0.004
+	function reciprocity(edges::DataFrame;
+	                     include_self_loops::Bool=false,
+	                     agg_func::Function=maximum,
+	                     mode::Symbol=:dyad)
+		"""
+		Args:
+			edges::DataFrame: edge list with :src and :dst columns
+			include_self_loops::Bool: include self-loops in calculation (default=false)
+			agg_func::Function: aggregation for parallel edges (default=maximum → binary)
+			mode::Symbol: :dyad (default, ORA-style) or :arc
+		Returns:
+			Float64
+		Notes:
+			- :dyad → fraction of unordered node pairs (i<j) with ≥1 tie that are mutual (i↔j).
+			         Self-loops are ignored for dyad mode.
+			- :arc  → fraction of directed edges (i→j) that have their reverse (j→i).
+			         Self-loops are never considered reciprocal to themselves.
+		"""
+
+		#	Validation
+			if !hasproperty(edges, :src) || !hasproperty(edges, :dst)
+				throw(ArgumentError("edges DataFrame must have :src and :dst columns"))
+			end
+			if !(mode in (:dyad, :arc))
+				throw(ArgumentError("mode must be :dyad or :arc"))
+			end
+
+		#	Handle empty edge list
+			if nrow(edges) == 0
+				return 0.0
+			end
+
+		#	Aggregate multi-edges to binary
+			clean_edges = _aggregate_multi_edges(edges; agg_func=agg_func)
+
+		#	Build binary adjacency matrix
+			adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=false)
+			n = size(adj, 1)
+
+		#	Self-loop handling
+			if !include_self_loops
+				for i in 1:n
+					adj[i, i] = 0
+				end
+				dropzeros!(adj)
+			end
+
+		#	Mode dispatch
+			if mode == :arc
+				#	Arc-based reciprocity: fraction of arcs with reverse arc
+					total_edges = nnz(adj)
+					if total_edges == 0
+						return 0.0
+					end
+					reciprocal_edges = 0
+					rows, cols, _ = findnz(adj)
+					for k in 1:length(rows)
+						i, j = rows[k], cols[k]
+						if i == j
+							continue
+						end
+						if adj[j, i] > 0
+							reciprocal_edges += 1
+						end
+					end
+					return reciprocal_edges / total_edges
+			else
+				#	Dyad-based reciprocity: unordered pairs with ≥1 tie that are mutual
+					mutual = 0
+					dyads = 0
+					for i in 1:n-1
+						for j in i+1:n
+							a = adj[i, j] > 0
+							b = adj[j, i] > 0
+							if a || b
+								dyads += 1
+								if a && b
+									mutual += 1
+								end
+							end
+						end
+					end
+					return (dyads == 0) ? 0.0 : (mutual / dyads)
+			end
+	end
+	@doc raw"""
+	**Description**  
+	Computes reciprocity for a directed network using one of two established conventions:
+
+	- **Dyad-based (default, ORA-style):** fraction of unordered node pairs with one or more ties that are mutual.  
+	- **Arc-based:** fraction of directed edges that have their reverse.
+
+	**Usage**  
+	`reciprocity(edges::DataFrame; include_self_loops::Bool=false, agg_func::Function=maximum, mode::Symbol=:dyad)`
+
+	**Arguments**  
+	- `edges::DataFrame`: Edge list with `:src` and `:dst` columns.  
+	- `include_self_loops::Bool`: Whether to retain self-loops in the adjacency.  
+	- In **dyad** mode, self-loops are ignored for counting dyads and do not affect the denominator.  
+	- In **arc** mode, self-loops are never considered reciprocal to themselves.  
+	- `agg_func::Function`: Aggregation for parallel edges (default `maximum` to collapse to binary).  
+	- `mode::Symbol`: `:dyad` (default; ORA-compatible) or `:arc`.
+
+	**Details**  
+	- **Dyad-based reciprocity** counts each unordered pair `{i,j}` (with `i<j`) once. A dyad is *mutual* if both `i→j` and `j→i` exist. The score is `(# mutual dyads) / (# dyads with ≥1 tie)`.  
+	- **Arc-based reciprocity** uses directed edges as the unit. The score is `(# arcs whose reverse exists) / (# arcs)` after collapsing multi-edges via `agg_func`.
+
+	**Value**  
+	A `Float64` in `[0,1]`.
+
+	**Examples**
+	```julia
+	using DataFrames
+
+	# Example 1: ORA-style dyad-based
+	edges = DataFrame(src=["A","B","B","C","D","E","E"], dst=["B","A","C","B","E","D","F"])
+	rec_dyad = reciprocity(edges; mode=:dyad)  # 3/4 = 0.75
+
+	# Example 2: Arc-based
+	rec_arc = reciprocity(edges; mode=:arc)    # 6/7 ≈ 0.8571428571
+
+	# Example 3: With self-loops present (ignored by dyad mode)
+	edges2 = DataFrame(src=["A","A","B"], dst=["A","B","A"])
+	rec_dyad_2 = reciprocity(edges2; mode=:dyad)        # 1.0 (A↔B)
+	rec_arc_2  = reciprocity(edges2; mode=:arc)         # 2/3 ≈ 0.6667
+	See Also
+	local_clustering_coefficient, transitivity
+
+	References
+
+	Carley, K.M. (2002). Summary of Key Network Measures for Characterizing Organizational Architectures. Carnegie Mellon University.
+
+	Borgatti, S.P., Everett, M.G., & Freeman, L.C. (1999). UCINET 6.0 Version 1.00. Analytic Technologies, Harvard, MA.
+	""" reciprocity	
+
+#	Test Function for Reciprocity
+	function test_reciprocity()
+		"""
+		Args:
+			None
+		Returns:
+			Nothing (prints test results for dyad- and arc-based reciprocity)
+		Notes:
+			Tests both conventions side-by-side with known baselines.
+		"""
+
+		#	Test 1: Simple reciprocal pair
+			edges1 = DataFrame(src=["A","B"], dst=["B","A"])
+			exp1_dyad = 1.0          # one dyad (A,B), mutual
+			exp1_arc  = 1.0          # 2/2 arcs have reverse
+			got1_dyad = reciprocity(edges1; mode=:dyad)
+			got1_arc  = reciprocity(edges1; mode=:arc)
+			println("Test 1 (reciprocal pair):")
+			println("\tEdges: A→B, B→A")
+			println("\tDyad-based:\texpected=$(exp1_dyad), got=$(got1_dyad), pass=$(got1_dyad ≈ exp1_dyad)")
+			println("\tArc-based:\t\texpected=$(exp1_arc), got=$(got1_arc), pass=$(got1_arc ≈ exp1_arc)")
+
+		#	Test 2: No reciprocal edges
+			edges2 = DataFrame(src=["A","B","C"], dst=["B","C","D"])
+			exp2_dyad = 0.0          # dyads with ≥1 tie: AB, BC, CD → none mutual
+			exp2_arc  = 0.0          # 0/3 arcs have reverse
+			got2_dyad = reciprocity(edges2; mode=:dyad)
+			got2_arc  = reciprocity(edges2; mode=:arc)
+			println("\nTest 2 (no reciprocals):")
+			println("\tEdges: A→B, B→C, C→D")
+			println("\tDyad-based:\texpected=$(exp2_dyad), got=$(got2_dyad), pass=$(got2_dyad ≈ exp2_dyad)")
+			println("\tArc-based:\t\texpected=$(exp2_arc), got=$(got2_arc), pass=$(got2_arc ≈ exp2_arc)")
+
+		#	Test 3: Mixed reciprocal and non-reciprocal
+			edges3 = DataFrame(src=["A","B","C","D"], dst=["B","A","D","E"])
+			exp3_dyad = 1/3          # dyads with ≥1 tie: AB, CD, DE → only AB mutual
+			exp3_arc  = 0.5          # 2/4 arcs have reverse (A↔B)
+			got3_dyad = reciprocity(edges3; mode=:dyad)
+			got3_arc  = reciprocity(edges3; mode=:arc)
+			println("\nTest 3 (mixed):")
+			println("\tEdges: A→B, B→A, C→D, D→E")
+			println("\tDyad-based:\texpected=$(exp3_dyad), got=$(got3_dyad), pass=$(abs(got3_dyad - exp3_dyad) < 1e-12)")
+			println("\tArc-based:\t\texpected=$(exp3_arc), got=$(got3_arc), pass=$(got3_arc ≈ exp3_arc)")
+
+		#	Test 4a: With self-loop present but excluded
+			edges4 = DataFrame(src=["A","A","B"], dst=["A","B","A"])
+			exp4a_dyad = 1.0         # dyad mode ignores the self-loop; AB mutual
+			exp4a_arc  = 1.0         # self-loop removed; arcs = {A→B,B→A} → 2/2
+			got4a_dyad = reciprocity(edges4; include_self_loops=false, mode=:dyad)
+			got4a_arc  = reciprocity(edges4; include_self_loops=false, mode=:arc)
+			println("\nTest 4a (self-loop excluded):")
+			println("\tEdges: A→A, A→B, B→A  (A→A dropped for calc)")
+			println("\tDyad-based:\texpected=$(exp4a_dyad), got=$(got4a_dyad), pass=$(got4a_dyad ≈ exp4a_dyad)")
+			println("\tArc-based:\t\texpected=$(exp4a_arc), got=$(got4a_arc), pass=$(got4a_arc ≈ exp4a_arc)")
+
+		#	Test 4b: With self-loop included
+			exp4b_dyad = 1.0         # dyad mode still 1.0 (self-loops ignored for dyads)
+			exp4b_arc  = 2/3         # arcs = {A→A, A→B, B→A}; only A↔B reciprocal → 2/3
+			got4b_dyad = reciprocity(edges4; include_self_loops=true, mode=:dyad)
+			got4b_arc  = reciprocity(edges4; include_self_loops=true, mode=:arc)
+			println("\nTest 4b (self-loop included):")
+			println("\tEdges: A→A, A→B, B→A")
+			println("\tDyad-based:\texpected=$(exp4b_dyad), got=$(got4b_dyad), pass=$(got4b_dyad ≈ exp4b_dyad)")
+			println("\tArc-based:\t\texpected=$(exp4b_arc), got=$(got4b_arc), pass=$(abs(got4b_arc - exp4b_arc) < 1e-12)")
+
+		#	Test 5: Complex case
+			edges5 = DataFrame(
+				src=["A","B","B","C","D","E","E"],
+				dst=["B","A","C","B","E","D","F"]
+			)
+			#	A↔B, B↔C, D↔E, and E→F
+			exp5_dyad = 3/4          # dyads with ≥1: AB, BC, DE, EF → 3 mutual
+			exp5_arc  = 6/7          # 6 of 7 arcs have reverse
+			got5_dyad = reciprocity(edges5; mode=:dyad)
+			got5_arc  = reciprocity(edges5; mode=:arc)
+			println("\nTest 5 (complex):")
+			println("\tEdges: A↔B, B↔C, D↔E, E→F")
+			println("\tDyad-based:\texpected=$(exp5_dyad), got=$(got5_dyad), pass=$(abs(got5_dyad - exp5_dyad) < 1e-12)")
+			println("\tArc-based:\t\texpected=$(exp5_arc), got=$(got5_arc), pass=$(abs(got5_arc - exp5_arc) < 1e-12)")
+
+		#	Test 6: Multi-edges (collapse to binary)
+			edges6 = DataFrame(src=["A","A","B"], dst=["B","B","A"])
+			exp6_dyad = 1.0          # AB mutual
+			exp6_arc  = 1.0          # after collapsing, arcs = {A→B, B→A} → 2/2
+			got6_dyad = reciprocity(edges6; mode=:dyad)
+			got6_arc  = reciprocity(edges6; mode=:arc)
+			println("\nTest 6 (multi-edges → binary):")
+			println("\tEdges: A→B(×2), B→A")
+			println("\tDyad-based:\texpected=$(exp6_dyad), got=$(got6_dyad), pass=$(got6_dyad ≈ exp6_dyad)")
+			println("\tArc-based:\t\texpected=$(exp6_arc), got=$(got6_arc), pass=$(got6_arc ≈ exp6_arc)")
+	end
+
+
+	test_reciprocity()
+
+
+	reciprocity(agent_agent_all_com.edges, include_self_loops=true)
+
+
+
+
+
 
 #   COMPARISON TESTS
 

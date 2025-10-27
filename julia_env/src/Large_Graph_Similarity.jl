@@ -1740,6 +1740,140 @@ module Large_Graph_Similarity
 	""" directed_clustering_cg
 
 #   Local Reciprocity (Fraction of Reciprocated Edges)
+	function reciprocity(edges::DataFrame;
+	                     include_self_loops::Bool=false,
+	                     agg_func::Function=maximum,
+	                     mode::Symbol=:dyad)
+		"""
+		Args:
+			edges::DataFrame: edge list with :src and :dst columns
+			include_self_loops::Bool: include self-loops in calculation (default=false)
+			agg_func::Function: aggregation for parallel edges (default=maximum → binary)
+			mode::Symbol: :dyad (default, ORA-style) or :arc
+		Returns:
+			Float64
+		Notes:
+			- :dyad → fraction of unordered node pairs (i<j) with ≥1 tie that are mutual (i↔j).
+			         Self-loops are ignored for dyad mode.
+			- :arc  → fraction of directed edges (i→j) that have their reverse (j→i).
+			         Self-loops are never considered reciprocal to themselves.
+		"""
+
+		#	Validation
+			if !hasproperty(edges, :src) || !hasproperty(edges, :dst)
+				throw(ArgumentError("edges DataFrame must have :src and :dst columns"))
+			end
+			if !(mode in (:dyad, :arc))
+				throw(ArgumentError("mode must be :dyad or :arc"))
+			end
+
+		#	Handle empty edge list
+			if nrow(edges) == 0
+				return 0.0
+			end
+
+		#	Aggregate multi-edges to binary
+			clean_edges = _aggregate_multi_edges(edges; agg_func=agg_func)
+
+		#	Build binary adjacency matrix
+			adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=false)
+			n = size(adj, 1)
+
+		#	Self-loop handling
+			if !include_self_loops
+				for i in 1:n
+					adj[i, i] = 0
+				end
+				dropzeros!(adj)
+			end
+
+		#	Mode dispatch
+			if mode == :arc
+				#	Arc-based reciprocity: fraction of arcs with reverse arc
+					total_edges = nnz(adj)
+					if total_edges == 0
+						return 0.0
+					end
+					reciprocal_edges = 0
+					rows, cols, _ = findnz(adj)
+					for k in 1:length(rows)
+						i, j = rows[k], cols[k]
+						if i == j
+							continue
+						end
+						if adj[j, i] > 0
+							reciprocal_edges += 1
+						end
+					end
+					return reciprocal_edges / total_edges
+			else
+				#	Dyad-based reciprocity: unordered pairs with ≥1 tie that are mutual
+					mutual = 0
+					dyads = 0
+					for i in 1:n-1
+						for j in i+1:n
+							a = adj[i, j] > 0
+							b = adj[j, i] > 0
+							if a || b
+								dyads += 1
+								if a && b
+									mutual += 1
+								end
+							end
+						end
+					end
+					return (dyads == 0) ? 0.0 : (mutual / dyads)
+			end
+	end
+	@doc raw"""
+	**Description**  
+	Computes reciprocity for a directed network using one of two established conventions:
+
+	- **Dyad-based (default, ORA-style):** fraction of unordered node pairs with one or more ties that are mutual.  
+	- **Arc-based:** fraction of directed edges that have their reverse.
+
+	**Usage**  
+	`reciprocity(edges::DataFrame; include_self_loops::Bool=false, agg_func::Function=maximum, mode::Symbol=:dyad)`
+
+	**Arguments**  
+	- `edges::DataFrame`: Edge list with `:src` and `:dst` columns.  
+	- `include_self_loops::Bool`: Whether to retain self-loops in the adjacency.  
+	- In **dyad** mode, self-loops are ignored for counting dyads and do not affect the denominator.  
+	- In **arc** mode, self-loops are never considered reciprocal to themselves.  
+	- `agg_func::Function`: Aggregation for parallel edges (default `maximum` to collapse to binary).  
+	- `mode::Symbol`: `:dyad` (default; ORA-compatible) or `:arc`.
+
+	**Details**  
+	- **Dyad-based reciprocity** counts each unordered pair `{i,j}` (with `i<j`) once. A dyad is *mutual* if both `i→j` and `j→i` exist. The score is `(# mutual dyads) / (# dyads with ≥1 tie)`.  
+	- **Arc-based reciprocity** uses directed edges as the unit. The score is `(# arcs whose reverse exists) / (# arcs)` after collapsing multi-edges via `agg_func`.
+
+	**Value**  
+	A `Float64` in `[0,1]`.
+
+	**Examples**
+	```julia
+	using DataFrames
+
+	# Example 1: ORA-style dyad-based
+	edges = DataFrame(src=["A","B","B","C","D","E","E"], dst=["B","A","C","B","E","D","F"])
+	rec_dyad = reciprocity(edges; mode=:dyad)  # 3/4 = 0.75
+
+	# Example 2: Arc-based
+	rec_arc = reciprocity(edges; mode=:arc)    # 6/7 ≈ 0.8571428571
+
+	# Example 3: With self-loops present (ignored by dyad mode)
+	edges2 = DataFrame(src=["A","A","B"], dst=["A","B","A"])
+	rec_dyad_2 = reciprocity(edges2; mode=:dyad)        # 1.0 (A↔B)
+	rec_arc_2  = reciprocity(edges2; mode=:arc)         # 2/3 ≈ 0.6667
+	See Also
+	local_clustering_coefficient, transitivity
+
+	References
+
+	Carley, K.M. (2002). Summary of Key Network Measures for Characterizing Organizational Architectures. Carnegie Mellon University.
+
+	Borgatti, S.P., Everett, M.G., & Freeman, L.C. (1999). UCINET 6.0 Version 1.00. Analytic Technologies, Harvard, MA.
+	""" reciprocity	
 
 #   INFLUENCE CENTRALITY MEASURES
 
@@ -1804,8 +1938,7 @@ module Large_Graph_Similarity
 		   local_clustering_coefficient,
 		   global_clustering_coefficient,
            weighted_clustering_coefficient,
-           directed_clustering_cg
+           directed_clustering_cg,
+		   reciprocity
 		   
-
-
 end # module julia_env
