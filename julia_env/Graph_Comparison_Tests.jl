@@ -810,6 +810,165 @@
 			)
 	end
 
+#	SALSA Sanity Tests on Graphs with Known Solutions
+	function test_salsa()
+		"""
+		Args:
+			None
+		Returns:
+			Nothing (prints test results)
+		Notes:
+			Tests SALSA centrality on graphs with closed-form expectations.
+		"""
+		
+		#	Helper Function for test_salsa: build edge list
+			edgelist(srcs, dsts) = DataFrame(src=srcs, dst=dsts)
+		
+		#	Helper Function for test_salsa: compare results
+			function _report(name, got_df, got_col, expected, expected_nodes; tol=1e-6)
+				#	Extract values in expected node order
+					got_values = Float64[]
+					for node in expected_nodes
+						idx = findfirst(==(node), got_df.node)
+						if isnothing(idx)
+							push!(got_values, 0.0)
+						else
+							push!(got_values, got_df[idx, got_col])
+						end
+					end
+				
+				#	Calculate L1 error
+					err = sum(abs.(got_values .- expected))
+					pass = err < tol
+					
+				#	Print results
+					println(name, ":")
+					println("  Nodes:    ", join(expected_nodes, ", "))
+					println("  Got:      ", string(round.(got_values, digits=6)))
+					println("  Expected: ", string(round.(expected, digits=6)))
+					println("  L1 error: ", round(err, digits=10), "  Pass: ", pass)
+					println()
+			end
+		
+		#	Test 1: Star OUT (hub-and-spoke)
+			println("=" ^ 60)
+			println("Test 1: Star OUT (center → leaves)")
+			nodes1 = ["C", "L1", "L2", "L3", "L4"]
+			edges1 = edgelist(fill("C", 4), ["L1", "L2", "L3", "L4"])
+			
+		#	Expected: hub mass on center, auth uniform on leaves
+			hub1 = salsa_centrality(edges1; score=:hub)
+			auth1 = salsa_centrality(edges1; score=:authority)
+			exp_hub1 = [1.0, 0.0, 0.0, 0.0, 0.0]
+			exp_auth1 = [0.0, 0.25, 0.25, 0.25, 0.25]
+			_report("Hub scores", hub1, :salsa_hub, exp_hub1, nodes1)
+			_report("Auth scores", auth1, :salsa_authority, exp_auth1, nodes1)
+		
+		#	Test 2: Star IN (leaves → center)
+			println("Test 2: Star IN (leaves → center)")
+			nodes2 = ["C", "L1", "L2", "L3", "L4"]
+			edges2 = edgelist(["L1", "L2", "L3", "L4"], fill("C", 4))
+			
+		#	Expected: hub uniform on leaves, auth mass on center
+			hub2 = salsa_centrality(edges2; score=:hub)
+			auth2 = salsa_centrality(edges2; score=:authority)
+			exp_hub2 = [0.0, 0.25, 0.25, 0.25, 0.25]
+			exp_auth2 = [1.0, 0.0, 0.0, 0.0, 0.0]
+			_report("Hub scores", hub2, :salsa_hub, exp_hub2, nodes2)
+			_report("Auth scores", auth2, :salsa_authority, exp_auth2, nodes2)
+		
+		#	Test 3: Mutual pair (A ↔ B)
+			println("Test 3: Mutual pair (bidirectional edge)")
+			nodes3 = ["A", "B"]
+			edges3 = edgelist(["A", "B"], ["B", "A"])
+			
+		#	Expected: symmetric uniform distribution
+			hub3 = salsa_centrality(edges3; score=:hub)
+			auth3 = salsa_centrality(edges3; score=:authority)
+			exp3 = [0.5, 0.5]
+			_report("Hub scores", hub3, :salsa_hub, exp3, nodes3)
+			_report("Auth scores", auth3, :salsa_authority, exp3, nodes3)
+		
+		#	Test 4: Complete digraph (all pairs, no self-loops)
+			println("Test 4: Complete regular digraph (n=4)")
+			nodes4 = ["v1", "v2", "v3", "v4"]
+			src4 = String[]
+			dst4 = String[]
+			for i in 1:4, j in 1:4
+				if i != j
+					push!(src4, nodes4[i])
+					push!(dst4, nodes4[j])
+				end
+			end
+			edges4 = edgelist(src4, dst4)
+			
+		#	Expected: uniform distribution
+			hub4 = salsa_centrality(edges4; score=:hub)
+			auth4 = salsa_centrality(edges4; score=:authority)
+			exp4 = fill(0.25, 4)
+			_report("Hub scores", hub4, :salsa_hub, exp4, nodes4)
+			_report("Auth scores", auth4, :salsa_authority, exp4, nodes4)
+		
+		#	Test 5: Bidirectional cycle
+			println("Test 5: Bidirectional cycle (n=5)")
+			nodes5 = ["1", "2", "3", "4", "5"]
+			src5 = String[]
+			dst5 = String[]
+			for i in 1:5
+				j = (i % 5) + 1
+				push!(src5, nodes5[i])
+				push!(dst5, nodes5[j])  # i → j
+				push!(src5, nodes5[j])
+				push!(dst5, nodes5[i])  # j → i
+			end
+			edges5 = edgelist(src5, dst5)
+			
+		#	Expected: uniform distribution
+			hub5 = salsa_centrality(edges5; score=:hub)
+			auth5 = salsa_centrality(edges5; score=:authority)
+			exp5 = fill(0.2, 5)
+			_report("Hub scores", hub5, :salsa_hub, exp5, nodes5)
+			_report("Auth scores", auth5, :salsa_authority, exp5, nodes5)
+		
+		#	Test 6: Disconnected components
+			println("Test 6: Disconnected stars (qualitative check)")
+			nodes6 = ["C1", "A", "B", "C", "C2", "D"]
+			edges6 = edgelist(
+				["C1", "C1", "C1", "C2"],
+				["A", "B", "C", "D"]
+			)
+			
+		#	Get results
+			hub6 = salsa_centrality(edges6; score=:hub)
+			auth6 = salsa_centrality(edges6; score=:authority)
+			
+		#	Extract scores in correct order
+			hub_c1 = hub6[findfirst(==(("C1")), hub6.node), :salsa_hub]
+			hub_c2 = hub6[findfirst(==(("C2")), hub6.node), :salsa_hub]
+			hub_leaves1 = [hub6[findfirst(==(n), hub6.node), :salsa_hub] for n in ["A", "B", "C"]]
+			hub_d = hub6[findfirst(==(("D")), hub6.node), :salsa_hub]
+			
+			auth_c1 = auth6[findfirst(==(("C1")), auth6.node), :salsa_authority]
+			auth_c2 = auth6[findfirst(==(("C2")), auth6.node), :salsa_authority]
+			auth_leaves1 = [auth6[findfirst(==(n), auth6.node), :salsa_authority] for n in ["A", "B", "C"]]
+			auth_d = auth6[findfirst(==(("D")), auth6.node), :salsa_authority]
+			
+		#	Qualitative checks
+			hub_check1 = hub_c1 > maximum(hub_leaves1)
+			hub_check2 = hub_c2 > hub_d
+			auth_check1 = minimum(auth_leaves1) > auth_c1
+			auth_check2 = auth_d > auth_c2
+			
+			println("  Hub centers > leaves:")
+			println("    C1 > {A,B,C}: ", hub_check1)
+			println("    C2 > D: ", hub_check2)
+			println("  Auth leaves > centers:")
+			println("    {A,B,C} > C1: ", auth_check1)
+			println("    D > C2: ", auth_check2)
+			println("  Overall pass: ", all([hub_check1, hub_check2, auth_check1, auth_check2]))
+			println("=" ^ 60)
+	end
+
 ##########################
 #   GRAPH IMPORT TESTS   #
 ##########################
@@ -964,244 +1123,7 @@
 #	Directed Weighted Clustering (Clemente & Grassi, 2018)
 	cg_clustering_coefficients = weighted_clustering_coefficient(agent_agent_all_com.edges; directed=true, agg_func=sum)
 
-#   Local Reciprocity (Fraction of Reciprocated Edges): 0.004
-	function reciprocity(edges::DataFrame;
-	                     include_self_loops::Bool=false,
-	                     agg_func::Function=maximum,
-	                     mode::Symbol=:dyad)
-		"""
-		Args:
-			edges::DataFrame: edge list with :src and :dst columns
-			include_self_loops::Bool: include self-loops in calculation (default=false)
-			agg_func::Function: aggregation for parallel edges (default=maximum → binary)
-			mode::Symbol: :dyad (default, ORA-style) or :arc
-		Returns:
-			Float64
-		Notes:
-			- :dyad → fraction of unordered node pairs (i<j) with ≥1 tie that are mutual (i↔j).
-			         Self-loops are ignored for dyad mode.
-			- :arc  → fraction of directed edges (i→j) that have their reverse (j→i).
-			         Self-loops are never considered reciprocal to themselves.
-		"""
-
-		#	Validation
-			if !hasproperty(edges, :src) || !hasproperty(edges, :dst)
-				throw(ArgumentError("edges DataFrame must have :src and :dst columns"))
-			end
-			if !(mode in (:dyad, :arc))
-				throw(ArgumentError("mode must be :dyad or :arc"))
-			end
-
-		#	Handle empty edge list
-			if nrow(edges) == 0
-				return 0.0
-			end
-
-		#	Aggregate multi-edges to binary
-			clean_edges = _aggregate_multi_edges(edges; agg_func=agg_func)
-
-		#	Build binary adjacency matrix
-			adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=false)
-			n = size(adj, 1)
-
-		#	Self-loop handling
-			if !include_self_loops
-				for i in 1:n
-					adj[i, i] = 0
-				end
-				dropzeros!(adj)
-			end
-
-		#	Mode dispatch
-			if mode == :arc
-				#	Arc-based reciprocity: fraction of arcs with reverse arc
-					total_edges = nnz(adj)
-					if total_edges == 0
-						return 0.0
-					end
-					reciprocal_edges = 0
-					rows, cols, _ = findnz(adj)
-					for k in 1:length(rows)
-						i, j = rows[k], cols[k]
-						if i == j
-							continue
-						end
-						if adj[j, i] > 0
-							reciprocal_edges += 1
-						end
-					end
-					return reciprocal_edges / total_edges
-			else
-				#	Dyad-based reciprocity: unordered pairs with ≥1 tie that are mutual
-					mutual = 0
-					dyads = 0
-					for i in 1:n-1
-						for j in i+1:n
-							a = adj[i, j] > 0
-							b = adj[j, i] > 0
-							if a || b
-								dyads += 1
-								if a && b
-									mutual += 1
-								end
-							end
-						end
-					end
-					return (dyads == 0) ? 0.0 : (mutual / dyads)
-			end
-	end
-	@doc raw"""
-	**Description**  
-	Computes reciprocity for a directed network using one of two established conventions:
-
-	- **Dyad-based (default, ORA-style):** fraction of unordered node pairs with one or more ties that are mutual.  
-	- **Arc-based:** fraction of directed edges that have their reverse.
-
-	**Usage**  
-	`reciprocity(edges::DataFrame; include_self_loops::Bool=false, agg_func::Function=maximum, mode::Symbol=:dyad)`
-
-	**Arguments**  
-	- `edges::DataFrame`: Edge list with `:src` and `:dst` columns.  
-	- `include_self_loops::Bool`: Whether to retain self-loops in the adjacency.  
-	- In **dyad** mode, self-loops are ignored for counting dyads and do not affect the denominator.  
-	- In **arc** mode, self-loops are never considered reciprocal to themselves.  
-	- `agg_func::Function`: Aggregation for parallel edges (default `maximum` to collapse to binary).  
-	- `mode::Symbol`: `:dyad` (default; ORA-compatible) or `:arc`.
-
-	**Details**  
-	- **Dyad-based reciprocity** counts each unordered pair `{i,j}` (with `i<j`) once. A dyad is *mutual* if both `i→j` and `j→i` exist. The score is `(# mutual dyads) / (# dyads with ≥1 tie)`.  
-	- **Arc-based reciprocity** uses directed edges as the unit. The score is `(# arcs whose reverse exists) / (# arcs)` after collapsing multi-edges via `agg_func`.
-
-	**Value**  
-	A `Float64` in `[0,1]`.
-
-	**Examples**
-	```julia
-	using DataFrames
-
-	# Example 1: ORA-style dyad-based
-	edges = DataFrame(src=["A","B","B","C","D","E","E"], dst=["B","A","C","B","E","D","F"])
-	rec_dyad = reciprocity(edges; mode=:dyad)  # 3/4 = 0.75
-
-	# Example 2: Arc-based
-	rec_arc = reciprocity(edges; mode=:arc)    # 6/7 ≈ 0.8571428571
-
-	# Example 3: With self-loops present (ignored by dyad mode)
-	edges2 = DataFrame(src=["A","A","B"], dst=["A","B","A"])
-	rec_dyad_2 = reciprocity(edges2; mode=:dyad)        # 1.0 (A↔B)
-	rec_arc_2  = reciprocity(edges2; mode=:arc)         # 2/3 ≈ 0.6667
-	See Also
-	local_clustering_coefficient, transitivity
-
-	References
-
-	Carley, K.M. (2002). Summary of Key Network Measures for Characterizing Organizational Architectures. Carnegie Mellon University.
-
-	Borgatti, S.P., Everett, M.G., & Freeman, L.C. (1999). UCINET 6.0 Version 1.00. Analytic Technologies, Harvard, MA.
-	""" reciprocity	
-
-#	Test Function for Reciprocity
-	function test_reciprocity()
-		"""
-		Args:
-			None
-		Returns:
-			Nothing (prints test results for dyad- and arc-based reciprocity)
-		Notes:
-			Tests both conventions side-by-side with known baselines.
-		"""
-
-		#	Test 1: Simple reciprocal pair
-			edges1 = DataFrame(src=["A","B"], dst=["B","A"])
-			exp1_dyad = 1.0          # one dyad (A,B), mutual
-			exp1_arc  = 1.0          # 2/2 arcs have reverse
-			got1_dyad = reciprocity(edges1; mode=:dyad)
-			got1_arc  = reciprocity(edges1; mode=:arc)
-			println("Test 1 (reciprocal pair):")
-			println("\tEdges: A→B, B→A")
-			println("\tDyad-based:\texpected=$(exp1_dyad), got=$(got1_dyad), pass=$(got1_dyad ≈ exp1_dyad)")
-			println("\tArc-based:\t\texpected=$(exp1_arc), got=$(got1_arc), pass=$(got1_arc ≈ exp1_arc)")
-
-		#	Test 2: No reciprocal edges
-			edges2 = DataFrame(src=["A","B","C"], dst=["B","C","D"])
-			exp2_dyad = 0.0          # dyads with ≥1 tie: AB, BC, CD → none mutual
-			exp2_arc  = 0.0          # 0/3 arcs have reverse
-			got2_dyad = reciprocity(edges2; mode=:dyad)
-			got2_arc  = reciprocity(edges2; mode=:arc)
-			println("\nTest 2 (no reciprocals):")
-			println("\tEdges: A→B, B→C, C→D")
-			println("\tDyad-based:\texpected=$(exp2_dyad), got=$(got2_dyad), pass=$(got2_dyad ≈ exp2_dyad)")
-			println("\tArc-based:\t\texpected=$(exp2_arc), got=$(got2_arc), pass=$(got2_arc ≈ exp2_arc)")
-
-		#	Test 3: Mixed reciprocal and non-reciprocal
-			edges3 = DataFrame(src=["A","B","C","D"], dst=["B","A","D","E"])
-			exp3_dyad = 1/3          # dyads with ≥1 tie: AB, CD, DE → only AB mutual
-			exp3_arc  = 0.5          # 2/4 arcs have reverse (A↔B)
-			got3_dyad = reciprocity(edges3; mode=:dyad)
-			got3_arc  = reciprocity(edges3; mode=:arc)
-			println("\nTest 3 (mixed):")
-			println("\tEdges: A→B, B→A, C→D, D→E")
-			println("\tDyad-based:\texpected=$(exp3_dyad), got=$(got3_dyad), pass=$(abs(got3_dyad - exp3_dyad) < 1e-12)")
-			println("\tArc-based:\t\texpected=$(exp3_arc), got=$(got3_arc), pass=$(got3_arc ≈ exp3_arc)")
-
-		#	Test 4a: With self-loop present but excluded
-			edges4 = DataFrame(src=["A","A","B"], dst=["A","B","A"])
-			exp4a_dyad = 1.0         # dyad mode ignores the self-loop; AB mutual
-			exp4a_arc  = 1.0         # self-loop removed; arcs = {A→B,B→A} → 2/2
-			got4a_dyad = reciprocity(edges4; include_self_loops=false, mode=:dyad)
-			got4a_arc  = reciprocity(edges4; include_self_loops=false, mode=:arc)
-			println("\nTest 4a (self-loop excluded):")
-			println("\tEdges: A→A, A→B, B→A  (A→A dropped for calc)")
-			println("\tDyad-based:\texpected=$(exp4a_dyad), got=$(got4a_dyad), pass=$(got4a_dyad ≈ exp4a_dyad)")
-			println("\tArc-based:\t\texpected=$(exp4a_arc), got=$(got4a_arc), pass=$(got4a_arc ≈ exp4a_arc)")
-
-		#	Test 4b: With self-loop included
-			exp4b_dyad = 1.0         # dyad mode still 1.0 (self-loops ignored for dyads)
-			exp4b_arc  = 2/3         # arcs = {A→A, A→B, B→A}; only A↔B reciprocal → 2/3
-			got4b_dyad = reciprocity(edges4; include_self_loops=true, mode=:dyad)
-			got4b_arc  = reciprocity(edges4; include_self_loops=true, mode=:arc)
-			println("\nTest 4b (self-loop included):")
-			println("\tEdges: A→A, A→B, B→A")
-			println("\tDyad-based:\texpected=$(exp4b_dyad), got=$(got4b_dyad), pass=$(got4b_dyad ≈ exp4b_dyad)")
-			println("\tArc-based:\t\texpected=$(exp4b_arc), got=$(got4b_arc), pass=$(abs(got4b_arc - exp4b_arc) < 1e-12)")
-
-		#	Test 5: Complex case
-			edges5 = DataFrame(
-				src=["A","B","B","C","D","E","E"],
-				dst=["B","A","C","B","E","D","F"]
-			)
-			#	A↔B, B↔C, D↔E, and E→F
-			exp5_dyad = 3/4          # dyads with ≥1: AB, BC, DE, EF → 3 mutual
-			exp5_arc  = 6/7          # 6 of 7 arcs have reverse
-			got5_dyad = reciprocity(edges5; mode=:dyad)
-			got5_arc  = reciprocity(edges5; mode=:arc)
-			println("\nTest 5 (complex):")
-			println("\tEdges: A↔B, B↔C, D↔E, E→F")
-			println("\tDyad-based:\texpected=$(exp5_dyad), got=$(got5_dyad), pass=$(abs(got5_dyad - exp5_dyad) < 1e-12)")
-			println("\tArc-based:\t\texpected=$(exp5_arc), got=$(got5_arc), pass=$(abs(got5_arc - exp5_arc) < 1e-12)")
-
-		#	Test 6: Multi-edges (collapse to binary)
-			edges6 = DataFrame(src=["A","A","B"], dst=["B","B","A"])
-			exp6_dyad = 1.0          # AB mutual
-			exp6_arc  = 1.0          # after collapsing, arcs = {A→B, B→A} → 2/2
-			got6_dyad = reciprocity(edges6; mode=:dyad)
-			got6_arc  = reciprocity(edges6; mode=:arc)
-			println("\nTest 6 (multi-edges → binary):")
-			println("\tEdges: A→B(×2), B→A")
-			println("\tDyad-based:\texpected=$(exp6_dyad), got=$(got6_dyad), pass=$(got6_dyad ≈ exp6_dyad)")
-			println("\tArc-based:\t\texpected=$(exp6_arc), got=$(got6_arc), pass=$(got6_arc ≈ exp6_arc)")
-	end
-
-
-	test_reciprocity()
-
-
-	reciprocity(agent_agent_all_com.edges, include_self_loops=true)
-
-
-
-
-
+#   Local Reciprocity (Fraction of Reciprocated Edges)
 
 #   COMPARISON TESTS
 
@@ -1254,8 +1176,50 @@
 									  barrat_local_delta = cg_clustering_coefficients.barrat_local .- cg_clustering_coefficients.barrat_local_ig)
 
 #	TO DO:
-#	3) Implement Local Reciprocity (Fraction of Reciprocated Edges) Measure
+#	1) Review reciprocity and transitivity tests after hearing back from Jeff R. regarding ORA normalizations.
+#	2) Implement Ego-Level Reciprocity Score
 
 ####################################################
 #   MEASURE TESTS: INFLUENCE CENTRALITY MEASURES   #
 ####################################################
+
+#	CALCULATE INFLUENCE MEASURES
+
+#	Component Scaled Page Rank
+
+
+#	Hub Centrality: SALSA
+	hub_centrality = salsa_centrality(agent_agent_all_com.edges; score=:hub)
+		
+#	Authority Centrality: SALSA
+	authority_centrality = salsa_centrality(agent_agent_all_com.edges; score=:authority)
+
+#	CONDUCT TESTS
+
+#	Page Rank ORA Comparisons
+
+#	SALSA Tests
+	test_salsa()
+
+##########################
+#   CORE DECOMPOSITION   #
+##########################
+
+
+###################
+#   LOCAL REACH   #
+###################
+
+
+
+############################
+#   GRAPH-LEVEL FEATURES   #
+############################
+
+
+#######################
+#   GLOBAL MEASURES   #
+#######################
+
+#   Global Reciprocity (Fraction of Reciprocated Edges): 0.004
+	reciprocity(agent_agent_all_com.edges, include_self_loops=false, weighted=true, mode=:mutual)
