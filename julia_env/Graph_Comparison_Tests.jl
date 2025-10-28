@@ -1030,6 +1030,261 @@
 			println(repeat("=", 60))
 	end
 
+#	Test Component Scaled Page Rank Centrality
+	function test_pagerank_stitched()
+		"""
+		Args:
+			None
+		Returns:
+			Nothing (prints test results)
+		Notes:
+			Tests pagerank_stitched with 3 components (9, 4, and 3 nodes).
+			Validates that stitching weights are computed correctly for each method.
+		"""
+		
+		#	Setup test output
+			println("=" ^ 60)
+			println("Testing PageRank Stitching Methods")
+			println("=" ^ 60)
+			all_passed = true
+		
+		#	Create 3-component graph
+			println("\nBuilding 3-Component Test Graph")
+			println("-" ^ 40)
+			
+		#	Component 1: 9-node ring with varied weights
+			comp1_edges = DataFrame(
+				src = ["A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "A9"],
+				dst = ["A2", "A3", "A4", "A5", "A6", "A7", "A8", "A9", "A1"],
+				weight = [1.0, 2.0, 1.0, 3.0, 2.0, 1.0, 2.0, 1.0, 2.0]
+			)
+			
+		#	Component 2: 4-node strongly connected with uniform weights
+			comp2_edges = DataFrame(
+				src = ["B1", "B1", "B2", "B3", "B4", "B4"],
+				dst = ["B2", "B3", "B4", "B4", "B1", "B2"],
+				weight = [2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
+			)
+			
+		#	Component 3: 3-node path
+			comp3_edges = DataFrame(
+				src = ["C1", "C2"],
+				dst = ["C2", "C3"],
+				weight = [5.0, 5.0]
+			)
+			
+		#	Combine all edges
+			all_edges = vcat(comp1_edges, comp2_edges, comp3_edges)
+			
+		#	Calculate expected component properties
+			total_nodes = 16
+			comp1_nodes = 9
+			comp2_nodes = 4
+			comp3_nodes = 3
+			
+			comp1_edge_weight = sum(comp1_edges.weight)  # 15.0
+			comp2_edge_weight = sum(comp2_edges.weight)  # 12.0
+			comp3_edge_weight = sum(comp3_edges.weight)  # 10.0
+			total_edge_weight = comp1_edge_weight + comp2_edge_weight + comp3_edge_weight  # 37.0
+			
+			println("Component 1: $comp1_nodes nodes, total edge weight = $comp1_edge_weight")
+			println("Component 2: $comp2_nodes nodes, total edge weight = $comp2_edge_weight")
+			println("Component 3: $comp3_nodes nodes, total edge weight = $comp3_edge_weight")
+			println("Total: $total_nodes nodes, total edge weight = $total_edge_weight")
+		
+		#	Test 1: Stitching by nodes
+			println("\n" * ("=" ^ 60))
+			println("Test 1: Stitch by Nodes")
+			println("-" ^ 40)
+			
+		#	Expected weights
+			exp_weight1_nodes = comp1_nodes / total_nodes  # 9/16 = 0.5625
+			exp_weight2_nodes = comp2_nodes / total_nodes  # 4/16 = 0.25
+			exp_weight3_nodes = comp3_nodes / total_nodes  # 3/16 = 0.1875
+			
+		#	Run PageRank
+			result_nodes = pagerank_stitched(all_edges; 
+				stitch_by=:nodes, 
+				alpha=0.85, 
+				weighted=true,
+				final_norm=:L1)
+			
+		#	Extract component weights
+			comp_weights_nodes = result_nodes.component_weights
+			
+		#	Validate weights
+			println("Expected component weights:")
+			println("  Component 1: $(round(exp_weight1_nodes, digits=4))")
+			println("  Component 2: $(round(exp_weight2_nodes, digits=4))")
+			println("  Component 3: $(round(exp_weight3_nodes, digits=4))")
+			println("\nActual component weights:")
+			println("  Component 1: $(round(comp_weights_nodes[1], digits=4))")
+			println("  Component 2: $(round(comp_weights_nodes[2], digits=4))")
+			println("  Component 3: $(round(comp_weights_nodes[3], digits=4))")
+			
+		#	Check weights
+			pass1 = isapprox(comp_weights_nodes[1], exp_weight1_nodes; atol=1e-6)
+			pass2 = isapprox(comp_weights_nodes[2], exp_weight2_nodes; atol=1e-6)
+			pass3 = isapprox(comp_weights_nodes[3], exp_weight3_nodes; atol=1e-6)
+			test1_passed = pass1 && pass2 && pass3
+			
+			println("\nWeight validation: $(test1_passed ? "PASSED ✓" : "FAILED ✗")")
+			
+		#	Verify scores sum to 1 (L1 norm)
+			score_sum = sum(result_nodes.scores)
+			println("Score sum (should be 1.0): $(round(score_sum, digits=6))")
+			sum_check = isapprox(score_sum, 1.0; atol=1e-6)
+			println("L1 normalization: $(sum_check ? "PASSED ✓" : "FAILED ✗")")
+			
+			all_passed = all_passed && test1_passed && sum_check
+		
+		#	Test 2: Stitching by edges
+			println("\n" * ("=" ^ 60))
+			println("Test 2: Stitch by Edges")
+			println("-" ^ 40)
+			
+		#	Expected weights
+			exp_weight1_edges = comp1_edge_weight / total_edge_weight  # 15/37 ≈ 0.405
+			exp_weight2_edges = comp2_edge_weight / total_edge_weight  # 12/37 ≈ 0.324
+			exp_weight3_edges = comp3_edge_weight / total_edge_weight  # 10/37 ≈ 0.270
+			
+		#	Run PageRank
+			result_edges = pagerank_stitched(all_edges; 
+				stitch_by=:edges, 
+				alpha=0.85, 
+				weighted=true,
+				final_norm=:L1)
+			
+		#	Extract component weights
+			comp_weights_edges = result_edges.component_weights
+			
+		#	Validate weights
+			println("Expected component weights:")
+			println("  Component 1: $(round(exp_weight1_edges, digits=4))")
+			println("  Component 2: $(round(exp_weight2_edges, digits=4))")
+			println("  Component 3: $(round(exp_weight3_edges, digits=4))")
+			println("\nActual component weights:")
+			println("  Component 1: $(round(comp_weights_edges[1], digits=4))")
+			println("  Component 2: $(round(comp_weights_edges[2], digits=4))")
+			println("  Component 3: $(round(comp_weights_edges[3], digits=4))")
+			
+		#	Check weights
+			pass1 = isapprox(comp_weights_edges[1], exp_weight1_edges; atol=1e-6)
+			pass2 = isapprox(comp_weights_edges[2], exp_weight2_edges; atol=1e-6)
+			pass3 = isapprox(comp_weights_edges[3], exp_weight3_edges; atol=1e-6)
+			test2_passed = pass1 && pass2 && pass3
+			
+			println("\nWeight validation: $(test2_passed ? "PASSED ✓" : "FAILED ✗")")
+			
+		#	Check different from nodes weights
+			weights_differ = !isapprox(comp_weights_edges[1], comp_weights_nodes[1]; atol=1e-3)
+			println("Weights differ from nodes method: $(weights_differ ? "YES ✓" : "NO ✗")")
+			
+			all_passed = all_passed && test2_passed
+		
+		#	Test 3: Stitching by personalization
+			println("\n" * ("=" ^ 60))
+			println("Test 3: Stitch by Personalization")
+			println("-" ^ 40)
+			
+		#	Create non-uniform personalization vector
+			n_total = length(result_nodes.node_names)
+			pers = zeros(n_total)
+			
+		#	Find indices for each component
+			comp1_indices = findall(n -> startswith(n, "A"), result_nodes.node_names)
+			comp2_indices = findall(n -> startswith(n, "B"), result_nodes.node_names)
+			comp3_indices = findall(n -> startswith(n, "C"), result_nodes.node_names)
+			
+		#	Assign personalization weights (non-uniform)
+			pers[comp1_indices] .= 1.0  # Total: 9
+			pers[comp2_indices] .= 2.0  # Total: 8
+			pers[comp3_indices] .= 3.0  # Total: 9
+			pers_sum = sum(pers)  # 26
+			
+		#	Expected weights
+			exp_weight1_pers = 9.0 / pers_sum   # 9/26 ≈ 0.346
+			exp_weight2_pers = 8.0 / pers_sum   # 8/26 ≈ 0.308
+			exp_weight3_pers = 9.0 / pers_sum   # 9/26 ≈ 0.346
+			
+		#	Run PageRank
+			result_pers = pagerank_stitched(all_edges; 
+				stitch_by=:personalization, 
+				personalization=pers,
+				alpha=0.85, 
+				weighted=true,
+				final_norm=:L1)
+			
+		#	Extract component weights
+			comp_weights_pers = result_pers.component_weights
+			
+		#	Validate weights
+			println("Personalization setup:")
+			println("  Component 1 nodes get weight 1.0 each (total: 9)")
+			println("  Component 2 nodes get weight 2.0 each (total: 8)")
+			println("  Component 3 nodes get weight 3.0 each (total: 9)")
+			println("\nExpected component weights:")
+			println("  Component 1: $(round(exp_weight1_pers, digits=4))")
+			println("  Component 2: $(round(exp_weight2_pers, digits=4))")
+			println("  Component 3: $(round(exp_weight3_pers, digits=4))")
+			println("\nActual component weights:")
+			println("  Component 1: $(round(comp_weights_pers[1], digits=4))")
+			println("  Component 2: $(round(comp_weights_pers[2], digits=4))")
+			println("  Component 3: $(round(comp_weights_pers[3], digits=4))")
+			
+		#	Check weights
+			pass1 = isapprox(comp_weights_pers[1], exp_weight1_pers; atol=1e-6)
+			pass2 = isapprox(comp_weights_pers[2], exp_weight2_pers; atol=1e-6)
+			pass3 = isapprox(comp_weights_pers[3], exp_weight3_pers; atol=1e-6)
+			test3_passed = pass1 && pass2 && pass3
+			
+			println("\nWeight validation: $(test3_passed ? "PASSED ✓" : "FAILED ✗")")
+			
+			all_passed = all_passed && test3_passed
+		
+		#	Test 4: Verify component isolation
+			println("\n" * ("=" ^ 60))
+			println("Test 4: Component Isolation Check")
+			println("-" ^ 40)
+			
+		#	Scores within components should be proportional
+			comp1_scores = result_nodes.scores[comp1_indices]
+			comp2_scores = result_nodes.scores[comp2_indices]
+			comp3_scores = result_nodes.scores[comp3_indices]
+			
+		#	Sum of scores per component
+			comp1_score_sum = sum(comp1_scores)
+			comp2_score_sum = sum(comp2_scores)
+			comp3_score_sum = sum(comp3_scores)
+			
+			println("Component score sums (stitch by nodes):")
+			println("  Component 1: $(round(comp1_score_sum, digits=4))")
+			println("  Component 2: $(round(comp2_score_sum, digits=4))")
+			println("  Component 3: $(round(comp3_score_sum, digits=4))")
+			
+		#	These should match the component weights
+			isolation_check1 = isapprox(comp1_score_sum, exp_weight1_nodes; atol=1e-3)
+			isolation_check2 = isapprox(comp2_score_sum, exp_weight2_nodes; atol=1e-3)
+			isolation_check3 = isapprox(comp3_score_sum, exp_weight3_nodes; atol=1e-3)
+			isolation_passed = isolation_check1 && isolation_check2 && isolation_check3
+			
+			println("\nComponent isolation: $(isolation_passed ? "PASSED ✓" : "FAILED ✗")")
+			
+			all_passed = all_passed && isolation_passed
+		
+		#	Final summary
+			println("\n" * ("=" ^ 60))
+			println("Test Summary")
+			println("-" ^ 40)
+			println("Stitch by nodes:          $(test1_passed ? "PASSED ✓" : "FAILED ✗")")
+			println("Stitch by edges:          $(test2_passed ? "PASSED ✓" : "FAILED ✗")")
+			println("Stitch by personalization: $(test3_passed ? "PASSED ✓" : "FAILED ✗")")
+			println("Component isolation:       $(isolation_passed ? "PASSED ✓" : "FAILED ✗")")
+			println("-" ^ 40)
+			println("OVERALL: $(all_passed ? "ALL TESTS PASSED ✓" : "SOME TESTS FAILED ✗")")
+			println("=" ^ 60)
+	end
+
 #	SALSA Sanity Tests on Graphs with Known Solutions
 	function test_salsa()
 		"""
@@ -1509,8 +1764,13 @@
 
 #	CALCULATE INFLUENCE MEASURES
 
+#	ORA-Style Local Page Rank
+	page_rank_scores_local = pagerank_local_ora(agent_agent_all_com.edges; mode=:in, weighted=true)
+	page_rank_local_df = DataFrame(node = page_rank_scores_local.node_names, page_rank=page_rank_scores_local.scores)
+
 #	Component Scaled Page Rank
-	
+	page_rank_scores_scaled = pagerank_stitched(agent_agent_all_com.edges;  mode=:in, weighted=true, stitch_by=:nodes)
+	page_rank_scale_df = DataFrame(node = page_rank_scores_scaled.node_names, page_rank = page_rank_scores_scaled.scores)
 
 #	Hub Centrality: SALSA
 	hub_centrality = salsa_centrality(agent_agent_all_com.edges; score=:hub)
@@ -1520,7 +1780,19 @@
 
 #	CONDUCT TESTS
 
-#	Page Rank ORA Comparisons
+#	Local Page Rank Comparisons: ORA vs. Julia
+	ora_page_rank = CSV.read("/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data/Balikatan_2022_All_Comm_PageRank.csv", DataFrame; types=Dict(1 => String))
+	rename!(ora_page_rank, ["node", "Centrality, PageRank"])	
+	leftjoin!(page_rank_local_df, ora_page_rank, on=:node)
+	page_rank_local_df[!,3] = convert.(Float64, page_rank_local_df[:,3])
+	page_rank_local_df.delta = abs.(page_rank_local_df[:,2] .-  page_rank_local_df[:,3])
+	maximum(page_rank_local_df.delta)
+
+	ρ = corspearman(Float64.(page_rank_local_df[:,2]), Float64.(page_rank_local_df[:,3]))
+	println("Spearman Rank Correlation: ", round(ρ, digits=6))
+
+#	Component Scaled Page Rank Tests
+	test_pagerank_stitched()
 
 #	SALSA Tests
 	test_salsa()

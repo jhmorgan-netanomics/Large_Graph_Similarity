@@ -6,6 +6,7 @@ module Large_Graph_Similarity
     using Dates
 	using EzXML
 	using LinearAlgebra
+	using Random
 	using SparseArrays
 	using Statistics
 
@@ -1935,52 +1936,62 @@ module Large_Graph_Similarity
 			Builds an undirected reachability pattern (A ∨ Aᵀ) ignoring self-loops,
 			then BFS to extract weak components.
 		"""
-		n = size(adj, 1)
-		pat = spzeros(Bool, n, n)
-		rows, cols, _ = findnz(adj)
-		@inbounds for k in eachindex(rows)
-			i = rows[k]; j = cols[k]
-			if i != j
-				pat[i, j] = true
-				pat[j, i] = true
-			end
-		end
+		#	Specifying Parameters
+			n = size(adj, 1)
+			pat = spzeros(Bool, n, n)
 
-		visited = falses(n)
-		comps = Vector{Vector{Int}}()
-		for s in 1:n
-			visited[s] && continue
-			q = Int[s]
-			visited[s] = true
-			comp = Int[]
-			while !isempty(q)
-				v = popfirst!(q)
-				push!(comp, v)
-				_, nbrs, _ = findnz(pat[v, :])
-				@inbounds for w in nbrs
-					if !visited[w]
-						visited[w] = true
-						push!(q, w)
-					end
+		#	For the whole matrix, findnz returns (rows, cols, vals)
+			rows, cols, _ = findnz(adj)
+			@inbounds for k in eachindex(rows)
+				i = rows[k]; j = cols[k]
+				if i != j
+					pat[i, j] = true
+					pat[j, i] = true
 				end
 			end
-			push!(comps, comp)
-		end
 
-		return comps
+		#	Isolating Components
+			visited = falses(n)
+			comps = Vector{Vector{Int}}()
+
+			for s in 1:n
+				visited[s] && continue
+				q = Int[s]
+				visited[s] = true
+				comp = Int[]
+
+				while !isempty(q)
+					v = popfirst!(q)
+					push!(comp, v)
+
+					#	Row slice is a SparseVector ⇒ findnz returns (indices, values)
+						idxs, _ = findnz(pat[v, :])
+						@inbounds for w in idxs
+							if !visited[w]
+								visited[w] = true
+								push!(q, w)
+							end
+						end
+				end
+
+				push!(comps, comp)
+			end
+
+		#	Return Identified Components
+			return comps
 	end
 
-#	Local ORA-Style PageRank on a Given Subgraph (indices)
-	function pagerank_local_ora(
+#	Helper Function for Page Rank Local and Component Scaled Page Rank: 
+	function pagerank_local_ora_matrix(
 		adj::SparseMatrixCSC{<:Real,Int},
 		idx::Vector{Int};
 		alpha::Float64 = 0.85,
-		tol::Float64 = 1e-6,
-		maxiter::Int = 1000,
-		final_norm::Symbol = :L1,     # :L1 or :sup
-		mode::Symbol = :in,           # :in or :out
+		tol::Float64   = 1e-6,
+		maxiter::Int   = 1000,
+		final_norm::Symbol = :L1,   # :L1 or :sup
+		mode::Symbol       = :in,   # :in or :out
 		personalization::Union{Nothing,AbstractVector{<:Real}} = nothing,
-		rng::AbstractRNG = Random.default_rng() )
+		rng = Random.default_rng())
 		"""
 		Args:
 			adj::SparseMatrixCSC{<:Real,Int}: full directed adjacency (weights allowed)
@@ -1992,10 +2003,12 @@ module Large_Graph_Similarity
 			mode::Symbol: :in (use Aᵀ) or :out (use A) before column-normalization
 			personalization::Union{Nothing,AbstractVector{<:Real}}:
 				optional component-local teleport vector (L1-normalized internally)
-			rng::AbstractRNG: RNG for reproducible init (default = default_rng())
+			rng: RNG for reproducible init (default = Random.default_rng())
+
 		Returns:
 			NamedTuple: (scores::Vector{Float64}, converged::Bool,
 						iterations::Int, norm_used::Symbol)
+
 		Notes:
 			ORA conventions:
 			- absolute weights, self-loops removed
@@ -2003,7 +2016,7 @@ module Large_Graph_Similarity
 			- dangling mass folded into teleport p
 			- per-iteration sup-norm scaling; final L1/sup normalization
 		"""
-		#	Performing Basic Checks
+		#	Checks
 			@assert 0.0 < alpha < 1.0 "alpha must be in (0,1)"
 			@assert final_norm in (:L1, :sup)
 			@assert mode in (:in, :out)
@@ -2015,7 +2028,7 @@ module Large_Graph_Similarity
 				return (scores=[1.0], converged=true, iterations=0, norm_used=final_norm)
 			end
 
-		# 	Extract submatrix, drop self-loops, abs weights
+		#	Submatrix, drop self-loops, absolute weights
 			A = adj[idx, idx]
 			@inbounds for i in 1:n
 				A[i,i] = 0
@@ -2023,13 +2036,13 @@ module Large_Graph_Similarity
 			dropzeros!(A)
 			A = SparseMatrixCSC{Float64,Int}(abs.(A))
 
-		# 	Mode mapping to column-stochastic H
+		#	Column-stochastic H (A' for :in, A for :out)
 			M = (mode == :in) ? transpose(A) : A
 			colsum = vec(sum(M, dims=1))
 			colsum[colsum .== 0.0] .= 1.0
 			H = M * spdiagm(0 => (1.0 ./ colsum))
 
-		# 	Teleport vector p (component-local)
+		# 	Teleport vector p
 			p = if personalization === nothing
 				fill(1.0 / n, n)
 			else
@@ -2039,14 +2052,14 @@ module Large_Graph_Similarity
 				pp ./ s
 			end
 
-		# 	Identify dangling in M (pre-normalization)
+		# 	Dangling columns in M (pre-normalization)
 			dangling = vec(sum(M, dims=1) .== 0.0)
 
-		# 	Initialize x ∼ U(0,1), sup normalized
+			# Initialize x ~ U(0,1), sup-normalized
 			x = rand(rng, n)
 			x ./= maximum(x)
 
-		#	Performing Iterative Power Method
+		# 	Applying Iterative Power Method
 			converged = false
 			iters = 0
 			for it in 1:maxiter
@@ -2064,56 +2077,156 @@ module Large_Graph_Similarity
 			end
 			iters == 0 && (iters = maxiter)
 
-		#	Performing Normalization
+		# 	Final cosmetic normalization
 			if final_norm == :L1
 				s = sum(x); if s > 0; x ./= s; end
 			else
 				m = maximum(x); if m > 0; x ./= m; end
 			end
 
-		#	Returning Page Rank Scores
+		#	Return Page Rank Scores
 			return (scores=x, converged=converged, iterations=iters, norm_used=final_norm)
+	end
+
+#	Local ORA-Style PageRank on a Given Subgraph (indices)
+	function pagerank_local_ora(edges::DataFrame;
+		alpha::Float64 = 0.85,
+		tol::Float64   = 1e-6,
+		maxiter::Int   = 1000,
+		final_norm::Symbol = :L1,      # :L1 or :sup
+		mode::Symbol       = :in,      # :in or :out
+		weighted::Bool     = true,
+		agg_func::Union{Function,Nothing} = nothing,
+		nodes::Union{Nothing,Vector{String}} = nothing,  # optional subset by name
+		personalization::Union{Nothing,AbstractVector{<:Real}} = nothing,
+		rng = Random.default_rng())
+		"""
+		Args:
+			edges::DataFrame: :src, :dst, optional :weight
+			alpha, tol, maxiter, final_norm, mode: same as matrix method
+			weighted::Bool: use weights if present (default = true)
+			agg_func::Union{Function,Nothing}: sum if weighted else maximum (default)
+			nodes::Union{Nothing,Vector{String}}: optional subset of node names (component)
+			personalization::Union{Nothing,AbstractVector}: optional teleport for that subset
+			rng: RNG for reproducible init
+		Returns:
+			NamedTuple (scores, converged, iterations, norm_used) for the chosen nodes
+		Notes:
+			Uses your ecosystem helpers: _aggregate_multi_edges, _edgelist_to_sparse_matrix
+		"""
+		#	Basic Checks
+			@assert mode in (:in, :out)
+			if isnothing(agg_func)
+				agg_func = (weighted && hasproperty(edges, :weight)) ? sum : maximum
+			end
+
+    	# 	Aggregate multi-edges
+    		clean_edges = _aggregate_multi_edges(edges; agg_func=agg_func)
+
+    	# 	Build adjacency (weighted iff requested and weights exist)
+			use_weights = weighted && hasproperty(clean_edges, :weight)
+			adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=use_weights)
+			n = size(adj, 1)
+
+			node_names=String[]
+			node_names = [string(idx_to_node[i]) for i in 1:n]
+
+    	# 	Pick the vertex set (default = all nodes)
+			idx =
+				if nodes === nothing
+					collect(1:n)
+				else
+					# Map names -> indices, keep only those present
+					[node_to_idx[name] for name in nodes if haskey(node_to_idx, name)]
+				end
+			if isempty(idx)
+				return (scores=Float64[], converged=true, iterations=0, norm_used=final_norm)
+			end
+
+    	# 	Component-local personalization (in idx order) if provided
+			p_local =
+				if personalization === nothing
+					nothing
+				else
+					@assert length(personalization) == length(idx) "personalization length must match #nodes in subset"
+					personalization
+				end
+
+    	# 	Delegate to the core solver (this is NOT recursion; it calls the other method)
+			res = pagerank_local_ora_matrix(adj, idx; alpha=alpha, tol=tol, maxiter=maxiter, final_norm=final_norm, mode=mode,
+											personalization=p_local, rng=rng)
+			
+		#	Return Page Rank Scores
+			return (scores=res.scores, node_names=node_names, converged=res.converged, iterations=res.iterations, norm_used=res.norm_used)
 	end
 	@doc raw"""
 	**Description**
-	Solves ORA‐style PageRank *within a given vertex set (component)* using absolute weights,
-	no self‐loops, column‐stochastic normalization, sup-norm stabilized power iterations, and
-	dangling handling. Final scores are optionally L1- or sup-normalized.
+	Computes ORA-style PageRank on a selected vertex set from an edge list. This is a convenience
+	wrapper that builds the adjacency, selects nodes (optionally by name), prepares an optional
+	component-local teleport vector, and delegates to `pagerank_local_ora_matrix` (the core solver).
 
 	**Usage**
-	`pagerank_local_ora(adj::SparseMatrixCSC, idx::Vector{Int};
+	`pagerank_local_ora(edges::DataFrame;
 						alpha=0.85, tol=1e-6, maxiter=1000,
 						final_norm=:L1, mode=:in,
-						personalization=nothing, rng=Random.default_rng())`
+						weighted=true, agg_func=nothing,
+						nodes=nothing, personalization=nothing,
+						rng=Random.default_rng())`
 
 	**Arguments**
-	- `adj::SparseMatrixCSC`: Full directed adjacency (weights allowed).
-	- `idx::Vector{Int}`: 1-based indices of nodes to solve on (the component).
-	- `alpha::Float64`: Damping in (0,1). Default `0.85`.
-	- `tol::Float64`: Sup-norm tolerance. Default `1e-6`.
-	- `maxiter::Int`: Maximum iterations. Default `1000`.
-	- `final_norm::Symbol`: `:L1` (sum to 1) or `:sup` (max=1).
-	- `mode::Symbol`: `:in` (uses `A'`) or `:out` (uses `A`) before column normalization.
-	- `personalization`: Optional component-local teleport vector (auto L1-normalized).
-	- `rng`: RNG for reproducible starts.
+	- `edges::DataFrame`: Edge list with `:src`, `:dst`, and optional `:weight`.
+	- `alpha::Float64`: Damping in `(0,1)`. Default `0.85`.
+	- `tol::Float64`: Sup-norm convergence tolerance. Default `1e-6`.
+	- `maxiter::Int`: Maximum number of iterations. Default `1000`.
+	- `final_norm::Symbol`: Final cosmetic scaling — `:L1` (scores sum to 1) or `:sup` (max=1).
+	- `mode::Symbol`: `:in` (uses `A'` before column normalization) or `:out` (uses `A`).
+	- `weighted::Bool`: Use edge weights if present. Default `true`.
+	- `agg_func::Union{Function,Nothing}`: Aggregation for parallel edges; default `sum` when
+	`weighted=true`, else `maximum`.
+	- `nodes::Union{Nothing,Vector{String}}`: Optional subset of node names to solve on; defaults
+	to all nodes found in `edges`.
+	- `personalization::Union{Nothing,AbstractVector{<:Real}}`: Optional teleport vector for the
+	chosen node set (auto L1-normalized internally). Length must equal `length(nodes)` (or the
+	number of nodes selected by default).
+	- `rng`: RNG for reproducible starts. Default `Random.default_rng()`.
 
 	**Details**
-	Builds H by column normalizing `A` (or `A'` for `mode=:in`), redistributes
-	dangling mass and teleport mass to `p`, stabilizes each iteration by sup-normalizing,
-	and finally applies cosmetic `:L1` or `:sup` normalization.
+	- Builds the adjacency with your helpers (`_aggregate_multi_edges`, `_edgelist_to_sparse_matrix`),
+	strips self-loops, and (if `weighted=true`) uses absolute weights.
+	- Selects a vertex set: by `nodes` (name → index mapping) or all nodes if `nodes=nothing`.
+	- Prepares a component-local teleport vector if `personalization` is provided; otherwise uses
+	uniform teleport within the selected set.
+	- Calls `pagerank_local_ora_matrix(adj, idx; ...)`, which performs ORA-style PageRank:
+	column-stochastic `H`, sup-norm stabilized iterations, and dangling handling. Final scores are
+	`:L1` or `:sup` normalized per `final_norm`.
 
 	**Value**
 	A `NamedTuple` with:
-	- `scores::Vector{Float64}`
-	- `converged::Bool`
-	- `iterations::Int`
-	- `norm_used::Symbol`
+	- `scores::Vector{Float64}` — PageRank scores on the selected nodes (order = selected indices).
+	- `converged::Bool` — `true` iff the iteration met `tol` before `maxiter`.
+	- `iterations::Int` — Number of iterations used.
+	- `norm_used::Symbol` — `:L1` or `:sup` (final normalization applied).
 
 	**Examples**
 	```julia
-	# Assume `adj` is a weighted directed SparseMatrixCSC and `idx` a component
-	res = pagerank_local_ora(adj, idx; alpha=0.9, mode=:in)
-	sum(res.scores) ≈ 1.0  # if final_norm=:L1
+	edges = DataFrame(
+		src = ["A","B","B","C","X","Y"],
+		dst = ["B","A","C","B","Y","X"],
+		weight = [1,1,1,1,2,2]
+	)
+
+	# Solve on all nodes (in-PageRank), weighted, L1-normalized output
+	res_all = pagerank_local_ora(edges; mode=:in, weighted=true)
+	sum(res_all.scores) ≈ 1.0
+
+	# Solve only on the {A,B,C} subset
+	res_sub = pagerank_local_ora(edges; nodes=["A","B","C"], mode=:in)
+
+	# With a custom teleport on the subset (must match subset length)
+	p_sub = [0.2, 0.5, 0.3]
+	res_sub_p = pagerank_local_ora(edges; nodes=["A","B","C"], personalization=p_sub)
+	See Also
+	pagerank_local_ora_matrix (core solver), pagerank_stitched (component-wise stitching)
 	""" pagerank_local_ora
 
 #	Component Scaled Page Rank
@@ -2176,8 +2289,12 @@ module Large_Graph_Similarity
 			@assert mode in (:in, :out)
 			@assert final_norm in (:L1, :sup)
 			@assert stitch_by in (:nodes, :edges, :personalization)
-			if !haskey(edges, :src) || !haskey(edges, :dst)
-				throw(ArgumentError("edges must contain :src and :dst"))
+			if !(hasproperty(edges, :src) && hasproperty(edges, :dst))
+    			throw(ArgumentError("edges must contain :src and :dst columns"))
+			end
+			if weighted && !hasproperty(edges, :weight)
+				@warn "weighted=true but :weight column not found; falling back to binary."
+				weighted = false
 			end
 
 		# 	Aggregation default
@@ -2258,9 +2375,9 @@ module Large_Graph_Similarity
 					nothing
 				end
 
-				res = pagerank_local_ora(adj, idx; alpha=alpha, tol=tol, maxiter=maxiter,
-										final_norm=:L1, mode=mode,
-										personalization=p_local, rng=rng)
+				res = pagerank_local_ora_matrix(adj, idx; alpha=alpha, tol=tol, maxiter=maxiter,
+												final_norm=:L1, mode=mode,
+												personalization=p_local, rng=rng)
 
 				scores[idx] .= weights[j] .* res.scores
 				converged_all &= res.converged
