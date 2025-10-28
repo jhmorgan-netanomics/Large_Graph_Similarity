@@ -1924,7 +1924,436 @@ module Large_Graph_Similarity
 
 #   INFLUENCE CENTRALITY MEASURES
 
-#   Component Scaled Page Rank
+#	Helper for Page Rank: Weak Components from a Directed Sparse Adjacency
+	function _component_indices_weak(adj::SparseMatrixCSC{<:Real,Int})
+		"""
+		Args:
+			adj::SparseMatrixCSC{<:Real,Int}: directed adjacency (weights allowed)
+		Returns:
+			Vector{Vector{Int}}: 1-based index lists for each weakly connected component
+		Notes:
+			Builds an undirected reachability pattern (A ∨ Aᵀ) ignoring self-loops,
+			then BFS to extract weak components.
+		"""
+		n = size(adj, 1)
+		pat = spzeros(Bool, n, n)
+		rows, cols, _ = findnz(adj)
+		@inbounds for k in eachindex(rows)
+			i = rows[k]; j = cols[k]
+			if i != j
+				pat[i, j] = true
+				pat[j, i] = true
+			end
+		end
+
+		visited = falses(n)
+		comps = Vector{Vector{Int}}()
+		for s in 1:n
+			visited[s] && continue
+			q = Int[s]
+			visited[s] = true
+			comp = Int[]
+			while !isempty(q)
+				v = popfirst!(q)
+				push!(comp, v)
+				_, nbrs, _ = findnz(pat[v, :])
+				@inbounds for w in nbrs
+					if !visited[w]
+						visited[w] = true
+						push!(q, w)
+					end
+				end
+			end
+			push!(comps, comp)
+		end
+
+		return comps
+	end
+
+#	Local ORA-Style PageRank on a Given Subgraph (indices)
+	function pagerank_local_ora(
+		adj::SparseMatrixCSC{<:Real,Int},
+		idx::Vector{Int};
+		alpha::Float64 = 0.85,
+		tol::Float64 = 1e-6,
+		maxiter::Int = 1000,
+		final_norm::Symbol = :L1,     # :L1 or :sup
+		mode::Symbol = :in,           # :in or :out
+		personalization::Union{Nothing,AbstractVector{<:Real}} = nothing,
+		rng::AbstractRNG = Random.default_rng() )
+		"""
+		Args:
+			adj::SparseMatrixCSC{<:Real,Int}: full directed adjacency (weights allowed)
+			idx::Vector{Int}: component node indices (1-based) to solve on
+			alpha::Float64: damping factor in (0,1) (default = 0.85)
+			tol::Float64: sup-norm stopping tolerance (default = 1e-6)
+			maxiter::Int: maximum iterations (default = 1000)
+			final_norm::Symbol: :L1 (sum 1) or :sup (max 1) cosmetic normalization
+			mode::Symbol: :in (use Aᵀ) or :out (use A) before column-normalization
+			personalization::Union{Nothing,AbstractVector{<:Real}}:
+				optional component-local teleport vector (L1-normalized internally)
+			rng::AbstractRNG: RNG for reproducible init (default = default_rng())
+		Returns:
+			NamedTuple: (scores::Vector{Float64}, converged::Bool,
+						iterations::Int, norm_used::Symbol)
+		Notes:
+			ORA conventions:
+			- absolute weights, self-loops removed
+			- build column-stochastic H (A or Aᵀ by mode)
+			- dangling mass folded into teleport p
+			- per-iteration sup-norm scaling; final L1/sup normalization
+		"""
+		#	Performing Basic Checks
+			@assert 0.0 < alpha < 1.0 "alpha must be in (0,1)"
+			@assert final_norm in (:L1, :sup)
+			@assert mode in (:in, :out)
+
+			n = length(idx)
+			if n == 0
+				return (scores=Float64[], converged=true, iterations=0, norm_used=final_norm)
+			elseif n == 1
+				return (scores=[1.0], converged=true, iterations=0, norm_used=final_norm)
+			end
+
+		# 	Extract submatrix, drop self-loops, abs weights
+			A = adj[idx, idx]
+			@inbounds for i in 1:n
+				A[i,i] = 0
+			end
+			dropzeros!(A)
+			A = SparseMatrixCSC{Float64,Int}(abs.(A))
+
+		# 	Mode mapping to column-stochastic H
+			M = (mode == :in) ? transpose(A) : A
+			colsum = vec(sum(M, dims=1))
+			colsum[colsum .== 0.0] .= 1.0
+			H = M * spdiagm(0 => (1.0 ./ colsum))
+
+		# 	Teleport vector p (component-local)
+			p = if personalization === nothing
+				fill(1.0 / n, n)
+			else
+				@assert length(personalization) == n "personalization length must match component size"
+				pp = collect(float.(personalization))
+				s = sum(pp); @assert s > 0 "personalization must have positive sum"
+				pp ./ s
+			end
+
+		# 	Identify dangling in M (pre-normalization)
+			dangling = vec(sum(M, dims=1) .== 0.0)
+
+		# 	Initialize x ∼ U(0,1), sup normalized
+			x = rand(rng, n)
+			x ./= maximum(x)
+
+		#	Performing Iterative Power Method
+			converged = false
+			iters = 0
+			for it in 1:maxiter
+				x_prev = x
+				y = H * x
+				dang_mass = alpha * sum(x[dangling])
+				y = alpha .* y .+ dang_mass .* p .+ (1.0 - alpha) .* p
+				m = maximum(y)
+				x = (m > 0) ? (y ./ m) : fill(1.0 / n, n)
+				if maximum(abs.(x .- x_prev)) < tol
+					converged = true
+					iters = it
+					break
+				end
+			end
+			iters == 0 && (iters = maxiter)
+
+		#	Performing Normalization
+			if final_norm == :L1
+				s = sum(x); if s > 0; x ./= s; end
+			else
+				m = maximum(x); if m > 0; x ./= m; end
+			end
+
+		#	Returning Page Rank Scores
+			return (scores=x, converged=converged, iterations=iters, norm_used=final_norm)
+	end
+	@doc raw"""
+	**Description**
+	Solves ORA‐style PageRank *within a given vertex set (component)* using absolute weights,
+	no self‐loops, column‐stochastic normalization, sup-norm stabilized power iterations, and
+	dangling handling. Final scores are optionally L1- or sup-normalized.
+
+	**Usage**
+	`pagerank_local_ora(adj::SparseMatrixCSC, idx::Vector{Int};
+						alpha=0.85, tol=1e-6, maxiter=1000,
+						final_norm=:L1, mode=:in,
+						personalization=nothing, rng=Random.default_rng())`
+
+	**Arguments**
+	- `adj::SparseMatrixCSC`: Full directed adjacency (weights allowed).
+	- `idx::Vector{Int}`: 1-based indices of nodes to solve on (the component).
+	- `alpha::Float64`: Damping in (0,1). Default `0.85`.
+	- `tol::Float64`: Sup-norm tolerance. Default `1e-6`.
+	- `maxiter::Int`: Maximum iterations. Default `1000`.
+	- `final_norm::Symbol`: `:L1` (sum to 1) or `:sup` (max=1).
+	- `mode::Symbol`: `:in` (uses `A'`) or `:out` (uses `A`) before column normalization.
+	- `personalization`: Optional component-local teleport vector (auto L1-normalized).
+	- `rng`: RNG for reproducible starts.
+
+	**Details**
+	Builds H by column normalizing `A` (or `A'` for `mode=:in`), redistributes
+	dangling mass and teleport mass to `p`, stabilizes each iteration by sup-normalizing,
+	and finally applies cosmetic `:L1` or `:sup` normalization.
+
+	**Value**
+	A `NamedTuple` with:
+	- `scores::Vector{Float64}`
+	- `converged::Bool`
+	- `iterations::Int`
+	- `norm_used::Symbol`
+
+	**Examples**
+	```julia
+	# Assume `adj` is a weighted directed SparseMatrixCSC and `idx` a component
+	res = pagerank_local_ora(adj, idx; alpha=0.9, mode=:in)
+	sum(res.scores) ≈ 1.0  # if final_norm=:L1
+	""" pagerank_local_ora
+
+#	Component Scaled Page Rank
+	function pagerank_stitched(
+		edges::DataFrame;
+		alpha::Float64 = 0.85,
+		tol::Float64 = 1e-6,
+		maxiter::Int = 1000,
+		mode::Symbol = :in, # :in or :out
+		final_norm::Symbol = :L1, # :L1 or :sup
+		weighted::Bool = true,
+		agg_func::Union{Function,Nothing} = nothing,
+		stitch_by::Symbol = :nodes, # :nodes | :edges | :personalization
+		personalization::Union{Nothing,AbstractVector{<:Real}} = nothing,
+		rng::AbstractRNG = Random.default_rng() )
+		"""
+		Args:
+			edges::DataFrame: Edge list with :src, :dst, and optional :weight
+			alpha::Float64: Damping factor in (0,1) (default = 0.85)
+			tol::Float64: Sup-norm convergence tolerance (default = 1e-6)
+			maxiter::Int: Maximum number of iterations (default = 1000)
+			mode::Symbol: :in (uses Aᵀ) or :out (uses A) before column normalization
+			final_norm::Symbol: :L1 (sum to 1) or :sup (max = 1) final normalization
+			weighted::Bool: Use edge weights if present (default = true)
+			agg_func::Union{Function,Nothing}: Aggregation for parallel edges
+				(default = sum if weighted, maximum if binary)
+			stitch_by::Symbol: Component weighting rule:
+				- :nodes → proportional to component size (|C_j| / N)
+				- :edges → proportional to absolute edge mass within component
+				- :personalization → proportional to global teleport mass p_i
+			personalization::Union{Nothing,AbstractVector{<:Real}}:
+				Global teleport vector of length N (L1-normalized internally);
+				required if stitch_by = :personalization
+			rng::AbstractRNG: Random number generator for reproducible starts
+				(default = Random.default_rng())
+		Returns:
+			NamedTuple: (
+				scores::Vector{Float64},
+				node_names::Vector{String},
+				converged::Bool,
+				iterations_sum::Int,
+				norm_used::Symbol,
+				stitch_by::Symbol,
+				component_weights::Dict{Int,Float64}
+			)
+		Notes:
+			- Relies on helper functions `_aggregate_multi_edges` and `_edgelist_to_sparse_matrix`
+			from this ecosystem.
+			- ORA conventions within each component:
+				* Absolute weights; self-loops removed
+				* Column-stochastic transition matrix H
+				* Sup-norm stabilized iteration with dangling handling
+			- Stitching rules:
+				* :nodes → component share by node count
+				* :edges → component share by total absolute edge weight
+				* :personalization → exact split by teleport mass, with per-component p normalization
+		"""
+		#	Basic Checks
+			@assert 0.0 < alpha < 1.0 "alpha must be in (0,1)"
+			@assert mode in (:in, :out)
+			@assert final_norm in (:L1, :sup)
+			@assert stitch_by in (:nodes, :edges, :personalization)
+			if !haskey(edges, :src) || !haskey(edges, :dst)
+				throw(ArgumentError("edges must contain :src and :dst"))
+			end
+
+		# 	Aggregation default
+			if agg_func === nothing
+				agg_func = (weighted && hasproperty(edges, :weight)) ? sum : maximum
+			end
+
+		#	Prepare adjacency via your helpers
+			clean_edges = _aggregate_multi_edges(edges; agg_func=agg_func)
+			use_weights = weighted && hasproperty(clean_edges, :weight)
+			adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=use_weights)
+			n = size(adj, 1)
+			if n == 0
+				return (scores=Float64[], node_names=String[], converged=true,
+						iterations_sum=0, norm_used=final_norm,
+						stitch_by=stitch_by, component_weights=Dict{Int,Float64}())
+			end
+
+		# 	Strip self-loops
+			@inbounds for i in 1:n
+				adj[i,i] = 0
+			end
+			dropzeros!(adj)
+
+		# 	Weak components
+			comps = _component_indices_weak(adj)
+			node_names = [string(idx_to_node[i]) for i in 1:n]
+
+		# 	Global personalization if needed
+			p_global = nothing
+			if stitch_by == :personalization
+				personalization === nothing && throw(ArgumentError("Provide `personalization` when stitch_by=:personalization"))
+				@assert length(personalization) == n "personalization length must equal #nodes"
+				p_global = collect(float.(personalization))
+				s = sum(p_global); @assert s > 0 "personalization must have positive sum"
+				p_global ./= s
+			end
+
+		#	Component weights
+			weights = Vector{Float64}(undef, length(comps))
+			if stitch_by == :nodes
+				@inbounds for (j, idx) in pairs(comps)
+					weights[j] = length(idx) / n
+				end
+			elseif stitch_by == :edges
+				masses = map(comps) do idx
+					sub = adj[idx, idx]
+					_, _, v = findnz(sub)
+					sum(abs, v)
+				end
+				tot = sum(masses)
+				if tot > 0
+					weights .= masses ./ tot
+				else
+					@inbounds for (j, idx) in pairs(comps)
+						weights[j] = length(idx) / n
+					end
+				end
+			else
+				#	Personalization mass per component
+					@assert p_global !== nothing
+					@inbounds for (j, idx) in pairs(comps)
+						weights[j] = sum(p_global[idx])
+					end
+			end
+
+		# 	Per-component solve + stitch
+			scores = zeros(Float64, n)
+			converged_all = true
+			iter_sum = 0
+			comp_weights = Dict{Int,Float64}()
+			for (j, idx) in pairs(comps)
+				p_local = if stitch_by == :personalization
+					pj = p_global[idx]
+					s = sum(pj)
+					(s > 0) ? (pj ./ s) : fill(1.0 / length(idx), length(idx))
+				else
+					nothing
+				end
+
+				res = pagerank_local_ora(adj, idx; alpha=alpha, tol=tol, maxiter=maxiter,
+										final_norm=:L1, mode=mode,
+										personalization=p_local, rng=rng)
+
+				scores[idx] .= weights[j] .* res.scores
+				converged_all &= res.converged
+				iter_sum += res.iterations
+				comp_weights[j] = weights[j]
+			end
+
+		# 	Final cosmetic normalization
+			if final_norm == :L1
+				s = sum(scores); if s > 0; scores ./= s; end
+			else
+				m = maximum(scores); if m > 0; scores ./= m; end
+			end
+
+		#	Return Component Scaled Page Rank Scores
+			return (scores=scores, node_names=node_names, converged=converged_all,
+					iterations_sum=iter_sum, norm_used=final_norm,
+					stitch_by=stitch_by, component_weights=comp_weights)
+	end
+	@doc raw"""
+	**Description**
+	Runs ORA-style PageRank **per weakly connected component** and stitches component
+	score vectors into a single global vector using a chosen weighting rule
+	(`:nodes`, `:edges`, or exact `:personalization`). Within each component:
+	absolute weights are used, self-loops are removed, the transition matrix is
+	column-stochastic, iterations are sup-norm stabilized, and dangling mass is handled.
+
+	**Usage**
+	`pagerank_stitched(edges::DataFrame;
+	                   alpha=0.85, tol=1e-6, maxiter=1000,
+	                   mode=:in, final_norm=:L1,
+	                   weighted=true, agg_func=nothing,
+	                   stitch_by=:nodes, personalization=nothing,
+	                   rng=Random.default_rng())`
+
+	**Arguments**
+	- `edges::DataFrame`: Edge list with `:src`, `:dst`, and optional `:weight`.
+	- `alpha::Float64`: Damping factor in `(0,1)`. Default `0.85`.
+	- `tol::Float64`: Sup-norm convergence tolerance. Default `1e-6`.
+	- `maxiter::Int`: Maximum number of iterations. Default `1000`.
+	- `mode::Symbol`: `:in` (uses `A'` before column normalization) or `:out` (uses `A`).
+	- `final_norm::Symbol`: Final cosmetic scaling — `:L1` (scores sum to 1) or `:sup` (max=1).
+	- `weighted::Bool`: Use edge weights if present. Default `true`.
+	- `agg_func`: Aggregation for parallel edges; default `sum` when `weighted=true`, else `maximum`.
+	- `stitch_by::Symbol`: How to weight component contributions:
+	  - `:nodes` → weight ∝ component size share (`|C_j| / N`).
+	  - `:edges` → weight ∝ sum of absolute weights within the component.
+	  - `:personalization` → exact split by the mass of a global teleport vector `p`
+	    (**requires** `personalization`).
+	- `personalization`: Global length-`N` teleport vector (L1-normalized internally) used only
+	  when `stitch_by = :personalization`.
+	- `rng`: RNG for reproducible starts. Default `Random.default_rng()`.
+
+	**Details**
+	Inside each component the solver is equivalent to `pagerank_local_ora`. The stitched
+	global vector is a convex combination of component vectors using the rule specified
+	by `stitch_by`. With `:personalization`, stitching implements the linear decomposition
+	implied by the global teleport vector `p` (component mass equals the sum of `p` over
+	the component; local solve uses `p` restricted to that component).
+
+	**Value**
+	A `NamedTuple` with:
+	- `scores::Vector{Float64}` — Stitched PageRank scores in global node order.
+	- `node_names::Vector{String}` — Node identifiers (from your edge list).
+	- `converged::Bool` — `true` iff all component solves hit the tolerance.
+	- `iterations_sum::Int` — Sum of per-component iteration counts.
+	- `norm_used::Symbol` — `:L1` or `:sup` (final normalization applied).
+	- `stitch_by::Symbol` — Stitching rule actually used.
+	- `component_weights::Dict{Int,Float64}` — Component index → stitch weight.
+
+	**Examples**
+	```julia
+	edges = DataFrame(
+	    src = ["A","B","B","C","X","Y"],
+	    dst = ["B","A","C","B","Y","X"],
+	    weight = [1,1,1,1,2,2]
+	)
+
+	# Stitch by node share
+	res_nodes = pagerank_stitched(edges; stitch_by=:nodes)
+	sum(res_nodes.scores) ≈ 1.0  # final_norm=:L1
+
+	# Stitch by component edge mass
+	res_edges = pagerank_stitched(edges; stitch_by=:edges)
+
+	# Exact personalization-based stitching
+	p = fill(1.0 / length(res_nodes.node_names), length(res_nodes.node_names))
+	res_pers = pagerank_stitched(edges; stitch_by=:personalization, personalization=p)
+	```
+
+	**See Also**
+	`pagerank_local_ora` (component solver)
+	""" pagerank_stitched
 
 #   Hub & Authority Scores
 	function salsa_centrality(edges::DataFrame;
@@ -2342,7 +2771,9 @@ module Large_Graph_Similarity
 		   global_clustering_coefficient,
            weighted_clustering_coefficient,
            directed_clustering_cg,
-		   local_weighted_reciprocity
+		   local_weighted_reciprocity,
+		   pagerank_local_ora,
+		   pagerank_stitched,
 		   salsa_centrality,
 		   reciprocity
 		   

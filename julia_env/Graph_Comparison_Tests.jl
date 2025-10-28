@@ -1510,7 +1510,7 @@
 #	CALCULATE INFLUENCE MEASURES
 
 #	Component Scaled Page Rank
-
+	
 
 #	Hub Centrality: SALSA
 	hub_centrality = salsa_centrality(agent_agent_all_com.edges; score=:hub)
