@@ -20,6 +20,7 @@
     using DataFrames
 	using LinearAlgebra
 	using SparseArrays
+	using StatsBase
     using Large_Graph_Similarity
 
 ######################
@@ -810,6 +811,225 @@
 			)
 	end
 
+#	Test Function for Local Weighted Reciprocity
+	function test_local_weighted_reciprocity()
+		"""
+		Args:
+			None
+		Returns:
+			Nothing (prints test results)
+		Notes:
+			Tests local_weighted_reciprocity on 5 ego network topologies.
+			Compares computed values against analytical calculations.
+		"""
+		
+		#	Test setup
+			println("=" ^ 60)
+			println("Testing Local Weighted Reciprocity")
+			println("=" ^ 60)
+			test_passed = true
+		
+		#	Test 1: Star Network (Core-Periphery)
+			println("\nTest 1: Star Network (Ego at center)")
+			println("-" ^ 40)
+			
+		#	Create star: Ego connects to A,B,C with no reciprocation
+			edges1 = DataFrame(
+				src = ["Ego", "Ego", "Ego"],
+				dst = ["A", "B", "C"],
+				weight = [3, 2, 4]
+			)
+			
+		#	Analytical expectations
+			expected1 = Dict(
+				"Ego" => (r=0.0, out=9.0, recip=0.0),  # No reciprocation
+				"A" => (r=0.0, out=0.0, recip=0.0),    # No outgoing edges
+				"B" => (r=0.0, out=0.0, recip=0.0),
+				"C" => (r=0.0, out=0.0, recip=0.0)
+			)
+			
+		#	Run function
+			result1 = local_weighted_reciprocity(edges1; weighted=true)
+			
+		#	Validate
+			for row in eachrow(result1)
+				exp = expected1[row.node]
+				pass = isapprox(row.r, exp.r; atol=1e-6) &&
+				       isapprox(row.out_strength, exp.out; atol=1e-6) &&
+				       isapprox(row.reciprocated, exp.recip; atol=1e-6)
+				println("  $(row.node): r=$(round(row.r, digits=3)), expected $(exp.r) - $(pass ? "✓" : "✗")")
+				test_passed = test_passed && pass
+			end
+		
+		#	Test 2: Closed Cycles (Triangular Network)
+			println("\nTest 2: Closed Cycles Network")
+			println("-" ^ 40)
+			
+		#	Create triangles: Ego-A-B form triangle, Ego-C reciprocal
+			edges2 = DataFrame(
+				src = ["Ego", "Ego", "A", "B", "A", "C"],
+				dst = ["A", "B", "Ego", "Ego", "B", "Ego"],
+				weight = [4, 3, 2, 3, 1, 5]
+			)
+			
+		#	Analytical expectations
+			# Ego: out to A(4), B(3); in from A(2), B(3), C(5)
+			# recip = min(4,2) + min(3,3) + min(0,5) = 2+3+0 = 5
+			# r = 5/7 ≈ 0.714
+			
+			# A: out to Ego(2), B(1); in from Ego(4)
+			# recip = min(2,4) + min(1,0) = 2+0 = 2
+			# r = 2/3 ≈ 0.667
+			
+			expected2 = Dict(
+				"Ego" => (r=5/7, out=7.0, recip=5.0),
+				"A" => (r=2/3, out=3.0, recip=2.0),
+				"B" => (r=1.0, out=3.0, recip=3.0),  # B→Ego(3) reciprocated
+				"C" => (r=0.0, out=5.0, recip=0.0)   # C→Ego(5) not reciprocated
+			)
+			
+		#	Run function
+			result2 = local_weighted_reciprocity(edges2; weighted=true)
+			
+		#	Validate
+			for row in eachrow(result2)
+				exp = expected2[row.node]
+				pass = isapprox(row.r, exp.r; atol=1e-6)
+				println("  $(row.node): r=$(round(row.r, digits=3)), expected $(round(exp.r, digits=3)) - $(pass ? "✓" : "✗")")
+				test_passed = test_passed && pass
+			end
+		
+		#	Test 3: Bow-tie Network (Ego bridges two groups)
+			println("\nTest 3: Bow-tie Network")
+			println("-" ^ 40)
+			
+		#	Create bow-tie: Ego connects groups {A,B} and {C,D}
+			edges3 = DataFrame(
+				src = ["Ego", "Ego", "Ego", "Ego", "A", "B", "C", "D", "A", "C"],
+				dst = ["A", "B", "C", "D", "Ego", "Ego", "Ego", "Ego", "B", "D"],
+				weight = [3, 2, 4, 1, 3, 1, 2, 1, 2, 3]
+			)
+			
+		#	Analytical expectations
+			# Ego: out to A(3),B(2),C(4),D(1); in from A(3),B(1),C(2),D(1)
+			# recip = min(3,3) + min(2,1) + min(4,2) + min(1,1) = 3+1+2+1 = 7
+			# r = 7/10 = 0.7
+			
+			expected3 = Dict(
+				"Ego" => (r=0.7, out=10.0, recip=7.0),
+				"A" => (r=3/5, out=5.0, recip=3.0),  # A→Ego(3),B(2); reciprocated Ego(3)
+				"B" => (r=1/1, out=1.0, recip=1.0),  # B→Ego(1); reciprocated
+				"C" => (r=2/5, out=5.0, recip=2.0),  # C→Ego(2),D(3); reciprocated Ego(2)
+				"D" => (r=1/1, out=1.0, recip=1.0)   # D→Ego(1); reciprocated
+			)
+			
+		#	Run function
+			result3 = local_weighted_reciprocity(edges3; weighted=true)
+			
+		#	Validate
+			for row in eachrow(result3)
+				exp = expected3[row.node]
+				pass = isapprox(row.r, exp.r; atol=1e-6)
+				println("  $(row.node): r=$(round(row.r, digits=3)), expected $(round(exp.r, digits=3)) - $(pass ? "✓" : "✗")")
+				test_passed = test_passed && pass
+			end
+		
+		#	Test 4: Uniformly Connected Network
+			println("\nTest 4: Uniformly Connected Network")
+			println("-" ^ 40)
+			
+		#	Create complete graph with uniform weights
+			nodes4 = ["Ego", "A", "B", "C"]
+			src4 = String[]
+			dst4 = String[]
+			weight4 = Float64[]
+			
+			for i in nodes4, j in nodes4
+				if i != j
+					push!(src4, i)
+					push!(dst4, j)
+					push!(weight4, 2.0)  # Uniform weight
+				end
+			end
+			
+			edges4 = DataFrame(src=src4, dst=dst4, weight=weight4)
+			
+		#	Analytical expectations - all nodes identical
+			# Each node: 3 outgoing edges of weight 2, all reciprocated
+			# recip = 3 * min(2,2) = 6
+			# r = 6/6 = 1.0
+			
+			expected4_r = 1.0
+			
+		#	Run function
+			result4 = local_weighted_reciprocity(edges4; weighted=true)
+			
+		#	Validate
+			for row in eachrow(result4)
+				pass = isapprox(row.r, expected4_r; atol=1e-6)
+				println("  $(row.node): r=$(round(row.r, digits=3)), expected $(expected4_r) - $(pass ? "✓" : "✗")")
+				test_passed = test_passed && pass
+			end
+		
+		#	Test 5: Mixed Reciprocity Network
+			println("\nTest 5: Mixed Reciprocity Network")
+			println("-" ^ 40)
+			
+		#	Create mixed: equal-weight reciprocal + asymmetric reciprocal + one-way
+			edges5 = DataFrame(
+				src = ["Ego", "Ego", "Ego", "A", "B"],
+				dst = ["A", "B", "C", "Ego", "Ego"],
+				weight = [4, 3, 5, 4, 1]  # A perfect, B asymmetric, C one-way
+			)
+			
+		#	Analytical expectations
+			# Ego: out to A(4),B(3),C(5); in from A(4),B(1)
+			# recip = min(4,4) + min(3,1) + min(5,0) = 4+1+0 = 5
+			# r = 5/12 ≈ 0.417
+			
+			# A: perfect reciprocation with Ego
+			# r = 4/4 = 1.0
+			
+			# B: asymmetric with Ego
+			# r = 1/1 = 1.0 (its one edge is reciprocated)
+			
+			expected5 = Dict(
+				"Ego" => (r=5/12, out=12.0, recip=5.0),
+				"A" => (r=1.0, out=4.0, recip=4.0),
+				"B" => (r=1.0, out=1.0, recip=1.0),
+				"C" => (r=0.0, out=0.0, recip=0.0)
+			)
+			
+		#	Run function
+			result5 = local_weighted_reciprocity(edges5; weighted=true)
+			
+		#	Validate
+			for row in eachrow(result5)
+				exp = expected5[row.node]
+				pass = isapprox(row.r, exp.r; atol=1e-6)
+				println("  $(row.node): r=$(round(row.r, digits=3)), expected $(round(exp.r, digits=3)) - $(pass ? "✓" : "✗")")
+				test_passed = test_passed && pass
+			end
+		
+		#	Test normalization methods
+			println("\nTest 6: Normalization Methods")
+			println("-" ^ 40)
+			
+		#	Test z-score normalization
+			result_z = local_weighted_reciprocity(edges5; weighted=true, normalize=:zscore)
+			println("  Z-score normalization: mean=$(round(mean(result_z.r_norm), digits=3)) (should be ≈0)")
+			
+		#	Test rank normalization
+			result_r = local_weighted_reciprocity(edges5; weighted=true, normalize=:rank)
+			println("  Rank normalization: range=[$(round(minimum(result_r.r_norm), digits=3)), $(round(maximum(result_r.r_norm), digits=3))] (should be [0,1])")
+		
+		#	Summary
+			println()
+			println(repeat("=", 60))
+			println("Overall Test Result: $(test_passed ? "PASSED ✓" : "FAILED ✗")")
+			println(repeat("=", 60))
+	end
+
 #	SALSA Sanity Tests on Graphs with Known Solutions
 	function test_salsa()
 		"""
@@ -969,6 +1189,110 @@
 			println("=" ^ 60)
 	end
 
+#	Test Function for Reciprocity Methods
+	function test_reciprocity_methods()
+		"""
+		Args:
+			None
+		Returns:
+			Nothing (prints test results)
+		Notes:
+			Tests all reciprocity methods on a 5-node network designed to show differences.
+		"""
+		
+		#	Create test network with varied reciprocity patterns
+			edges = DataFrame(
+				src = ["A", "A", "B", "B", "C", "C", "D", "E"],
+				dst = ["B", "C", "A", "D", "A", "D", "E", "D"],
+				weight = [4, 2, 1, 3, 2, 5, 6, 0]  # E→D has 0 weight, will be dropped
+			)
+			
+		#	Remove zero-weight edge for clarity
+			edges = edges[edges.weight .> 0, :]
+			
+		#	Display network structure
+			println("=" ^ 60)
+			println("Test Network (5 nodes):")
+			println("-" ^ 30)
+			for row in eachrow(edges)
+				println("  $(row.src) → $(row.dst) : $(row.weight)")
+			end
+			println()
+			
+		#	Analyze network structure
+			println("Network Structure:")
+			println("  A ↔ B: weights 4 and 1 (reciprocal, unequal)")
+			println("  A ← C: weight 2 (one-way from C)")
+			println("  A → C: weight 2 (one-way to C)")
+			println("  B → D: weight 3 (one-way)")
+			println("  C ↔ D: weights 5 and 0 (one-way, D→C missing)")
+			println("  D → E: weight 6 (one-way)")
+			println()
+			
+		#	Calculate all methods
+			println("=" ^ 60)
+			println("Reciprocity Results:")
+			println("-" ^ 30)
+			
+		#	Arc-based unweighted
+			rec_arc_unw = reciprocity(edges; weighted=false, mode=:arc_based)
+			println("Arc-based (unweighted):    $(round(rec_arc_unw, digits=4))")
+			println("  Calculation: 4 edges have reverse / 7 total edges")
+			println("  Result: 4/7 ≈ 0.571")
+			println()
+			
+		#	Arc-based weighted
+			rec_arc_w = reciprocity(edges; weighted=true, mode=:arc_based)
+			println("Arc-based (weighted):      $(round(rec_arc_w, digits=4))")
+			println("  Calculation: weights of edges with reverse / total weight")
+			println("  Edges with reverse: A→B(4), B→A(1), A→C(2), C→A(2)")
+			println("  Result: (4+1+2+2) / (4+1+2+2+3+5+6) = 9/23 ≈ 0.391")
+			println()
+			
+		#	Dyad-based unweighted
+			rec_dyad_unw = reciprocity(edges; weighted=false, mode=:dyad_based)
+			println("Dyad-based (unweighted):   $(round(rec_dyad_unw, digits=4))")
+			println("  Calculation: mutual dyads / connected dyads")
+			println("  Mutual dyads: A-B, A-C = 2")
+			println("  Connected dyads: A-B, A-C, B-D, C-D, D-E = 5")
+			println("  Result: 2/5 = 0.4")
+			println()
+			
+		#	Dyad-based weighted (ORA mutual)
+			rec_dyad_ora = reciprocity(edges; weighted=true, mode=:dyad_based, weighted_method=:ora_mutual)
+			println("Dyad-based ORA mutual:     $(round(rec_dyad_ora, digits=4))")
+			println("  Calculation: dyads with exact weight match / connected dyads")
+			println("  Exact matches: A-C (both 2) = 1")
+			println("  Connected dyads: 5")
+			println("  Result: 1/5 = 0.2")
+			println()
+			
+		#	Dyad-based weighted (Squartini)
+			rec_dyad_sq = reciprocity(edges; weighted=true, mode=:dyad_based, weighted_method=:squartini)
+			println("Dyad-based Squartini:      $(round(rec_dyad_sq, digits=4))")
+			println("  Calculation: Σ min(w_ij, w_ji) / Σ w_ij")
+			println("  Min weights: A→B:1, B→A:1, A→C:2, C→A:2, others:0")
+			println("  Result: (1+1+2+2) / 23 = 6/23 ≈ 0.261")
+			println()
+			
+		#	Summary comparison
+			println("=" ^ 60)
+			println("Summary of Results:")
+			println("-" ^ 30)
+			println("Arc-based (unweighted):    $(round(rec_arc_unw, digits=4))")
+			println("Arc-based (weighted):      $(round(rec_arc_w, digits=4))")
+			println("Dyad-based (unweighted):   $(round(rec_dyad_unw, digits=4))")
+			println("Dyad-based ORA mutual:     $(round(rec_dyad_ora, digits=4))")
+			println("Dyad-based Squartini:      $(round(rec_dyad_sq, digits=4))")
+			println()
+			
+		#	Verify all methods give different results
+			results = [rec_arc_unw, rec_arc_w, rec_dyad_unw, rec_dyad_ora, rec_dyad_sq]
+			all_different = length(unique(round.(results, digits=4))) == 5
+			println("All methods give different results: ", all_different)
+			println("=" ^ 60)
+	end
+
 ##########################
 #   GRAPH IMPORT TESTS   #
 ##########################
@@ -1123,7 +1447,8 @@
 #	Directed Weighted Clustering (Clemente & Grassi, 2018)
 	cg_clustering_coefficients = weighted_clustering_coefficient(agent_agent_all_com.edges; directed=true, agg_func=sum)
 
-#   Local Reciprocity (Fraction of Reciprocated Edges)
+#	Local Weighted Reciprocity (Squartini et al., 2013)
+	ego_reciprocity = local_weighted_reciprocity(agent_agent_all_com.edges; normalize=:rank)
 
 #   COMPARISON TESTS
 
@@ -1175,9 +1500,8 @@
 									  cg_total_delta = cg_clustering_coefficients.cg_total .- cg_clustering_coefficients.cg_total_ig,
 									  barrat_local_delta = cg_clustering_coefficients.barrat_local .- cg_clustering_coefficients.barrat_local_ig)
 
-#	TO DO:
-#	1) Review reciprocity and transitivity tests after hearing back from Jeff R. regarding ORA normalizations.
-#	2) Implement Ego-Level Reciprocity Score
+#   Local Reciprocity (Fraction of Reciprocated Edges)
+	test_local_weighted_reciprocity()
 
 ####################################################
 #   MEASURE TESTS: INFLUENCE CENTRALITY MEASURES   #
@@ -1221,5 +1545,14 @@
 #   GLOBAL MEASURES   #
 #######################
 
+#	CALCULATE GLOBAL MEASURES
+
 #   Global Reciprocity (Fraction of Reciprocated Edges): 0.004
-	reciprocity(agent_agent_all_com.edges, include_self_loops=false, weighted=true, mode=:mutual)
+	ora_reciprocity = reciprocity(agent_agent_all_com.edges, weighted=true, mode=:dyad_based, weighted_method=:ora_mutual)
+	squartini_reciprocity = reciprocity(agent_agent_all_com.edges, weighted=true, mode=:dyad_based, weighted_method=:squartini)
+	arc_reciprocity = reciprocity(agent_agent_all_com.edges, weighted=true, mode=:arc_based)
+
+#	CONDUCT TESTS
+
+#	Reciprocity Tests
+	test_reciprocity_methods()

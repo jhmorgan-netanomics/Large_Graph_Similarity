@@ -1739,8 +1739,188 @@ module Large_Graph_Similarity
 	- Clemente, G. P., & Grassi, R. (2018). *Directed clustering in weighted networks: a new perspective*. Chaos, Solitons & Fractals, 107, 26–38.
 	""" directed_clustering_cg
 
-#   Local Reciprocity (Fraction of Reciprocated Edges per Ego)
+#	Local Weighted Reciprocity (Squartini, node/ego level) with Normalization
+	function local_weighted_reciprocity(edges::DataFrame;
+	                                    weighted::Bool=true,
+	                                    agg_func::Union{Function,Nothing}=nothing,
+	                                    normalize::Symbol=:none)
+		"""
+		Args:
+			edges::DataFrame: edge list with :src, :dst, and optional :weight
+			weighted::Bool: use weights if present (default = true)
+			agg_func::Union{Function,Nothing}: aggregation for parallel edges (default = sum for weighted, maximum for binary)
+			normalize::Symbol: :none, :zscore, or :rank (default = :none)
+		Returns:
+			DataFrame: columns [node, r, reciprocated, out_strength, r_norm, normalization]
+		Notes:
+			Implements Squartini et al. local weighted reciprocity.
+			r_i = (Σ_j min(w_ij, w_ji)) / (Σ_j w_ij) for j≠i.
+			Self-loops excluded. Zero out-strength gives r_i = 0.
+		"""
+		
+		#	Validation
+			if !hasproperty(edges, :src) || !hasproperty(edges, :dst)
+				throw(ArgumentError("edges must have :src and :dst columns"))
+			end
+			if !(normalize in (:none, :zscore, :rank))
+				throw(ArgumentError("normalize must be :none, :zscore, or :rank"))
+			end
+		
+		#	Handle empty edge list
+			if nrow(edges) == 0
+				return DataFrame(
+					node = String[],
+					r = Float64[],
+					reciprocated = Float64[],
+					out_strength = Float64[],
+					r_norm = Float64[],
+					normalization = Symbol[]
+				)
+			end
+		
+		#	Set default aggregation function
+			if isnothing(agg_func)
+				agg_func = (weighted && hasproperty(edges, :weight)) ? sum : maximum
+			end
+		
+		#	Aggregate parallel edges
+			clean_edges = _aggregate_multi_edges(edges; agg_func=agg_func)
+		
+		#	Build adjacency matrix
+			use_weights = weighted && hasproperty(clean_edges, :weight)
+			adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=use_weights)
+			n = size(adj, 1)
+		
+		#	Remove self-loops
+			for i in 1:n
+				adj[i, i] = 0
+			end
+			dropzeros!(adj)
+		
+		#	Compute out-strength and reciprocated weight for each node
+			out_strength = Array{Float64}(undef, n)
+			recip = Array{Float64}(undef, n)
+			
+			for i in 1:n
+				#	Out-strength: sum of outgoing weights
+					out_strength[i] = sum(adj[i, :])
+
+				#	Reciprocated weight: sum of min(w_ij, w_ji) over nonzero out-neighbors
+					acc = 0.0
+					cols, vals = findnz(adj[i, :])   # SparseVector ⇒ (indices, values)
+					for t in 1:length(cols)
+						j   = cols[t]
+						wij = vals[t]
+						wji = adj[j, i]
+						acc += min(wij, wji)
+					end
+					recip[i] = acc
+			end
+		
+		#	Calculate raw reciprocity r_i
+			r = similar(recip)
+			for i in 1:n
+				r[i] = out_strength[i] > 0 ? recip[i] / out_strength[i] : 0.0
+			end
+		
+		#	Apply normalization
+			r_norm = copy(r)
+			
+			if normalize == :zscore
+				#	Z-score normalization
+					μ = mean(r)
+					σ = std(r)
+					if σ > 0
+						for i in 1:n
+							r_norm[i] = (r[i] - μ) / σ
+						end
+					else
+						fill!(r_norm, 0.0)
+					end
+					
+			elseif normalize == :rank
+    			#	Dense ranks: equal values share a rank; next distinct value gets +1.
+    			# 	Then scale ranks to [0,1] so the highest tier maps to 1.0.
+					vals = collect(r)
+					uniq = sort(unique(vals))                    # distinct r values, ascending
+					rankmap = Dict(v => i for (i, v) in enumerate(uniq))  # v -> 1..k (dense)
+					ranks = [rankmap[v] for v in vals]
+					k = length(uniq)
+					if k > 1
+						for i in 1:n
+							r_norm[i] = (ranks[i] - 1) / (k - 1)
+						end
+					else
+						fill!(r_norm, 0.0)
+					end
+			end
+		
+		#	Assembling Result
+			result = DataFrame(
+				node = [idx_to_node[i] for i in 1:n],
+				r = r,
+				reciprocated = recip,
+				out_strength = out_strength,
+				r_norm = r_norm,
+				normalization = fill(normalize, n)
+			)
+			return result
+	end
+	@doc raw"""
+	**Description**
+	Computes local (node-level) weighted reciprocity following Squartini et al. (2013). For each node, measures the fraction of outgoing weight that is reciprocated by incoming connections.
+
+	**Usage**
+	`local_weighted_reciprocity(edges::DataFrame; weighted=true, agg_func=nothing, normalize=:none)`
+
+	**Arguments**
+	- `edges::DataFrame`: Edge list with `:src`, `:dst`, and optionally `:weight` columns
+	- `weighted::Bool`: Use edge weights if present (default `true`)
+	- `agg_func::Function`: Aggregation for parallel edges (default `sum` for weighted, `maximum` for binary)
+	- `normalize::Symbol`: Post-processing normalization - `:none` (raw), `:zscore` (standardized), or `:rank` (percentile)
+
+	**Details**
+	For each node i, local reciprocity is:
+	r_i = Σ_j min(w_ij, w_ji) / Σ_j w_ij
+
+	Where the sums are over all neighbors j≠i. This measures what fraction of i's outgoing communication is reciprocated. Self-loops are excluded. Nodes with zero out-strength receive r_i = 0.
+
+	Normalization options:
+	- `:none`: Raw values [0,1]
+	- `:zscore`: (r_i - μ)/σ across nodes
+	- `:rank`: Average rank scaled to [0,1]
+
+	**Value**
+	A `DataFrame` with columns:
+	- `node`: Node identifier
+	- `r`: Raw local reciprocity [0,1]
+	- `reciprocated`: Total reciprocated weight
+	- `out_strength`: Total outgoing weight
+	- `r_norm`: Normalized reciprocity
+	- `normalization`: Method used
+
+	**Examples**
+```julia
+	# Weighted network with varied reciprocity
+	edges = DataFrame(
+		src = ["A", "B", "C", "D", "E"],
+		dst = ["B", "A", "D", "C", "F"],
+		weight = [5, 4, 1, 1, 6]
+	)
 	
+	# Raw local reciprocity
+	local_rec = local_weighted_reciprocity(edges)
+	
+	# With rank normalization
+	local_rec_ranked = local_weighted_reciprocity(edges; normalize=:rank)
+```
+
+	**See Also**
+	`reciprocity` (global measure)
+
+	**References**
+	Squartini T, Picciolo F, Ruzzenenti F, Garlaschelli D (2013). "Reciprocity of weighted networks" Scientific Reports 3:2729.
+	""" local_weighted_reciprocity
 
 #   INFLUENCE CENTRALITY MEASURES
 
@@ -1928,36 +2108,33 @@ module Large_Graph_Similarity
 
 #   Global Reciprocity
 	function reciprocity(edges::DataFrame;
-	                     include_self_loops::Bool=false,
 	                     weighted::Bool=false,
 	                     agg_func::Union{Function,Nothing}=nothing,
-	                     mode::Symbol=:dyad)
+	                     mode::Symbol=:arc_based,
+	                     weighted_method::Symbol=:squartini)
 		"""
 		Args:
 			edges::DataFrame: must contain :src, :dst, optionally :weight
-			include_self_loops::Bool: include self-loops in calculation (default = false)
 			weighted::Bool: enables weighted reciprocity if :weight exists (default = false)
 			agg_func::Union{Function,Nothing}: aggregation for parallel edges (default = sum for weighted, maximum for binary)
-			mode::Symbol: :dyad/:dyad_sum, :dyad_max, :arc, or :mutual (default = :dyad)
+			mode::Symbol: :arc_based or :dyad_based (default = :arc_based)
+			weighted_method::Symbol: for dyad_based weighted only - :squartini or :ora_mutual (default = :squartini)
 		Returns:
 			Float64: reciprocity value based on selected mode
 		Notes:
-			Dyad modes: fraction of connected dyads that are mutual
-			Arc mode: fraction of directed edges with reverse edge
-			Mutual mode (ORA): for weighted, requires exact weight match
+			Arc-based counts directed edges, dyad-based counts unordered pairs.
+			Weighted dyad methods differ in how they handle weight asymmetry.
 		"""
 		
 		#	Validation
 			if !hasproperty(edges, :src) || !hasproperty(edges, :dst)
 				throw(ArgumentError("edges DataFrame must have src and dst columns"))
 			end
-			if !(mode in (:dyad, :dyad_sum, :dyad_max, :arc, :mutual))
-				throw(ArgumentError("mode must be :dyad, :dyad_sum, :dyad_max, :arc, or :mutual"))
+			if !(mode in (:arc_based, :dyad_based))
+				throw(ArgumentError("mode must be :arc_based or :dyad_based"))
 			end
-			
-		#	Handle :dyad as alias for :dyad_sum
-			if mode == :dyad
-				mode = :dyad_sum
+			if mode == :dyad_based && weighted && !(weighted_method in (:squartini, :ora_mutual))
+				throw(ArgumentError("weighted_method must be :squartini or :ora_mutual for weighted dyad_based"))
 			end
 			
 		#	Handle empty edge list
@@ -1978,151 +2155,93 @@ module Large_Graph_Similarity
 			adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=use_weights)
 			n = size(adj, 1)
 			
-		#	Handle self-loops for dyad and mutual modes (always exclude)
-			if mode in (:dyad_sum, :dyad_max, :mutual) || !include_self_loops
-				for i in 1:n
-					adj[i, i] = 0
-				end
-				dropzeros!(adj)
+		#	Remove self-loops
+			for i in 1:n
+				adj[i, i] = 0
 			end
+			dropzeros!(adj)
 			
 		#	Calculate based on mode
-			if mode == :dyad_sum
-				#	Dyad-based reciprocity (sum denominator)
-					if use_weights
-						#	Weighted: sum(min(w_ij, w_ji)) / sum(w_ij + w_ji) for i<j
-							numerator = 0.0
-							denominator = 0.0
-							for i in 1:n
-								for j in (i+1):n
-									w_ij = adj[i, j]
-									w_ji = adj[j, i]
-									if w_ij > 0 || w_ji > 0
-										numerator += min(w_ij, w_ji)
-										denominator += w_ij + w_ji
-									end
-								end
-							end
-					else
-						#	Binary: count mutual dyads / count connected dyads
-							mutual_dyads = 0
-							connected_dyads = 0
-							for i in 1:n
-								for j in (i+1):n
-									has_ij = adj[i, j] > 0
-									has_ji = adj[j, i] > 0
-									if has_ij || has_ji
-										connected_dyads += 1
-										if has_ij && has_ji
-											mutual_dyads += 1
-										end
-									end
-								end
-							end
-							numerator = Float64(mutual_dyads)
-							denominator = Float64(connected_dyads)
-					end
-					
-			elseif mode == :dyad_max
-				#	Dyad-based reciprocity (max denominator)
-					if use_weights
-						#	Weighted: sum(min(w_ij, w_ji)) / sum(max(w_ij, w_ji)) for i<j
-							numerator = 0.0
-							denominator = 0.0
-							for i in 1:n
-								for j in (i+1):n
-									w_ij = adj[i, j]
-									w_ji = adj[j, i]
-									if w_ij > 0 || w_ji > 0
-										numerator += min(w_ij, w_ji)
-										denominator += max(w_ij, w_ji)
-									end
-								end
-							end
-					else
-						#	Binary: same as dyad_sum for binary networks
-							mutual_dyads = 0
-							connected_dyads = 0
-							for i in 1:n
-								for j in (i+1):n
-									has_ij = adj[i, j] > 0
-									has_ji = adj[j, i] > 0
-									if has_ij || has_ji
-										connected_dyads += 1
-										if has_ij && has_ji
-											mutual_dyads += 1
-										end
-									end
-								end
-							end
-							numerator = Float64(mutual_dyads)
-							denominator = Float64(connected_dyads)
-					end
-					
-			elseif mode == :arc
-				#	Arc-based reciprocity
+			if mode == :arc_based
+				#	Arc-based: fraction of directed edges with reverse
 					rows, cols, vals = findnz(adj)
-					reciprocal_arcs = 0
-					total_arcs = 0
 					
 					if use_weights
 						#	Weighted: sum(w_ij * I{w_ji>0}) / sum(w_ij)
+							reciprocal_weight = 0.0
+							total_weight = 0.0
+							
 							for idx in 1:length(rows)
 								i, j, w = rows[idx], cols[idx], vals[idx]
-								if !include_self_loops && i == j
-									continue
-								end
-								total_arcs += w
+								total_weight += w
 								if adj[j, i] > 0
-									reciprocal_arcs += w
+									reciprocal_weight += w
 								end
 							end
-							numerator = reciprocal_arcs
-							denominator = total_arcs
+							
+							numerator = reciprocal_weight
+							denominator = total_weight
 					else
 						#	Binary: count arcs with reverse / total arcs
+							reciprocal_arcs = 0
+							
 							for idx in 1:length(rows)
 								i, j = rows[idx], cols[idx]
-								if !include_self_loops && i == j
-									continue
-								end
-								total_arcs += 1
 								if adj[j, i] > 0
 									reciprocal_arcs += 1
 								end
 							end
+							
 							numerator = Float64(reciprocal_arcs)
-							denominator = Float64(total_arcs)
+							denominator = Float64(length(rows))
 					end
 					
-			else  # mode == :mutual (ORA strict)
-				#	Mutual mode: exact weight matching required
+			else  # mode == :dyad_based
+				#	Dyad-based: fraction of connected dyads that are mutual
 					if use_weights
-						#	Count dyads with exact matching weights
-							exact_match_dyads = 0
-							one_directional_arcs = 0
-							for i in 1:n
-								for j in (i+1):n
-									w_ij = adj[i, j]
-									w_ji = adj[j, i]
-									if w_ij > 0 && w_ji > 0 && w_ij == w_ji
-										exact_match_dyads += 1
-									elseif w_ij > 0 && w_ji == 0
-										one_directional_arcs += 1
-									elseif w_ji > 0 && w_ij == 0
-										one_directional_arcs += 1
-									elseif w_ij > 0 && w_ji > 0 && w_ij != w_ji
-										#	Mismatched weights count as one-directional
-											one_directional_arcs += 2
+						#	Weighted dyad-based with method selection
+							if weighted_method == :squartini
+								#	Squartini: sum of reciprocated weights / total weight
+									rows, cols, vals = findnz(adj)
+									total_reciprocated = 0.0
+									total_weight = 0.0
+									
+									for idx in 1:length(rows)
+										i, j, w = rows[idx], cols[idx], vals[idx]
+										total_weight += w
+										total_reciprocated += min(w, adj[j, i])
 									end
-								end
+									
+									numerator = total_reciprocated
+									denominator = total_weight
+									
+							else  # weighted_method == :ora_mutual
+								#	ORA mutual: exact weight matching required
+									exact_match_dyads = 0
+									total_connected_dyads = 0
+									
+									for i in 1:n
+										for j in (i+1):n
+											w_ij = adj[i, j]
+											w_ji = adj[j, i]
+											
+											if w_ij > 0 || w_ji > 0
+												total_connected_dyads += 1
+												if w_ij > 0 && w_ji > 0 && w_ij == w_ji
+													exact_match_dyads += 1
+												end
+											end
+										end
+									end
+									
+									numerator = Float64(exact_match_dyads)
+									denominator = Float64(total_connected_dyads)
 							end
-							numerator = Float64(exact_match_dyads)
-							denominator = Float64(one_directional_arcs + exact_match_dyads)
 					else
-						#	Binary: same as dyad mode
+						#	Binary: mutual dyads / connected dyads
 							mutual_dyads = 0
 							connected_dyads = 0
+							
 							for i in 1:n
 								for j in (i+1):n
 									has_ij = adj[i, j] > 0
@@ -2135,6 +2254,7 @@ module Large_Graph_Similarity
 									end
 								end
 							end
+							
 							numerator = Float64(mutual_dyads)
 							denominator = Float64(connected_dyads)
 					end
@@ -2148,46 +2268,49 @@ module Large_Graph_Similarity
 	end
 	@doc raw"""
 	**Description**  
-	Computes reciprocity for a directed network with multiple conventions supporting binary and weighted edges.
+	Computes reciprocity for directed networks using arc-based or dyad-based approaches.
 
 	**Usage**  
-	`reciprocity(edges::DataFrame; include_self_loops=false, weighted=false, agg_func=nothing, mode=:dyad)`
+	`reciprocity(edges::DataFrame; weighted=false, agg_func=nothing, mode=:arc_based, weighted_method=:squartini)`
 
 	**Arguments**
-	- `edges::DataFrame`: must contain `:src`, `:dst`, optionally `:weight`.
-	- `include_self_loops::Bool` (default `false`): In dyad and mutual modes, loops are always ignored. In arc mode, loops contribute only to denominator if included.
-	- `weighted::Bool`: enables weighted reciprocity if `:weight` exists.  
-	- `agg_func`: aggregation for parallel edges; defaults to `sum` (weighted) or `maximum` (binary).  
-	- `mode::Symbol`: `:dyad`/`:dyad_sum` (default), `:dyad_max`, `:arc`, or `:mutual` (ORA strict).
+	- `edges::DataFrame`: must contain `:src` and `:dst` columns, optionally `:weight`
+	- `weighted::Bool`: enables weighted reciprocity if `:weight` exists (default `false`)
+	- `agg_func`: aggregation for parallel edges; defaults to `sum` (weighted) or `maximum` (binary)
+	- `mode::Symbol`: `:arc_based` (default) or `:dyad_based`
+	- `weighted_method::Symbol`: for weighted dyad_based only - `:squartini` (default) or `:ora_mutual`
 
 	**Details**
-	- **Dyad-sum (default, :dyad or :dyad_sum):** Fraction of total edge weight that is reciprocated. Weighted: R = Σ min(w_ij, w_ji) / Σ(w_ij + w_ji) for i<j. Range: [0, 0.5] for weighted.
-	- **Dyad-max (:dyad_max):** Fraction of stronger direction that is reciprocated. Weighted: R = Σ min(w_ij, w_ji) / Σ max(w_ij, w_ji) for i<j. Preserves [0, 1] range.
-	- **Arc-based (:arc):** Fraction of directed edges that have their reverse. Weighted: R = Σ w_ij*I{w_ji>0} / Σ w_ij
-	- **Mutual (:mutual, ORA strict):** Fraction of joined dyads whose weights exactly match. Mismatched weights count as one-directional.
+	
+	**Arc-based** (counts directed edges):
+	- Binary: Fraction of directed edges that have their reverse edge
+	- Weighted: Σ w_ij * I{w_ji>0} / Σ w_ij (weight of edges with reverse / total weight)
 
-	Note: For binary networks, :dyad_sum and :dyad_max are identical.
+	**Dyad-based** (counts unordered pairs):
+	- Binary: Fraction of connected dyads that are mutual
+	- Weighted with Squartini: r = Σ_ij min(w_ij, w_ji) / Σ_ij w_ij
+	- Weighted with ORA mutual: Fraction of connected dyads with exactly matching weights
+
+	Self-loops are always excluded from calculations.
 
 	**Value**
-	A `Float64` representing reciprocity. Range depends on mode.
+	A `Float64` between 0 and 1 representing reciprocity.
 
 	**Examples**
 ```julia
-	# Binary example (dyad_sum and dyad_max identical)
-	edges = DataFrame(src=["A","B","B","C"], dst=["B","A","C","B"])
-	rec_sum = reciprocity(edges; mode=:dyad_sum)   # 1.0
-	rec_max = reciprocity(edges; mode=:dyad_max)   # 1.0
+	# Arc-based (default)
+	edges = DataFrame(src=["A","B","C"], dst=["B","A","D"])
+	rec = reciprocity(edges)  # 2/3 (2 of 3 arcs have reverse)
 	
-	# Weighted example showing difference
-	wedges = DataFrame(src=["A","B"], dst=["B","A"], weight=[3,1])
-	rec_sum = reciprocity(wedges; weighted=true, mode=:dyad_sum)  # 1/4 = 0.25
-	rec_max = reciprocity(wedges; weighted=true, mode=:dyad_max)  # 1/3 ≈ 0.333
+	# Dyad-based with weighted network
+	wedges = DataFrame(src=["A","B","C"], dst=["B","A","D"], weight=[3,3,2])
+	rec_sq = reciprocity(wedges; weighted=true, mode=:dyad_based)  # Squartini
+	rec_ora = reciprocity(wedges; weighted=true, mode=:dyad_based, weighted_method=:ora_mutual)
 ```
 
 	**References**
-	- Holland PW & Leinhardt S (1971). Transitivity in Structural Models of Small Groups.
+	- Squartini T et al. (2013). "Reciprocity of weighted networks." Scientific Reports 3:2729.
 	- Wasserman S & Faust K (1994). Social Network Analysis: Methods and Applications.
-	- Garlaschelli D & Loffredo MI (2004, 2006). Patterns of Link Reciprocity in Directed Networks.
 	- Carley KM (2002). Summary of Key Network Measures. CMU/CASOS.
 	""" reciprocity
 
@@ -2219,7 +2342,8 @@ module Large_Graph_Similarity
 		   global_clustering_coefficient,
            weighted_clustering_coefficient,
            directed_clustering_cg,
+		   local_weighted_reciprocity
 		   salsa_centrality,
-		    reciprocity
+		   reciprocity
 		   
 end # module julia_env
