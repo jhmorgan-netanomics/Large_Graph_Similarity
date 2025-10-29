@@ -1548,6 +1548,217 @@
 			println("=" ^ 60)
 	end
 
+#	Test Function for Leiden Community Detection
+	function test_leiden_consistency(edges::DataFrame;
+	                                 resolution::Float64=1.0,
+	                                 n_tests::Int=10,
+	                                 weighted::Bool=false,
+	                                 verbose::Bool=true)
+		"""
+		Args:
+			edges::DataFrame: edge list with :src and :dst columns
+			resolution::Float64: resolution parameter to test (default = 1.0)
+			n_tests::Int: number of independent runs (default = 10)
+			weighted::Bool: use edge weights if present (default = false)
+			verbose::Bool: print detailed results (default = true)
+		Returns:
+			NamedTuple: test results including mean ARI, community counts, etc.
+		Notes:
+			Tests Leiden consistency by running multiple times and comparing partitions.
+			High-quality implementations should achieve mean ARI > 0.8.
+		"""
+		
+		#	Print header
+			if verbose
+				println("=" ^ 60)
+				println("Testing Leiden Community Detection Consistency")
+				println("=" ^ 60)
+				println("Resolution: $resolution")
+				println("Number of test runs: $n_tests")
+				println("Weighted: $weighted")
+				println("-" ^ 60)
+			end
+		
+		#	Store results from each run
+			partitions = []
+			modularities = Float64[]
+			n_communities = Int[]
+			
+		#	Run Leiden multiple times
+			for i in 1:n_tests
+				if verbose && i % 2 == 0
+					print(".")
+				end
+				
+				result = leiden_community_detection(
+					edges;
+					resolution = resolution,
+					n_iterations = 10,
+					n_runs = 5,  # Internal runs per test
+					weighted = weighted,
+					seed = nothing  # Different seed each time
+				)
+				
+				push!(partitions, result.membership)
+				push!(modularities, result.modularity)
+				push!(n_communities, result.n_communities)
+			end
+			
+			if verbose
+				println("\n" * "-" * 60)
+			end
+		
+		#	Calculate pairwise ARI scores
+			n_pairs = n_tests * (n_tests - 1) ÷ 2
+			ari_scores = Float64[]
+			
+			for i in 1:(n_tests-1)
+				for j in (i+1):n_tests
+					ari = adjusted_rand_index(partitions[i], partitions[j])
+					push!(ari_scores, ari)
+				end
+			end
+		
+		#	Calculate statistics
+			mean_ari = mean(ari_scores)
+			std_ari = std(ari_scores)
+			min_ari = minimum(ari_scores)
+			max_ari = maximum(ari_scores)
+			
+			mean_modularity = mean(modularities)
+			std_modularity = std(modularities)
+			
+			mean_communities = mean(n_communities)
+			std_communities = std(n_communities)
+			min_communities = minimum(n_communities)
+			max_communities = maximum(n_communities)
+		
+		#	Print results
+			if verbose
+				println("RESULTS:")
+				println("-" ^ 60)
+				
+				println("\nPartition Consistency (ARI):")
+				println("  Mean ARI:     $(round(mean_ari, digits=4))")
+				println("  Std ARI:      $(round(std_ari, digits=4))")
+				println("  Min ARI:      $(round(min_ari, digits=4))")
+				println("  Max ARI:      $(round(max_ari, digits=4))")
+				
+				println("\nModularity:")
+				println("  Mean:         $(round(mean_modularity, digits=4))")
+				println("  Std:          $(round(std_modularity, digits=4))")
+				
+				println("\nNumber of Communities:")
+				println("  Mean:         $(round(mean_communities, digits=2))")
+				println("  Std:          $(round(std_communities, digits=2))")
+				println("  Range:        [$min_communities, $max_communities]")
+				println("  All values:   $n_communities")
+				
+				println("\nQuality Assessment:")
+				if mean_ari > 0.8
+					println("  ✓ EXCELLENT: Mean ARI > 0.8 indicates highly consistent partitions")
+				elseif mean_ari > 0.6
+					println("  ✓ GOOD: Mean ARI > 0.6 indicates reasonably consistent partitions")
+				elseif mean_ari > 0.4
+					println("  ⚠ MODERATE: Mean ARI between 0.4-0.6 suggests some inconsistency")
+				else
+					println("  ✗ POOR: Mean ARI < 0.4 indicates algorithm may have issues")
+				end
+				
+				if std_communities < mean_communities * 0.2
+					println("  ✓ Community count is stable (CV < 20%)")
+				else
+					println("  ⚠ Community count shows high variation")
+				end
+				
+				println("=" ^ 60)
+			end
+		
+		#	Return comprehensive results
+			return (
+				mean_ari = mean_ari,
+				std_ari = std_ari,
+				min_ari = min_ari,
+				max_ari = max_ari,
+				ari_scores = ari_scores,
+				mean_modularity = mean_modularity,
+				std_modularity = std_modularity,
+				modularities = modularities,
+				mean_communities = mean_communities,
+				std_communities = std_communities,
+				min_communities = min_communities,
+				max_communities = max_communities,
+				n_communities_all = n_communities,
+				partitions = partitions
+			)
+	end
+
+#	Additional Helper: Compare Two Specific Partitions
+	function compare_partitions(partition1::Vector{Int}, partition2::Vector{Int};
+	                           verbose::Bool=true)
+		"""
+		Args:
+			partition1::Vector{Int}: first partition
+			partition2::Vector{Int}: second partition
+			verbose::Bool: print detailed comparison (default = true)
+		Returns:
+			NamedTuple: comparison metrics
+		Notes:
+			Detailed comparison of two partitions including confusion matrix.
+		"""
+		
+		#	Calculate ARI
+			ari = adjusted_rand_index(partition1, partition2)
+		
+		#	Get unique labels
+			labels1 = sort(unique(partition1))
+			labels2 = sort(unique(partition2))
+		
+		#	Build confusion matrix
+			n1 = length(labels1)
+			n2 = length(labels2)
+			confusion = zeros(Int, n1, n2)
+			
+			map1 = Dict(label => i for (i, label) in enumerate(labels1))
+			map2 = Dict(label => i for (i, label) in enumerate(labels2))
+			
+			for i in 1:length(partition1)
+				row = map1[partition1[i]]
+				col = map2[partition2[i]]
+				confusion[row, col] += 1
+			end
+		
+		#	Calculate overlap
+			n_agreed = sum([maximum(confusion[i, :]) for i in 1:n1])
+			agreement_rate = n_agreed / length(partition1)
+		
+		#	Print if verbose
+			if verbose
+				println("\nPartition Comparison:")
+				println("-" ^ 40)
+				println("Partition 1: $(n1) communities")
+				println("Partition 2: $(n2) communities")
+				println("Adjusted Rand Index: $(round(ari, digits=4))")
+				println("Node agreement rate: $(round(agreement_rate * 100, digits=2))%")
+				
+				if n1 <= 10 && n2 <= 10
+					println("\nConfusion Matrix:")
+					println("Rows: Partition 1, Cols: Partition 2")
+					for i in 1:n1
+						println("  ", confusion[i, :])
+					end
+				end
+			end
+		
+		return (
+			ari = ari,
+			n_communities_1 = n1,
+			n_communities_2 = n2,
+			confusion_matrix = confusion,
+			agreement_rate = agreement_rate
+		)
+	end
+
 ##########################
 #   GRAPH IMPORT TESTS   #
 ##########################
@@ -1777,6 +1988,13 @@
 		
 #	Authority Centrality: SALSA
 	authority_centrality = salsa_centrality(agent_agent_all_com.edges; score=:authority)
+
+#	Leiden Community Detection
+	leiden_community_detection(agent_agent_all_com.edges; resolution=1.0, n_iterations=10, n_runs=10, weighted=false)
+	leiden_community_detection(agent_agent_all_com.edges; resolution=1.0, n_iterations=10, n_runs=10, weighted=true)
+
+#	Modularity Vitality Hub
+
 
 #	CONDUCT TESTS
 
