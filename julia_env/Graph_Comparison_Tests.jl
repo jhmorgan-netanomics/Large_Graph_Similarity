@@ -20,6 +20,7 @@
     using DataFrames
 	using LinearAlgebra
 	using SparseArrays
+	using Statistics
 	using StatsBase
     using Large_Graph_Similarity
 
@@ -1548,7 +1549,7 @@
 			println("=" ^ 60)
 	end
 
-#	Test Function for Leiden Community Detection
+#	Test Function for Leiden Community Detection (consistency via ARI)
 	function test_leiden_consistency(edges::DataFrame;
 	                                 resolution::Float64=1.0,
 	                                 n_tests::Int=10,
@@ -1556,31 +1557,41 @@
 	                                 verbose::Bool=true)
 		"""
 		Args:
-			edges::DataFrame: edge list with :src and :dst columns
+			edges::DataFrame: edge list with :src and :dst columns (and optional :weight)
 			resolution::Float64: resolution parameter to test (default = 1.0)
 			n_tests::Int: number of independent runs (default = 10)
 			weighted::Bool: use edge weights if present (default = false)
 			verbose::Bool: print detailed results (default = true)
 		Returns:
-			NamedTuple: test results including mean ARI, community counts, etc.
+			NamedTuple: (
+				mean_ari, std_ari, min_ari, max_ari, ari_scores,
+				mean_modularity, std_modularity, modularities,
+				mean_communities, std_communities, min_communities, max_communities,
+				n_communities_all, partitions
+			)
 		Notes:
-			Tests Leiden consistency by running multiple times and comparing partitions.
-			High-quality implementations should achieve mean ARI > 0.8.
+			- Uses adjusted_rand_index(partition_a, partition_b) which you export elsewhere.
+			- Partitions are aligned to ORIGINAL node order if produced by leiden_community_detection().
+			- Fixed for Julia semantics:
+				* String repeats use repeat("=", 60) not "=" ^ 60
+				* Removed unsupported keyword n_runs
+				* Pre-allocates typed vectors for stability
+				* Guards small-n cases for ARI stats
 		"""
 		
 		#	Print header
 			if verbose
-				println("=" ^ 60)
+				println(repeat("=", 60))
 				println("Testing Leiden Community Detection Consistency")
-				println("=" ^ 60)
+				println(repeat("=", 60))
 				println("Resolution: $resolution")
 				println("Number of test runs: $n_tests")
 				println("Weighted: $weighted")
-				println("-" ^ 60)
+				println(repeat("-", 60))
 			end
 		
-		#	Store results from each run
-			partitions = []
+		#	Store results from each run (typed for performance)
+			partitions = Vector{Vector{Int}}()
 			modularities = Float64[]
 			n_communities = Int[]
 			
@@ -1594,9 +1605,8 @@
 					edges;
 					resolution = resolution,
 					n_iterations = 10,
-					n_runs = 5,  # Internal runs per test
 					weighted = weighted,
-					seed = nothing  # Different seed each time
+					seed = nothing   # Different seed each time
 				)
 				
 				push!(partitions, result.membership)
@@ -1605,38 +1615,38 @@
 			end
 			
 			if verbose
-				println("\n" * "-" * 60)
+				println()
+				println(repeat("-", 60))
 			end
 		
-		#	Calculate pairwise ARI scores
-			n_pairs = n_tests * (n_tests - 1) ÷ 2
+		#	Calculate pairwise ARI scores (guard n_tests < 2)
 			ari_scores = Float64[]
-			
-			for i in 1:(n_tests-1)
-				for j in (i+1):n_tests
-					ari = adjusted_rand_index(partitions[i], partitions[j])
-					push!(ari_scores, ari)
+			if length(partitions) ≥ 2
+				for i in 1:(n_tests-1)
+					for j in (i+1):n_tests
+						push!(ari_scores, adjusted_rand_index(partitions[i], partitions[j]))
+					end
 				end
 			end
 		
-		#	Calculate statistics
-			mean_ari = mean(ari_scores)
-			std_ari = std(ari_scores)
-			min_ari = minimum(ari_scores)
-			max_ari = maximum(ari_scores)
+		#	Calculate statistics (handle empty ARI gracefully)
+			mean_ari = isempty(ari_scores) ? NaN : Statistics.mean(ari_scores)
+			std_ari  = isempty(ari_scores) ? NaN : Statistics.std(ari_scores)
+			min_ari  = isempty(ari_scores) ? NaN : minimum(ari_scores)
+			max_ari  = isempty(ari_scores) ? NaN : maximum(ari_scores)
 			
-			mean_modularity = mean(modularities)
-			std_modularity = std(modularities)
+			mean_modularity = Statistics.mean(modularities)
+			std_modularity  = Statistics.std(modularities)
 			
-			mean_communities = mean(n_communities)
-			std_communities = std(n_communities)
-			min_communities = minimum(n_communities)
-			max_communities = maximum(n_communities)
+			mean_communities = Statistics.mean(n_communities)
+			std_communities  = Statistics.std(n_communities)
+			min_communities  = minimum(n_communities)
+			max_communities  = maximum(n_communities)
 		
 		#	Print results
 			if verbose
 				println("RESULTS:")
-				println("-" ^ 60)
+				println(repeat("-", 60))
 				
 				println("\nPartition Consistency (ARI):")
 				println("  Mean ARI:     $(round(mean_ari, digits=4))")
@@ -1655,14 +1665,14 @@
 				println("  All values:   $n_communities")
 				
 				println("\nQuality Assessment:")
-				if mean_ari > 0.8
+				if !isnan(mean_ari) && mean_ari > 0.8
 					println("  ✓ EXCELLENT: Mean ARI > 0.8 indicates highly consistent partitions")
-				elseif mean_ari > 0.6
+				elseif !isnan(mean_ari) && mean_ari > 0.6
 					println("  ✓ GOOD: Mean ARI > 0.6 indicates reasonably consistent partitions")
-				elseif mean_ari > 0.4
+				elseif !isnan(mean_ari) && mean_ari > 0.4
 					println("  ⚠ MODERATE: Mean ARI between 0.4-0.6 suggests some inconsistency")
 				else
-					println("  ✗ POOR: Mean ARI < 0.4 indicates algorithm may have issues")
+					println("  ✗ POOR: Mean ARI < 0.4 (or insufficient runs) indicates issues or high stochasticity")
 				end
 				
 				if std_communities < mean_communities * 0.2
@@ -1671,7 +1681,7 @@
 					println("  ⚠ Community count shows high variation")
 				end
 				
-				println("=" ^ 60)
+				println(repeat("=", 60))
 			end
 		
 		#	Return comprehensive results
@@ -1698,14 +1708,18 @@
 	                           verbose::Bool=true)
 		"""
 		Args:
-			partition1::Vector{Int}: first partition
-			partition2::Vector{Int}: second partition
+			partition1::Vector{Int}: first partition (labels per ORIGINAL node)
+			partition2::Vector{Int}: second partition (labels per ORIGINAL node)
 			verbose::Bool: print detailed comparison (default = true)
 		Returns:
-			NamedTuple: comparison metrics
+			NamedTuple: (ari, n_communities_1, n_communities_2, confusion_matrix, agreement_rate)
 		Notes:
-			Detailed comparison of two partitions including confusion matrix.
+			- Requires adjusted_rand_index to be available.
+			- Assumes both partitions are defined over the SAME node ordering/length.
 		"""
+		
+		#	Validation
+			@assert length(partition1) == length(partition2) "Partitions must be the same length"
 		
 		#	Calculate ARI
 			ari = adjusted_rand_index(partition1, partition2)
@@ -1723,29 +1737,31 @@
 			map2 = Dict(label => i for (i, label) in enumerate(labels2))
 			
 			for i in 1:length(partition1)
-				row = map1[partition1[i]]
-				col = map2[partition2[i]]
-				confusion[row, col] += 1
+				r = map1[partition1[i]]
+				c = map2[partition2[i]]
+				confusion[r, c] += 1
 			end
 		
-		#	Calculate overlap
-			n_agreed = sum([maximum(confusion[i, :]) for i in 1:n1])
+		#	Calculate naive agreement rate via best-per-row matches
+			n_agreed = 0
+			for r in 1:n1
+				n_agreed += maximum(confusion[r, :])
+			end
 			agreement_rate = n_agreed / length(partition1)
 		
 		#	Print if verbose
 			if verbose
 				println("\nPartition Comparison:")
-				println("-" ^ 40)
+				println(repeat("-", 40))
 				println("Partition 1: $(n1) communities")
 				println("Partition 2: $(n2) communities")
 				println("Adjusted Rand Index: $(round(ari, digits=4))")
 				println("Node agreement rate: $(round(agreement_rate * 100, digits=2))%")
 				
 				if n1 <= 10 && n2 <= 10
-					println("\nConfusion Matrix:")
-					println("Rows: Partition 1, Cols: Partition 2")
-					for i in 1:n1
-						println("  ", confusion[i, :])
+					println("\nConfusion Matrix (rows=P1, cols=P2):")
+					for r in 1:n1
+						println("  ", collect(confusion[r, :]))
 					end
 				end
 			end
@@ -1757,6 +1773,20 @@
 			confusion_matrix = confusion,
 			agreement_rate = agreement_rate
 		)
+	end
+
+#	Helper: Community Size table from Membership
+	function _community_sizes(membership::Vector{Int})
+		"""
+		Args:
+			membership::Vector{Int}: community label per ORIGINAL node
+		Returns:
+			DataFrame: (community, count) sorted by count desc
+		"""
+		ct = countmap(membership)
+		df = DataFrame(community = collect(keys(ct)), count = collect(values(ct)))
+		sort!(df, :count, rev=true)
+		return df
 	end
 
 ##########################
@@ -1990,8 +2020,15 @@
 	authority_centrality = salsa_centrality(agent_agent_all_com.edges; score=:authority)
 
 #	Leiden Community Detection
-	leiden_community_detection(agent_agent_all_com.edges; resolution=1.0, n_iterations=10, n_runs=10, weighted=false)
-	leiden_community_detection(agent_agent_all_com.edges; resolution=1.0, n_iterations=10, n_runs=10, weighted=true)
+	all_comm_communities = leiden_community_detection(agent_agent_all_com.edges; resolution=1.0, weighted=false)
+	community_index = DataFrame(node = all_comm_communities.node_names, community = all_comm_communities.membership)
+	comm_sizes = combine(groupby(community_index, :community), nrow => :count)
+	sort!(comm_sizes, :count, rev = true)
+
+	all_comm_communities_weighted = leiden_community_detection(agent_agent_all_com.edges; resolution=1.0, weighted=true)
+	community_index = DataFrame(node = all_comm_communities_weighted.node_names, community = all_comm_communities_weighted.membership)
+	comm_sizes = combine(groupby(community_index, :community), nrow => :count)
+	sort!(comm_sizes, :count, rev = true)
 
 #	Modularity Vitality Hub
 
@@ -2014,6 +2051,32 @@
 
 #	SALSA Tests
 	test_salsa()
+
+#	Testing Leiden Community Detection: Unweighted
+	res_unw = leiden_community_detection(agent_agent_all_com.edges; resolution=1.0, weighted=false, seed=42)
+	println("Unweighted modularity: ", res_unw.modularity)
+	display(_community_sizes(res_unw.membership))
+
+	t_unw = test_leiden_consistency(agent_agent_all_com.edges; resolution=1.0, n_tests=10, weighted=false, verbose=true)
+
+#	Testing Leiden Community Detection: Weighted
+	res_w = leiden_community_detection(agent_agent_all_com.edges; resolution=1.0, weighted=true, seed=42)
+	println("Unweighted modularity: ", res_w.modularity)
+	display(_community_sizes(res_w.membership))
+
+	t_w = test_leiden_consistency(agent_agent_all_com.edges; resolution=1.0, n_tests=10, weighted=true, verbose=true)
+
+#	ORA Comparision Test: ARI of 0.93467
+	all_comm_communities_weighted = leiden_community_detection(agent_agent_all_com.edges; resolution=1.0, weighted=true)
+	community_index = DataFrame(node = all_comm_communities_weighted.node_names, community = all_comm_communities_weighted.membership)
+	ora_leiden = CSV.read("/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data/All_Comm_Lieden_Group_Assignments.csv", DataFrame, types=Dict(1 => String))
+	rename!(ora_leiden, ["node", "leiden_group"])
+	leftjoin!(community_index, 	ora_leiden, on=:node)
+	community_index.leiden_group = convert.(Int64, community_index.leiden_group)
+	ora_ari = adjusted_rand_index(community_index.community, community_index.leiden_group)
+	print(ora_ari)
+
+#	Test Modularity Vitality Hub
 
 ##########################
 #   CORE DECOMPOSITION   #

@@ -15,7 +15,7 @@ module Large_Graph_Similarity
 #   UTLITIES   #
 ################
 
-#	IMPORT FUNCTIONS
+#	DATA PROCESSING FUNCTIONS
 
 #	Joiner for multi-valued string properties
 	const MULTI_SEP = " | "
@@ -475,303 +475,6 @@ module Large_Graph_Similarity
 		
 		#	Return aggregated edges
 			return grouped
-	end
-
-#	PARTITION FUNCTIONS 
-
-# Type aliases (match upstream ingest)
-	const Partition    = Vector{Vector{Int}}
-	const WeightMatrix = SparseMatrixCSC{Float64,Int}
-
-	struct PartitionedGraph
-		#	Graph (immutable)
-			edge_weight::WeightMatrix
-			cardinality::Vector{Int}
-
-		#	Partition (mutable)
-			partition::Partition
-			size::Vector{Int}
-			membership::Vector{Int}
-	end
-
-#	Helper Function: PartionedGraph is Speciality Data Type
-	function PartitionedGraph(
-		adjmat::AbstractMatrix{<:Real};
-		cardinality::Vector{Int} = create_unit_cardinality(nv(adjmat)),
-		partition::Partition     = create_singleton_partition(nv(adjmat)))
-		"""
-		Args:
-			adjmat::AbstractMatrix{<:Real}: symmetric, nonnegative, square adjacency
-			cardinality::Vector{Int}: per-vertex positive integer weights (default = ones)
-			partition::Partition: initial partition covering 1..n exactly once (default = singletons)
-		Returns:
-			PartitionedGraph: internal container for community-detection passes
-		Notes:
-			Validates adjacency, cardinality, and partition. Computes per-community `size`
-			as the weighted sum (by `cardinality`) and sets `membership` for all vertices.
-		"""
-		# -- dev: contract checks & initialization ---------------------------------
-		check_adjacent_matrix(adjmat)
-		n = nv(adjmat)
-		check_cardinality(n, cardinality)
-		check_partition(n, partition)
-
-		size = zeros(Int, length(partition))
-		membership = zeros(Int, n)
-		for (i, community) in enumerate(partition)
-			size[i] = weighted_sum(community, cardinality)  # dev: weighted community size
-			membership[community] .= i                      # dev: vertex → community
-		end
-
-		return PartitionedGraph(adjmat, cardinality, partition, size, membership)
-	end
-
-#	Defining Number of vertices
-	nv(A::AbstractMatrix) = size(A, 1)
-	nv(graph::PartitionedGraph) = nv(graph.edge_weight)
-
-# 	Number of communities
-	nc(graph::PartitionedGraph) = length(graph.partition)
-
-#	Helper Function: Neighbors of node `u`
-	function neighbors(graph::PartitionedGraph, u::Int)
-		"""
-		Args:
-			graph::PartitionedGraph
-			u::Int: 1-based vertex index
-		Returns:
-			AbstractVector{Int}: read-only CSC view of neighbor vertex IDs in column `u`
-		Notes:
-			Returns `@view A.rowval[A.colptr[u]:A.colptr[u+1]-1]` with O(deg(u)) cost.
-			Caller must not mutate the returned view.
-		"""
-		#	Zero-alloc CSC slice over neighbor row indices -------------------
-			A = graph.edge_weight
-
-		#	Return Row Values
-			return @view A.rowval[A.colptr[u] : A.colptr[u+1]-1]
-	end
-
-#	Hlper Function: Cmmunities Connected with `u`
-	function connected_communities(graph::PartitionedGraph, u::Int)
-		"""
-		Args:
-			graph::PartitionedGraph
-			u::Int
-		Returns:
-			AbstractVector{Int}: read-only view of neighbor vertex IDs
-		Notes:
-			Alias of `neighbors`; callers map IDs to community via `graph.membership`.
-			Does not de-duplicate community IDs.
-		"""
-		#	Mirror neighbors(); de-dup is caller’s responsibility ------------
-			A = graph.edge_weight
-
-		#	Return Connected Communities
-			return @view A.rowval[A.colptr[u] : A.colptr[u+1]-1]
-	end
-
-#	Helper Function: Generators of the Default Parameter
-	create_unit_cardinality(n::Integer) = fill(1, n)
-	create_singleton_partition(n::Integer) = [[i] for i in 1:n]
-
-	function check_adjacent_matrix(adjmat::AbstractMatrix)
-		"""
-		Args:
-			adjmat::AbstractMatrix
-		Returns:
-			Nothing (throws ArgumentError on violation)
-		Notes:
-			Validates: (1) square, (2) non-empty, (3) symmetric (undirected),
-			(4) nonnegative entries (supports dense and CSC).
-		"""
-		#	Defensive checks mirrored to ingest assumptions ------------------
-			m, n = size(adjmat)
-			if m != n
-				throw(ArgumentError("invalid adjacent matrix: not a square matrix"))
-			end
-			if n == 0
-				throw(ArgumentError("invalid adjacent matrix: empty matrix"))
-			end
-			if !issymmetric(adjmat)
-				throw(ArgumentError("invalid adjacent matrix: not a symmetric matrix"))
-			end
-			if adjmat isa SparseMatrixCSC
-				if any(v -> v < 0, adjmat.nzval)
-					throw(ArgumentError("invalid adjacent matrix: found negative weight(s)"))
-				end
-			else
-				if any(v -> v < 0, adjmat)
-					throw(ArgumentError("invalid adjacent matrix: found negative weight(s)"))
-				end
-			end
-
-		#	Perform Checks
-			return nothing
-	end
-
-	function check_cardinality(n::Integer, cardinality::Vector{Int})
-		"""
-		Args:
-			n::Integer: number of vertices
-			cardinality::Vector{Int}: per-vertex positive integer weights
-		Returns:
-			Nothing (throws ArgumentError on violation)
-		Notes:
-			Length must equal `n`; all entries must be > 0.
-		"""
-		# 	Simple Structural Validation
-			if n != length(cardinality)
-				throw(ArgumentError("invalid cardinality: mismatching length"))
-			end
-			if any(x -> x ≤ 0, cardinality)
-				throw(ArgumentError("invalid cardinality: found non-positive value"))
-			end
-
-		#	Perform Checks
-			return nothing
-	end
-
-	function check_partition(n::Integer, partition::Partition)
-		"""
-		Args:
-			n::Integer
-			partition::Partition
-		Returns:
-			Nothing (throws ArgumentError on violation)
-		Notes:
-			Ensures each vertex 1..n appears exactly once across communities.
-		"""
-		#	Cover {1..n} exactly once; forbid dup/out-of-bounds --------------
-			found = BitSet()
-			for community in partition, u in community
-				if u ∈ found
-					throw(ArgumentError("invalid partition: found duplicated node"))
-				end
-				if !(1 ≤ u ≤ n)
-					throw(ArgumentError("invalid partition: found out-of-bounds node"))
-				end
-				push!(found, u)
-			end
-			if length(found) != n
-				throw(ArgumentError("invalid partition: found missing node"))
-			end
-
-		#	Perform Checks
-			return nothing
-	end
-
-#	Helper Function: Move node `u` to `dst`.
-	function move_node!(graph::PartitionedGraph, (u, dst)::Pair{Int,Int})
-		"""
-		Args:
-			graph::PartitionedGraph
-			(u, dst)::Pair{Int,Int}: node to move and target community (1..nc+1)
-		Returns:
-			PartitionedGraph: same object (mutated in-place)
-		Notes:
-			Updates `partition`, `size` (weighted by `cardinality`), and `membership`.
-			Creates a new community if `dst == nc(graph)+1`. No-op if `dst == membership[u]`.
-		"""
-		#	Fast path and in-place updates
-			@assert 1 ≤ dst ≤ nc(graph) + 1
-			src = graph.membership[u]
-			if src == dst
-				return graph
-			end
-
-			cardinality = graph.cardinality[u]
-			community_src = graph.partition[src]
-			pos = findfirst(isequal(u), community_src)::Int
-
-		#	Allocate new community if needed
-			community_dst = if dst > nc(graph)
-				push!(graph.partition, Int[])
-				push!(graph.size, 0)
-				graph.partition[dst]
-			else
-				graph.partition[dst]
-			end
-
-			deleteat!(community_src, pos)
-			push!(community_dst, u)
-
-			graph.size[src] -= cardinality
-			graph.size[dst] += cardinality
-			graph.membership[u] = dst
-
-		#	Return Moved Nodes
-			return graph
-	end
-
-# 	Drop empty communities from the graph.
-	function drop_empty_communities!(graph::PartitionedGraph)
-		"""
-		Args:
-			graph::PartitionedGraph
-		Returns:
-			PartitionedGraph: same object (mutated in-place)
-		Notes:
-			Deletes communities with `size == 0`, compacts `partition`/`size`,
-			and rewrites `membership` to keep indices consecutive.
-		"""
-		#	Collect Empties, Drop, and Remap Membership 
-			empty = Int[]
-			for (i, community) in enumerate(graph.partition)
-				@assert isempty(community) == (graph.size[i] == 0)
-				if isempty(community)
-					push!(empty, i)
-				end
-			end
-			deleteat!(graph.partition, empty)
-			deleteat!(graph.size, empty)
-
-			for (i, community) in enumerate(graph.partition)
-				graph.membership[community] .= i
-			end
-
-		#	Return Partitioned Graph
-			return graph
-	end
-
-	function reset_partition!(graph::PartitionedGraph, partition::Partition)
-		"""
-		Args:
-			graph::PartitionedGraph
-			partition::Partition: covering 1..nv(graph) exactly once
-		Returns:
-			PartitionedGraph: same object (mutated in-place)
-		Notes:
-			Validates input, deep-copies communities, recomputes `size` using `cardinality`,
-			and rewrites `membership`.
-		"""
-
-		#	Validate & rebuild partition state --------------------------------
-			check_partition(nv(graph), partition)
-			empty!(graph.partition)
-			empty!(graph.size)
-			for (i, community) in enumerate(partition)
-				push!(graph.partition, copy(community))
-				push!(graph.size, weighted_sum(community, graph.cardinality))
-				graph.membership[community] .= i
-			end
-
-		#	Return Graph
-			return graph
-	end
-
-	function weighted_sum(xs::Vector{Int}, weights::Vector{Int})
-		"""
-		Args:
-			xs::Vector{Int}: vertex indices
-			weights::Vector{Int}: per-vertex cardinalities
-		Returns:
-			Int: ∑ weights[x] over `xs` (0 if `xs` is empty)
-		Notes:
-			Utility to keep community `size` consistent with `cardinality`.
-		"""
-		#	Helper used during (re)initialization --------------------
-			return isempty(xs) ? 0 : sum(weights[x] for x in xs)
 	end
 
 #	NORMALIZATION FUNCTIONS
@@ -3008,404 +2711,393 @@ module Large_Graph_Similarity
 	- Lempel, R., & Moran, S. (2001). *SALSA: The Stochastic Approach for Link-Structure Analysis.* ACM TOIS 19(2), 131–160.
 	""" salsa_centrality
 
-#	Helper Function: Core multi-level Leiden loop
-	function _leiden!(graph::PartitionedGraph, γ::Float64, θ::Float64)
-		#	Iterate local moves → refinement → aggregation until communities stabilize
-			stack = Partition[]
-			@label loop
-
-			move_nodes_fast!(graph, γ)
-			@debug "nv = $(nv(graph)); nc = $(nc(graph)); H = $(H(graph, γ))"
-
-			if nc(graph) != nv(graph)
-				#	Defining Refined Partition
-					refined = refine_partition(graph, γ, θ)
-					if nc(refined) == nv(refined)
-						@goto finish
-					end
-					push!(stack, refined.partition)
-
-					graph′ = aggregate_graph(refined)
-
-				#	Lift refined partition to the coarse graph's indexing
-					partition = [Int[] for _ in 1:nc(graph)]
-					for (i, community) in enumerate(refined.partition)
-						u = first(community)
-						j = graph.membership[u]
-						push!(partition[j], i)
-					end
-					reset_partition!(graph′, partition)
-
-					graph = graph′
-					@goto loop
-			end
-			@label finish
-			push!(stack, graph.partition)
-
-		#	Return Community Solution with Refinement
-			return (quality = H(graph, γ), partition = flatten(stack))
+#	Helper Function: LogSumExp for numerical stability for Leiden Community Detection
+	function logsumexp(x::Vector{Float64})
+		"""
+		Args:
+			x::Vector{Float64}: log probabilities
+		Returns:
+			Float64: log(sum(exp(x)))
+		Notes:
+			Numerically stable computation of log-sum-exp.
+		"""
+		if isempty(x)
+			return -Inf
+		end
+		
+		max_x = maximum(x)
+		if !isfinite(max_x)
+			return max_x
+		end
+		
+		return max_x + log(sum(exp.(x .- max_x)))
 	end
 
-# 	Helper Function: Faster local move phase (queue-based)
-	function move_nodes_fast!(graph::PartitionedGraph, γ::Float64)
-		# 	When a node moves, neighbors are reconsidered; improves convergence speed
-			n = nv(graph)
-			queue = shuffle(1:n)
-			queued = BitSet(1:n)
-			connected = Int[]
-			total_weights = zeros(Float64, nc(graph))
-
-			while !isempty(queue)
-				#	Define Output Objects
-					u = popfirst!(queue)
-					delete!(queued, u)
-
-				#	Accumulate u→community weights
-					empty!(connected)
-					for v in neighbors(graph, u)
-						i = graph.membership[v]
-						if total_weights[i] == 0
-							push!(connected, i)
-						end
-						total_weights[i] += graph.edge_weight[u, v]
+#	Helper Function for Leiden: Calculate Standard Modularity
+	function calculate_modularity(adj::SparseMatrixCSC, membership::Vector{Int}, resolution::Float64)
+		"""
+		Args:
+			adj::SparseMatrixCSC: symmetric (undirected) adjacency for THESE nodes; may include self-loops
+			membership::Vector{Int}: community label per node (length == size(adj,1))
+			resolution::Float64: γ (γ=1.0 Newman–Girvan)
+		Returns:
+			Float64: modularity Q (typically ~[0, 0.8] on real data)
+		Notes:
+			• Read-only: does NOT rescale or duplicate weights. Assumes symmetry upstream.
+			• Formula (block-sum version, self-loop aware):
+			  Q = (1/(2m)) * Σ_c [ Σ_{i∈c}Σ_{j∈c} A_ij  −  γ * (K_c^2 / (2m)) ],
+			    with k_i = Σ_j A_ij and 2m = Σ_{i,j} A_ij.
+			• If your pipeline could produce slight asymmetry, enforce once upstream:
+			  adj = max.(adj, adj')
+		"""
+		#	Validation
+			@assert issparse(adj) "calculate_modularity: adj must be SparseMatrixCSC"
+			@assert size(adj,1) == length(membership) "calculate_modularity: membership length must match adj size"
+		
+		#	Totals (2m) and degrees
+			two_m = sum(adj)
+			if two_m == 0.0
+				return 0.0
+			end
+			m = two_m / 2.0
+			degrees = vec(sum(adj, dims=2))  # k_i
+		
+		#	Community block sums
+			Q = 0.0
+			for c in unique(membership)
+				nodes = findall(==(c), membership)
+				if isempty(nodes)
+					continue
+				end
+				#	E_c2 = Σ_{i∈c} Σ_{j∈c} A_ij  (counts off-diagonals twice; consistent with 2m)
+					E_c2 = 0.0
+					for i in nodes
+						E_c2 += sum(view(adj, i, nodes))
 					end
+				#	Expectation under null
+					Kc = sum(degrees[nodes])
+					exp_term = resolution * (Kc * Kc) / (2.0 * m)
+				
+				Q += (E_c2 - exp_term) / (2.0 * m)
+			end
+		return Q
+	end
 
-				#	Pick destination community maximizing gain
-					c_u = graph.cardinality[u]
-					weight_u = graph.edge_weight[u, u]
-					src = dst = graph.membership[u]
-					weight_src = total_weights[src]
-					size_src = graph.size[src]
-					maxgain = 0.0
-
-					for i in connected
-						i == src && continue
-						gain = total_weights[i] + weight_u - weight_src - γ * (graph.size[i] - size_src + c_u) * c_u
-						if gain > maxgain
-							dst = i
-							maxgain = gain
-						end
-						total_weights[i] = 0
-					end
-					total_weights[src] = 0
-
-					if src != dst
-						move_node!(graph, u => dst)
-						for v in neighbors(graph, u)
-							if graph.membership[v] != graph.membership[u] && v ∉ queued
-								push!(queue, v)
-								push!(queued, v)
-							end
+#	Helper Function for Leiden: Refinement by Intra-Community Connectivity
+	function _refine_connectivity!(adj::SparseMatrixCSC, membership::Vector{Int})
+		"""
+		Args:
+			adj::SparseMatrixCSC: symmetric adjacency
+			membership::Vector{Int}: community labels
+		Returns:
+			Nothing (membership updated in-place)
+		Notes:
+			Ensures each community induces a connected subgraph.
+			If disconnected, splits components into new community labels.
+		"""
+		n = size(adj, 1)
+		rows, cols, vals = findnz(adj)
+		neighbors = [Int[] for _ in 1:n]
+		for k in eachindex(vals)
+			i, j = rows[k], cols[k]
+			if i != j
+				push!(neighbors[i], j)
+				push!(neighbors[j], i)
+			end
+		end
+		
+		current_max = maximum(membership)
+		comms = unique(membership)
+		
+		for c in comms
+			nodes = findall(==(c), membership)
+			if length(nodes) ≤ 1
+				continue
+			end
+			
+			unvisited = Set(nodes)
+			while !isempty(unvisited)
+				start = first(unvisited)
+				queue = [start]
+				component = Int[]
+				delete!(unvisited, start)
+				
+				while !isempty(queue)
+					v = popfirst!(queue)
+					push!(component, v)
+					for nbr in neighbors[v]
+						if nbr in unvisited && membership[nbr] == c
+							delete!(unvisited, nbr)
+							push!(queue, nbr)
 						end
 					end
 				end
-
-		#	Perform Check and Return Graph without Communities
-			@assert isempty(queued)
-			return drop_empty_communities!(graph)
-	end
-
-#	Helper Function: Leiden Refinement Step (intra-community)
-	function refine_partition(graph::PartitionedGraph, γ::Float64, θ::Float64)
-		#	Basic Checks
-			@assert γ > 0
-			@assert θ > 0
-
-		#	Seed refined with singletons, sharing the same edge_weight/cardinality
-			refined = PartitionedGraph(graph.edge_weight, cardinality = graph.cardinality)
-
-		#	Well-connected against prior community
-			function is_well_connected(u::Int)
-				i = graph.membership[u]
-				c = graph.cardinality[u]
-				threshold = γ * c * (graph.size[i] - c)
-				x = 0.0
-				for v in graph.partition[i]
-					v == u && continue
-					x += graph.edge_weight[u, v]
-					if x ≥ threshold
-						return true
-					end
-				end
-				return false
-			end
-
-		#	Candidate refined subcommunity connectivity
-			function is_well_connected(u::Int, i::Int, between_weights::Vector{Float64})
-				sz = refined.size[i]
-				return between_weights[i] ≥ γ * sz * (graph.size[graph.membership[u]] - sz)
-			end
-
-		#	Convenience — singleton test in refined
-			is_singleton(u::Int) = (length(refined.partition[refined.membership[u]]) == 1)
-
-		#	Performing Refinements
-			total_weights = zeros(Float64, nc(refined))
-			between_weights = zeros(Float64, nc(refined))
-			for subset in graph.partition
-				#	Define Output Objects
-					communities = Int[]
-					logprobs = Float64[]
-					indexes = Int[]
-
-				#	Precompute intra-subset mass per refined subcommunity
-					for u in subset
-						weight = 0.0
-						for v in subset
-							v == u && continue
-							weight += refined.edge_weight[u, v]
+				
+				#	If this is not the first component, assign new label
+					if !isempty(unvisited)
+						current_max += 1
+						for v in component
+							membership[v] = current_max
 						end
-						between_weights[refined.membership[u]] = weight
-					end
-
-				#	Probabilistic reassignment for well-connected singletons
-					for u in shuffle(subset)
-						if !is_well_connected(u) || !is_singleton(u)
-							continue
-						end
-
-						empty!(communities)
-						for v in neighbors(refined, u)
-							v ∉ subset && continue
-							i = refined.membership[v]
-							if total_weights[i] == 0
-								push!(communities, i)
-							end
-							total_weights[i] += refined.edge_weight[u, v]
-						end
-
-						c_u = refined.cardinality[u]
-						weight_u = refined.edge_weight[u, u]
-						src = refined.membership[u]
-						weight_src = total_weights[src]
-						size_src = refined.size[src]
-
-						empty!(logprobs); empty!(indexes)
-						for i in communities
-							(i == src || !is_well_connected(u, i, between_weights)) && continue
-							gain = total_weights[i] + weight_u - weight_src - γ * (refined.size[i] - size_src + c_u) * c_u
-							if gain ≥ 0
-								push!(logprobs, (1/θ) * gain)
-								push!(indexes, i)
-							end
-						end
-
-						total_weights[communities] .= 0
-						isempty(indexes) && continue
-
-						probs = exp.(logprobs .- logsumexp(logprobs))
-						dst = indexes[sample(probs)]
-						move_node!(refined, u => dst)
-
-						#	Maintain between_weights under this move
-							for v in neighbors(refined, u)
-								(v == u || v ∉ subset) && continue
-								i = refined.membership[v]
-								weight = refined.edge_weight[u, v]
-								if i == dst
-									between_weights[src] -= weight
-									between_weights[dst] -= weight
-								elseif i == src
-									between_weights[src] += weight
-									between_weights[dst] += weight
-								else
-									between_weights[src] -= weight
-									between_weights[dst] += weight
-								end
-							end
-					end
-
-				#	Clear working array for this subset
-					for u in subset
-						between_weights[refined.membership[u]] = 0
 					end
 			end
-
-		#	Returning graph with Internal Refinements
-		return drop_empty_communities!(refined)
+		end
 	end
 
-#	Leiden over an adjacency matrix
-	function leiden(adjmat::AbstractMatrix{<:Real}; resolution::Real = 1.0, randomness::Real = 0.01, 
-				    partition::Partition = create_singleton_partition(size(adjmat, 1)))
-
-		#	Build internal container and run the multi-level Leiden routine
-			graph = PartitionedGraph(adjmat, partition = partition)
-
-		#	Return Community Solution
-			return _leiden!(graph, Float64(resolution), Float64(randomness))
+#	Helper Function for Leiden: Contract Graph by Membership
+	function _contract_by_membership(adj::SparseMatrixCSC, membership::Vector{Int})
+		"""
+		Args:
+			adj::SparseMatrixCSC: symmetric adjacency matrix
+			membership::Vector{Int}: community labels for each node
+		Returns:
+			S::SparseMatrixCSC: contracted adjacency matrix between communities
+		Notes:
+			Each community becomes a single supernode. 
+			Edge weights between communities are summed.
+			Self-loops retain internal weights.
+		"""
+		
+		#	Renumber communities to consecutive indices
+			unique_comms = sort(unique(membership))
+			label_map = Dict(old => new for (new, old) in enumerate(unique_comms))
+			C = length(unique_comms)
+		
+		#	Accumulate weights between communities
+			rows, cols, vals = findnz(adj)
+			I = Int[]
+			J = Int[]
+			V = Float64[]
+			
+			for k in eachindex(vals)
+				ci = label_map[membership[rows[k]]]
+				cj = label_map[membership[cols[k]]]
+				push!(I, ci)
+				push!(J, cj)
+				push!(V, vals[k])
+			end
+		
+		#	Build new contracted adjacency
+			S = sparse(I, J, V, C, C)
+		
+		#	Ensure symmetry
+			S = max.(S, S')
+		
+		return S
 	end
-	@doc raw"""
-	**Description**  
-	Run the Leiden community detection algorithm on an adjacency matrix.
 
-	**Usage**  
-	`leiden(adjmat; resolution=1.0, randomness=0.01, partition=create_singleton_partition(size(adjmat,1)))`
-
-	**Arguments**  
-	- `adjmat::AbstractMatrix{<:Real}`: Symmetric, nonnegative, square adjacency
-	- `resolution::Real`: γ (resolution). Use `1.0` for classical setting
-	- `randomness::Real`: θ (stochasticity in refinement; must be > 0)
-	- `partition::Partition`: Initial partition (defaults to singletons)
-
-	**Value**  
-	`NamedTuple` with:
-	- `quality::Float64`: Final quality `H` at the top level
-	- `partition::Vector{Vector{Int}}`: Final community assignment (1-based vertex IDs)
-
-	**Notes**  
-	This entrypoint assumes you already have an adjacency. If you start from an edgelist,
-	use `leiden_community_detection(edges; ...)`, which calls your ingest helpers to build
-	the adjacency before running Leiden.
-	""" leiden
-
-#	Leiden starting from an edgelist
+#	Simplified Leiden Implementation
 	function leiden_community_detection(edges::DataFrame;
-                                    resolution::Real = 1.0,
-                                    randomness::Real = 0.01,
-                                    weighted::Bool = true,
-                                    agg_func::Function = sum,
-                                    seed::Union{Nothing,Int} = nothing)
-		#	Optional for reproducibility
+	                                   resolution::Float64=1.0,
+	                                   n_iterations::Int=10,
+	                                   weighted::Bool=false,
+	                                   seed::Union{Int,Nothing}=nothing)
+		"""
+		Args:
+			edges::DataFrame: edge list with :src, :dst, optional :weight
+			resolution::Float64: resolution parameter (default = 1.0)
+			n_iterations::Int: max iterations (default = 10)
+			weighted::Bool: use weights if present (default = false)
+			seed::Union{Int,Nothing}: random seed
+		Returns:
+			NamedTuple: (membership, modularity, n_communities, node_names)
+		Notes:
+			Simplified Leiden focusing on standard modularity optimization.
+			Adds (1) intra-community connectivity refinement and (2) multilevel contraction.
+			Crucially, preserves a membership vector aligned to the ORIGINAL nodes.
+		"""
+		
+		#	Set seed if provided
 			if seed !== nothing
 				Random.seed!(seed)
 			end
-
-		#	Agregate duplicates
-			grouped = _aggregate_multi_edges(edges; agg_func = agg_func)
-
-		#	Build matrix via your helper (weighted flag adhered to)
-			adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(grouped; weighted = weighted)
-
-		#	Run Leiden on the adjacency
-			out = leiden(adj; resolution = resolution, randomness = randomness)
-
-		#	Produce stable, pipeline-friendly result
-			membership = zeros(Int, length(idx_to_node))
-			for (cid, comm) in enumerate(out.partition)
-				for v in comm
-					membership[v] = cid
-				end
+		
+		#	Aggregate edges and build matrix
+			clean_edges = _aggregate_multi_edges(edges; agg_func=(weighted ? sum : maximum))
+			use_weights = weighted && hasproperty(clean_edges, :weight)
+			adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=use_weights)
+			adj = max.(adj, adj')  # enforce symmetry
+		
+		#	Original-node bookkeeping
+			n0 = size(adj, 1)
+			orig_to_curr = collect(1:n0)  # maps each original node → current-level node index
+		
+		#	Initialize communities (current level)
+			membership = collect(1:size(adj, 1))
+			Q = calculate_modularity(adj, membership, resolution)
+			iteration = 0
+			improved = true
+		
+		#	Leiden main loop
+			while improved && iteration < n_iterations
+				#	Specifying Parameters for Iteration
+					improved = false
+					iteration += 1
+				
+				#	Per-iteration neighbor lists (ensure sparse)
+					@assert issparse(adj) "adj must be SparseMatrixCSC before local moving."
+					n = size(adj, 1)
+					rows, cols, vals = findnz(adj)
+					neighbors = [Int[] for _ in 1:n]
+					for k in eachindex(vals)
+						i = rows[k]; j = cols[k]
+						if i != j
+							push!(neighbors[i], j)
+							push!(neighbors[j], i)
+						end
+					end
+				
+				#	Local node moving
+					node_order = randperm(length(membership))
+					for node in node_order
+						#	Isolating each Node
+							current_comm = membership[node]
+						
+						#	Neighbor communities
+							neighbor_comms = Set{Int}()
+							for other in neighbors[node]
+								push!(neighbor_comms, membership[other])
+							end
+						
+						#	Finding Optimal Community Configuration
+							best_comm = current_comm
+							best_Q = Q
+							
+							for target in neighbor_comms
+								if target == current_comm
+									continue
+								end
+								membership[node] = target
+								new_Q = calculate_modularity(adj, membership, resolution)
+								if new_Q > best_Q
+									best_Q = new_Q
+									best_comm = target
+								end
+							end
+							
+							if best_comm != current_comm
+								membership[node] = best_comm
+								Q = best_Q
+								improved = true
+							else
+								membership[node] = current_comm
+							end
+					end
+				
+				#	Leiden refinement (intra-community connectivity)
+					_refine_connectivity!(adj, membership)
+				
+				#	Contraction (each community → supernode) with original-node mapping update
+				#	Renumber labels to 1..C' exactly as the contraction will
+					unique_comms = sort(unique(membership))
+					label_map = Dict(old => new for (new, old) in enumerate(unique_comms))
+					
+				#	Update original-node → current-level node mapping through the contraction
+					for i in 1:n0
+						orig_to_curr[i] = label_map[membership[orig_to_curr[i]]]
+					end
+					
+				#	Build contracted graph
+					adj = _contract_by_membership(adj, membership)   # returns SparseMatrixCSC
+					adj = max.(adj, adj')                             # keep symmetric
+					
+				#	Reset current-level membership and quality for the new (smaller) graph
+					membership = collect(1:size(adj, 1))              # one comm per supernode
+					Q = calculate_modularity(adj, membership, resolution)
 			end
-
-		#	Return Community Soultion & Metrics
+		
+		#	Map final current-level labels back to ORIGINAL nodes
+			final_membership = [membership[orig_to_curr[i]] for i in 1:n0]
+			Q_final = calculate_modularity(adj, membership, resolution)
+		
+		#	Return Community Assignments & Quality Metrics
 			return (
-				membership     = membership,
-				modularity     = out.quality,      # quality H (Leiden objective in this implementation)
-				n_communities  = length(out.partition),
-				node_names     = idx_to_node,
-				resolution_used = Float64(resolution),
+				membership = final_membership,
+				modularity = Q_final,
+				n_communities = length(unique(final_membership)),
+				node_names = idx_to_node
 			)
 	end
 	@doc raw"""
-	**Description**  
-	Convenience wrapper to run Leiden directly from an edgelist. Integrates with the
-	existing input functions (`_aggregate_multi_edges`, `_edgelist_to_sparse_matrix`)
-	to construct an adjacency, then calls `leiden(adjmat; ...)`.
+	**Description**
+	Performs community detection using a simplified Leiden algorithm that optimizes modularity through iterative node moves and community merging.
 
-	**Usage**  
-	`leiden_community_detection(edges; resolution=1.0, randomness=0.01, weighted=true, agg_func=sum, seed=nothing)`
+	**Usage**
+	`leiden_community_detection(edges; resolution=1.0, n_iterations=10, weighted=false, seed=nothing)`
 
-	**Arguments**  
-	- `edges::DataFrame`: Edge list with columns `:src`, `:dst`, and optionally `:weight`
-	- `resolution::Real`: γ (resolution). Use `1.0` for classical setting
-	- `randomness::Real`: θ (refinement randomness; must be > 0)
-	- `weighted::Bool`: Use edge weights if present (default `true`)
-	- `agg_func::Function`: Aggregation for duplicate edges (default `sum`)
-	- `seed::Int`: Optional random seed for reproducibility
+	**Arguments**
+	- `edges::DataFrame`: Edge list with columns `:src` and `:dst` (required), and optionally `:weight`
+	- `resolution::Float64`: Resolution parameter γ controlling community granularity (default `1.0`)
+	  - Values < 1.0 favor larger communities
+	  - Values > 1.0 favor smaller communities
+	  - Standard modularity uses γ = 1.0
+	- `n_iterations::Int`: Maximum number of optimization iterations (default `10`)
+	- `weighted::Bool`: Whether to use edge weights if present (default `false`)
+	- `seed::Union{Int,Nothing}`: Random seed for reproducible results (default `nothing`)
 
-	**Value**  
-	`NamedTuple` with:
-	- `membership::Vector{Int}`: Community id per node (1-based)
-	- `modularity::Float64`: Final quality `H` (objective used in this implementation)
-	- `n_communities::Int`: Number of discovered communities
-	- `node_names::Vector`: Original node identifiers aligned to `membership`
-	- `resolution_used::Float64`: The γ used for this run
+	**Details**
+	The algorithm follows a two-phase iterative approach:
+	
+	Phase 1 - Local Moves: Each node considers moving to neighboring communities, selecting moves that increase modularity.
+	
+	Phase 2 - Community Renumbering: Communities are renumbered to maintain consecutive indices.
+	
+	The modularity function optimized is:
+	Q = (1/2m) Σ[A_ij - γ(k_i × k_j)/(2m)] δ(c_i, c_j)
+	
+	where:
+	- A_ij = edge weight between nodes i and j
+	- k_i = degree (or strength) of node i
+	- m = total edge weight in the network
+	- γ = resolution parameter
+	- δ(c_i, c_j) = 1 if nodes i and j are in the same community, 0 otherwise
 
-	**Notes**  
-	- Honors your ingest pipeline exactly; no changes to input helpers.  
-	- For multiple γ sweeps or selection routines (e.g., CHAMP-style), call this in a loop.
+	**Value**
+	Returns a NamedTuple with:
+	- `membership::Vector{Int}`: Community assignment for each node (1-based indices)
+	- `modularity::Float64`: Final modularity score Q ∈ [-1, 1]
+	- `n_communities::Int`: Number of detected communities
+	- `node_names::Vector`: Original node identifiers matching membership order
+
+	**Examples**
+```julia
+	# Unweighted network with default resolution
+	edges = DataFrame(
+	    src = ["A", "A", "B", "C", "D", "D"],
+	    dst = ["B", "C", "C", "D", "E", "F"]
+	)
+	result = leiden_community_detection(edges)
+	println("Found $(result.n_communities) communities")
+	
+	# Weighted network with higher resolution
+	edges_weighted = DataFrame(
+	    src = ["A", "A", "B", "C"],
+	    dst = ["B", "C", "C", "D"],
+	    weight = [3.0, 1.0, 2.0, 4.0]
+	)
+	result = leiden_community_detection(edges_weighted; 
+	                                   resolution=1.5, 
+	                                   weighted=true,
+	                                   seed=42)
+	
+	# View community assignments
+	for (node, comm) in zip(result.node_names, result.membership)
+	    println("Node $node → Community $comm")
+	end
+```
+
+	**See Also**
+	- `champ_community_detection`: For resolution parameter selection
+	- `adjusted_rand_index`: For comparing partitions
+	- `test_leiden_consistency`: For evaluating partition stability
+
+	**References**
+	Traag VA, Waltman L, van Eck NJ (2019). "From Louvain to Leiden: guaranteeing well-connected communities." 
+	Scientific Reports 9(1):5233. doi:10.1038/s41598-019-41695-z
+	
+	Note: This is a simplified implementation optimized for standard modularity. For the full Leiden algorithm with 
+	refinement phases, consider the research implementation or specialized graph packages.
 	""" leiden_community_detection
-
-# 	Helper Function: Objective H (quality)
-	function H(graph::PartitionedGraph, γ::Float64)
-		quality = 0.0
-		for (i, community) in enumerate(graph.partition)
-			for u in community, v in community
-				if u ≤ v
-					quality += graph.edge_weight[u, v]
-				end
-			end
-			n = graph.size[i]
-			quality -= γ * div(n * (n - 1), 2)  # integer-safe C(n,2)
-		end
-		return quality
-	end
-
-# 	Helper Function: Flatten Multi-Level Stack Back to Base Vertices
-	function flatten(stack::Vector{Partition})
-		k = lastindex(stack)
-		result = copy(stack[k])
-		k -= 1
-		while k ≥ 1
-			partition = stack[k]
-			for (i, indices) in enumerate(result)
-				result[i] = mapfoldl(i -> partition[i], vcat, indices, init = Int[])
-			end
-			k -= 1
-		end
-		sort!(result, by = length)
-		foreach(sort!, result)
-		return result
-	end
-
-# 	Helper Function: Simple Categorical Sampler (inverse CDF)
-	function sample(probs::Vector{Float64})
-		r = rand()
-		p = 0.0
-		i = 1
-		while i < lastindex(probs)
-			p += probs[i]
-			if p > r
-				return i
-			end
-			i += 1
-		end
-		return lastindex(probs)
-	end
-
-# 	Helper Function: Coarsen Graph by Communities
-	function aggregate_graph(graph::PartitionedGraph)
-		n = nc(graph)
-		I = Int[]; J = Int[]; V = Float64[]
-		cardinality = zeros(Int, n)
-		connected = Int[]
-		total_weights = zeros(Float64, n)
-
-		for (i, community) in enumerate(graph.partition)
-			cardinality[i] = graph.size[i]
-
-			empty!(connected)
-			for u in community, v in neighbors(graph, u)
-				j = graph.membership[v]
-				if i == j && u > v
-					continue  # dev: avoid double-counting intra-community pairs
-				end
-				if total_weights[j] == 0
-					push!(connected, j)
-				end
-				total_weights[j] += graph.edge_weight[u, v]
-			end
-
-			for j in connected
-				v = total_weights[j]
-				push!(I, i); push!(J, j); push!(V, v)
-				total_weights[j] = 0
-			end
-		end
-
-		return PartitionedGraph(sparse(I, J, V, n, n)::WeightMatrix, cardinality = cardinality)
-	end
 
 #	Helper Function for CHAMP: calculate partition coefficients
 	function _calculate_partition_coefficients(adj::SparseMatrixCSC, membership::Vector{Int}, weighted::Bool)
