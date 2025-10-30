@@ -520,6 +520,8 @@ module Large_Graph_Similarity
 			return (first_mode, second_mode)
 	end
 
+#	COMPARISON FUNCTIONS
+
 #	Adjusted Rand Index Calculation
 	function adjusted_rand_index(partition1::Vector{Int}, partition2::Vector{Int})
 		"""

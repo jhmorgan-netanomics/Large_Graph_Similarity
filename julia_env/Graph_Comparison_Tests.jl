@@ -1549,6 +1549,92 @@
 			println("=" ^ 60)
 	end
 
+#	Leiden Tests Helper: Compare Two Specific Partitions
+	function compare_partitions(partition1::Vector{Int}, partition2::Vector{Int};
+	                           verbose::Bool=true)
+		"""
+		Args:
+			partition1::Vector{Int}: first partition (labels per ORIGINAL node)
+			partition2::Vector{Int}: second partition (labels per ORIGINAL node)
+			verbose::Bool: print detailed comparison (default = true)
+		Returns:
+			NamedTuple: (ari, n_communities_1, n_communities_2, confusion_matrix, agreement_rate)
+		Notes:
+			- Requires adjusted_rand_index to be available.
+			- Assumes both partitions are defined over the SAME node ordering/length.
+		"""
+		
+		#	Validation
+			@assert length(partition1) == length(partition2) "Partitions must be the same length"
+		
+		#	Calculate ARI
+			ari = adjusted_rand_index(partition1, partition2)
+		
+		#	Get unique labels
+			labels1 = sort(unique(partition1))
+			labels2 = sort(unique(partition2))
+		
+		#	Build confusion matrix
+			n1 = length(labels1)
+			n2 = length(labels2)
+			confusion = zeros(Int, n1, n2)
+			
+			map1 = Dict(label => i for (i, label) in enumerate(labels1))
+			map2 = Dict(label => i for (i, label) in enumerate(labels2))
+			
+			for i in 1:length(partition1)
+				r = map1[partition1[i]]
+				c = map2[partition2[i]]
+				confusion[r, c] += 1
+			end
+		
+		#	Calculate naive agreement rate via best-per-row matches
+			n_agreed = 0
+			for r in 1:n1
+				n_agreed += maximum(confusion[r, :])
+			end
+			agreement_rate = n_agreed / length(partition1)
+		
+		#	Print if verbose
+			if verbose
+				println("\nPartition Comparison:")
+				println(repeat("-", 40))
+				println("Partition 1: $(n1) communities")
+				println("Partition 2: $(n2) communities")
+				println("Adjusted Rand Index: $(round(ari, digits=4))")
+				println("Node agreement rate: $(round(agreement_rate * 100, digits=2))%")
+				
+				if n1 <= 10 && n2 <= 10
+					println("\nConfusion Matrix (rows=P1, cols=P2):")
+					for r in 1:n1
+						println("  ", collect(confusion[r, :]))
+					end
+				end
+			end
+		
+		return (
+			ari = ari,
+			n_communities_1 = n1,
+			n_communities_2 = n2,
+			confusion_matrix = confusion,
+			agreement_rate = agreement_rate
+		)
+	end
+
+#	Leident Tests Helper: Community Size table from Membership
+	function _community_sizes(membership::Vector{Int})
+		"""
+		Args:
+			membership::Vector{Int}: community label per ORIGINAL node
+		Returns:
+			DataFrame: (community, count) sorted by count desc
+		"""
+		ct = countmap(membership)
+		df = DataFrame(community = collect(keys(ct)), count = collect(values(ct)))
+		sort!(df, :count, rev=true)
+		return df
+	end
+
 #	Test Function for Leiden Community Detection (consistency via ARI)
 	function test_leiden_consistency(edges::DataFrame;
 	                                 resolution::Float64=1.0,
@@ -1703,90 +1789,223 @@
 			)
 	end
 
-#	Additional Helper: Compare Two Specific Partitions
-	function compare_partitions(partition1::Vector{Int}, partition2::Vector{Int};
-	                           verbose::Bool=true)
+#	CHAMP Test Helper Function: Build DataFrame from undirected edge list (optionally weighted)
+	function _df_from_edges(edges::Vector{Tuple{Int,Int}}; weighted::Bool=false, w::Float64=1.0)
 		"""
 		Args:
-			partition1::Vector{Int}: first partition (labels per ORIGINAL node)
-			partition2::Vector{Int}: second partition (labels per ORIGINAL node)
-			verbose::Bool: print detailed comparison (default = true)
+			edges::Vector{Tuple{Int,Int}}: undirected edges as (u,v) with 1 ≤ u < v ≤ N
+			weighted::Bool=false: include :weight column with constant w
+			w::Float64=1.0: edge weight if weighted
 		Returns:
-			NamedTuple: (ari, n_communities_1, n_communities_2, confusion_matrix, agreement_rate)
+			DataFrame with columns :src, :dst [, :weight]
 		Notes:
-			- Requires adjusted_rand_index to be available.
-			- Assumes both partitions are defined over the SAME node ordering/length.
+			Produces a simple undirected edgelist without self-loops or multiedges.
 		"""
-		
-		#	Validation
-			@assert length(partition1) == length(partition2) "Partitions must be the same length"
-		
-		#	Calculate ARI
-			ari = adjusted_rand_index(partition1, partition2)
-		
-		#	Get unique labels
-			labels1 = sort(unique(partition1))
-			labels2 = sort(unique(partition2))
-		
-		#	Build confusion matrix
-			n1 = length(labels1)
-			n2 = length(labels2)
-			confusion = zeros(Int, n1, n2)
-			
-			map1 = Dict(label => i for (i, label) in enumerate(labels1))
-			map2 = Dict(label => i for (i, label) in enumerate(labels2))
-			
-			for i in 1:length(partition1)
-				r = map1[partition1[i]]
-				c = map2[partition2[i]]
-				confusion[r, c] += 1
-			end
-		
-		#	Calculate naive agreement rate via best-per-row matches
-			n_agreed = 0
-			for r in 1:n1
-				n_agreed += maximum(confusion[r, :])
-			end
-			agreement_rate = n_agreed / length(partition1)
-		
-		#	Print if verbose
-			if verbose
-				println("\nPartition Comparison:")
-				println(repeat("-", 40))
-				println("Partition 1: $(n1) communities")
-				println("Partition 2: $(n2) communities")
-				println("Adjusted Rand Index: $(round(ari, digits=4))")
-				println("Node agreement rate: $(round(agreement_rate * 100, digits=2))%")
-				
-				if n1 <= 10 && n2 <= 10
-					println("\nConfusion Matrix (rows=P1, cols=P2):")
-					for r in 1:n1
-						println("  ", collect(confusion[r, :]))
-					end
-				end
-			end
-		
-		return (
-			ari = ari,
-			n_communities_1 = n1,
-			n_communities_2 = n2,
-			confusion_matrix = confusion,
-			agreement_rate = agreement_rate
-		)
+		src = Int[]; dst = Int[]; wt = Float64[]
+		for (u,v) in edges
+			u == v && continue
+			push!(src, u); push!(dst, v)
+			weighted && push!(wt, w)
+		end
+		return weighted ? DataFrame(; src=src, dst=dst, weight=wt) : DataFrame(; src=src, dst=dst)
 	end
 
-#	Helper: Community Size table from Membership
-	function _community_sizes(membership::Vector{Int})
+#	CHAMP Test Helper Function: Complete graph K9 (uniformly connected; one optimal community at γ≈1)
+	function build_complete_graph_9(; weighted::Bool=false, w::Float64=1.0)
+		"""
+		Returns:
+			DataFrame edgelist for K9, and ground truth membership (all ones)
+		"""
+		edges = Tuple{Int,Int}[]
+		for u in 1:9, v in (u+1):9
+			push!(edges, (u,v))
+		end
+		df = _df_from_edges(edges; weighted=weighted, w=w)
+		gt = fill(1, 9)  # single community
+		return (edges=df, ground_truth=gt, name="K9")
+	end
+
+#	CHAMP Test Helper Function: Dumbbell graph (two cliques bridged by a single edge; optimal partition = 2 comms)
+	function build_dumbbell_graph_9(; weighted::Bool=false, w_in::Float64=1.0, w_bridge::Float64=1.0)
+		"""
+		Structure:
+			Left clique: 1–4
+			Right clique: 5–9
+			Bridge: (4,5)
+		Returns:
+			DataFrame edgelist, ground truth membership (two communities)
+		"""
+		#	Creating Empty Edgelist for Populating
+			edges = Tuple{Int,Int}[]
+
+		#	Left clique K4
+			for u in 1:4, v in (u+1):4
+				push!(edges, (u,v))
+			end
+
+		#	Right clique K5
+			for u in 5:9, v in (u+1):9
+				push!(edges, (u,v))
+			end
+
+		#	Bridge
+			push!(edges, (4,5))
+
+		#	Adding Internal Edges
+			if weighted
+				#	Build DF with in-clique = w_in, bridge = w_bridge
+					df_in  = _df_from_edges([(u,v) for (u,v) in edges if !((u==4 && v==5))]; weighted=true,  w=w_in)
+					df_br  = _df_from_edges([(4,5)];                                 weighted=true,  w=w_bridge)
+					df = vcat(df_in, df_br)
+			else
+				#	Building Binary Community Edges
+					df = _df_from_edges(edges; weighted=false)
+			end
+
+		#	Return Dumbell Graph
+			gt = [1,1,1,1, 2,2,2,2,2]  # 1–4 vs 5–9
+			return (edges=df, ground_truth=gt, name="Dumbbell")
+	end
+
+#	CHAMP Test Helper Function: Three cliques (3-3-3) weakly bridged in a triangle
+	function build_clique_triangle_9(; weighted::Bool=false, w_in::Float64=1.0, w_bridge::Float64=0.2)
+		"""
+		Structure:
+			Three fully connected cliques:
+				C₁ = {1,2,3}, C₂ = {4,5,6}, C₃ = {7,8,9}
+			Weak inter-clique bridges forming a triangle:
+				(3,4), (6,7), (9,1)
+		Args:
+			weighted::Bool=false: include :weight column
+			w_in::Float64=1.0:    intra-clique edge weight
+			w_bridge::Float64=0.2:inter-clique bridge weight (set small to favor 3 modules)
+		Returns:
+			NamedTuple: (edges::DataFrame, ground_truth::Vector{Int}, name::String)
+		Notes:
+			Heuristic ground truth is 3 communities of size 3: [1,1,1, 2,2,2, 3,3,3].
+			Increase γ or decrease w_bridge to make the 3-way split more pronounced.
+		"""
+		#	Define cliques
+			C1 = 1:3; C2 = 4:6; C3 = 7:9
+
+		#	Intra-clique edges (undirected, u < v)
+			edges_in = Tuple{Int,Int}[]
+			for C in (C1, C2, C3)
+				for u in C, v in (u+1):last(C)
+					push!(edges_in, (u, v))
+				end
+			end
+
+		#	Weak triangle bridges
+			edges_br = Tuple{Int,Int}[(3,4), (6,7), (9,1)]
+
+		#	Build DataFrame (weighted or unweighted)
+			if weighted
+				df_in = _df_from_edges(edges_in; weighted=true, w=w_in)
+				df_br = _df_from_edges(edges_br; weighted=true, w=w_bridge)
+				df = vcat(df_in, df_br)
+			else
+				df = _df_from_edges(vcat(edges_in, edges_br); weighted=false)
+			end
+
+		#	Ground truth: 3 cliques
+			gt = [1,1,1, 2,2,2, 3,3,3]
+
+		return (edges=df, ground_truth=gt, name="CliqueTriangle9")
+	end
+
+#	CHAMP Test Harness: Sanity Checks on Three Stylized Graphs
+	function run_champ_test_harness(; weighted::Bool=false,
+	                                 n_runs_per_gamma::Int=5,
+	                                 n_iterations_per_run::Int=10,
+	                                 resolution_range::Tuple{Float64,Float64}=(0.5,1.8),
+	                                 n_resolutions::Int=15,
+	                                 seed::Union{Int,Nothing}=42,
+	                                 verbose::Bool=true)
 		"""
 		Args:
-			membership::Vector{Int}: community label per ORIGINAL node
+			weighted::Bool=false: pass weights through to detection
+			n_runs_per_gamma::Int=5: multi-start per γ
+			n_iterations_per_run::Int=10: Leiden iterations per run
+			resolution_range::Tuple=(0.5,1.8): default γ sweep
+			n_resolutions::Int=15: points in sweep
+			seed::Union{Int,Nothing}=42: base RNG seed
+			verbose::Bool=true: print results
 		Returns:
-			DataFrame: (community, count) sorted by count desc
+			NamedTuple with results for each graph (K9, Dumbbell, CliqueTriangle9)
+		Notes:
+			• K9: expect n≈1 (at γ=1, Q≈0; CHAMP may choose γ<1 ⇒ higher Q)
+			• Dumbbell: expect n≈2, Q moderately high
+			• CliqueTriangle9: expect n≈3 with weak bridges (higher γ or weaker bridges helps)
 		"""
-		ct = countmap(membership)
-		df = DataFrame(community = collect(keys(ct)), count = collect(values(ct)))
-		sort!(df, :count, rev=true)
-		return df
+		#	Build fixtures
+			K9            = build_complete_graph_9(; weighted=weighted)
+			Dumbbell      = build_dumbbell_graph_9(; weighted=weighted, w_in=1.0, w_bridge=1.0)
+			CliqueTriangle= build_clique_triangle_9(; weighted=weighted, w_in=1.0, w_bridge=0.2)
+
+		#	Run CHAMP on each (supports per-graph sweep override)
+			function _run_one(name, edf, gt; rr=resolution_range, nres=n_resolutions)
+				#	Run CHAMP
+					res = champ_community_detection(
+						edf;
+						resolution           = nothing,
+						resolution_range     = rr,
+						n_resolutions        = nres,
+						weighted             = weighted,
+						agg_func             = nothing,
+						n_runs_per_gamma     = n_runs_per_gamma,
+						n_iterations_per_run = n_iterations_per_run,
+						seed                 = seed
+					)
+
+				#	Align membership to canonical node order 1..N before ARI
+					N = maximum(vcat(Vector(edf.src), Vector(edf.dst)))
+					pos = Dict{Int,Int}()	#	node id → index in res vectors
+					for (i, id) in enumerate(res.node_names)
+						pos[Int(id)] = i
+					end
+					aligned = Vector{Int}(undef, N)
+					for u in 1:N
+						aligned[u] = res.membership[pos[u]]
+					end
+
+				#	Compute ARI using exported function (if GT provided)
+					ari = (isnothing(gt) || isempty(gt)) ? NaN : adjusted_rand_index(aligned, gt)
+
+				return (name=name, result=res, ari_vs_gt=ari)
+			end
+
+			rK = _run_one(K9.name,            K9.edges,            K9.ground_truth)                          #	default sweep
+			rD = _run_one(Dumbbell.name,      Dumbbell.edges,      Dumbbell.ground_truth)                    #	default sweep
+			rT = _run_one(CliqueTriangle.name, CliqueTriangle.edges, CliqueTriangle.ground_truth;             #	nudged higher-γ sweep
+			              rr=(0.9, 2.0), nres=max(n_resolutions, 21))
+
+		#	Print summary
+			if verbose
+				println("=" ^ 60)
+				println("CHAMP Sanity Tests (n=9)  |  weighted=$(weighted)  runs/γ=$(n_runs_per_gamma)  iters/run=$(n_iterations_per_run)")
+				println("=" ^ 60)
+
+				for r in (rK, rD, rT)
+					res = r.result
+					println("\n[", r.name, "]")
+					println("  γ*           : ", round(res.resolution_used, digits=4))
+					println("  communities  : ", res.n_communities)
+					println("  modularity Q : ", round(res.modularity, digits=4))
+					if !isnan(r.ari_vs_gt)
+						println("  ARI vs GT    : ", round(r.ari_vs_gt, digits=4))
+					end
+				end
+
+				println("\nHeuristics:")
+				println("  • K9             → expect n=1; at γ=1, Q≈0 (CHAMP may pick γ<1 ⇒ Q>0)")
+				println("  • Dumbbell       → expect n=2, Q moderate/high, ARI≈1.0 vs [1..4|5..9]")
+				println("  • CliqueTriangle → expect n=3 with weak bridges; raise γ or lower w_bridge if merged")
+				println("=" ^ 60)
+			end
+
+		#	Return Small Graph Solutions
+			return (K9=rK, Dumbbell=rD, CliqueTriangle=rT)
 	end
 
 ##########################
@@ -2075,6 +2294,14 @@
 	community_index.leiden_group = convert.(Int64, community_index.leiden_group)
 	ora_ari = adjusted_rand_index(community_index.community, community_index.leiden_group)
 	print(ora_ari)
+
+#	CHAMP Tests
+	run_champ_test_harness(; weighted=false)
+	run_champ_test_harness(; weighted=true)
+
+	all_comm_CHAMP = champ_community_detection(agent_agent_all_com.edges; resolution = nothing, resolution_range     = (0.5,1.8),
+						                       n_resolutions = 15, weighted = true, n_runs_per_gamma = 10, n_iterations_per_run = 10,
+							                   seed = 45)
 
 #	Test Modularity Vitality Hub
 
