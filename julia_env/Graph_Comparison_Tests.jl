@@ -2020,12 +2020,12 @@
 	authority_centrality = salsa_centrality(agent_agent_all_com.edges; score=:authority)
 
 #	Leiden Community Detection
-	all_comm_communities = leiden_community_detection(agent_agent_all_com.edges; resolution=1.0, weighted=false)
+	all_comm_communities = leiden_community_detection(agent_agent_all_com.edges; n_iterations=10, n_runs=5, resolution=1.0, weighted=false)
 	community_index = DataFrame(node = all_comm_communities.node_names, community = all_comm_communities.membership)
 	comm_sizes = combine(groupby(community_index, :community), nrow => :count)
 	sort!(comm_sizes, :count, rev = true)
 
-	all_comm_communities_weighted = leiden_community_detection(agent_agent_all_com.edges; resolution=1.0, weighted=true)
+	all_comm_communities_weighted = leiden_community_detection(agent_agent_all_com.edges; n_iterations=10, n_runs=5, resolution=1.0, weighted=true)
 	community_index = DataFrame(node = all_comm_communities_weighted.node_names, community = all_comm_communities_weighted.membership)
 	comm_sizes = combine(groupby(community_index, :community), nrow => :count)
 	sort!(comm_sizes, :count, rev = true)

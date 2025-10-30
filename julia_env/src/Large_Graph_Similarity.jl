@@ -2898,40 +2898,43 @@ module Large_Graph_Similarity
 		return S
 	end
 
-#	Leiden Community Detection
-	function leiden_community_detection(edges::DataFrame;
-	                                   resolution::Float64=1.0,
-	                                   n_iterations::Int=10,
-	                                   weighted::Bool=false,
-	                                   seed::Union{Int,Nothing}=nothing)
+#	Helper: Single Leiden Run (extracted from previous implementation)
+	#	Helper: Single Leiden Run (extracted; preserves original-node membership; run-local RNG)
+	function _leiden_single_run(adj::SparseMatrixCSC,
+	                            resolution::Float64,
+	                            n_iterations::Int;
+	                            seed::Union{Int,Nothing}=nothing)
 		"""
 		Args:
-			edges::DataFrame: edge list with :src, :dst, optional :weight
+			adj::SparseMatrixCSC: ORIGINAL (pre-contraction) symmetric adjacency; weighted OK
 			resolution::Float64: resolution parameter γ (default = 1.0)
-			n_iterations::Int: maximum iterations (default = 10)
-			weighted::Bool: use edge weights if present (default = false)
-			seed::Union{Int,Nothing}: random seed for reproducibility
+			n_iterations::Int: maximum iterations per run (default = 10)
+			seed::Union{Int,Nothing}: random seed scoped to THIS run (default = nothing)
 		Returns:
-			NamedTuple: (membership, modularity, n_communities, node_names)
+			NamedTuple: (membership::Vector{Int}, modularity::Float64, n_communities::Int)
 		Notes:
-			Implements simplified Leiden with local moves, refinement, and contraction.
-			Preserves mapping to original nodes through multilevel hierarchy.
+			• Implements simplified Leiden: local moves → refinement → contraction.
+			• Preserves mapping back to ORIGINAL nodes via `orig_to_curr`.
+			• Computes final modularity on the ORIGINAL adjacency to avoid contraction bias.
+			• Assumes `calculate_modularity`, `_refine_connectivity!`, and `_contract_by_membership`
+			  are available and that `calculate_modularity` is read-only (no rescaling).
 		"""
 		
-		#	Set random seed if provided
+		#	Run-local RNG
 			if seed !== nothing
 				Random.seed!(seed)
 			end
 		
-		#	Prepare adjacency matrix
-			clean_edges = _aggregate_multi_edges(edges; agg_func=(weighted ? sum : maximum))
-			use_weights = weighted && hasproperty(clean_edges, :weight)
-			adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=use_weights)
-			adj = max.(adj, adj')  # Enforce symmetry
+		#	Input validation & symmetry
+			@assert issparse(adj) "_leiden_single_run: adj must be SparseMatrixCSC"
+			adj = max.(adj, adj')  # enforce symmetry once
+			adj0 = adj             # keep ORIGINAL adjacency for final Q
 		
-		#	Initialize tracking
+		#	Original-node bookkeeping
 			n0 = size(adj, 1)
-			orig_to_curr = collect(1:n0)  # Maps original nodes to current level
+			orig_to_curr = collect(1:n0)  # original node i → current-level node index
+		
+		#	Initialize current-level state
 			membership = collect(1:size(adj, 1))
 			Q = calculate_modularity(adj, membership, resolution)
 			iteration = 0
@@ -2942,50 +2945,43 @@ module Large_Graph_Similarity
 				improved = false
 				iteration += 1
 				
-				#	Build neighbor lists for current level
+				#	Neighbor lists (current level)
 					n = size(adj, 1)
 					rows, cols, vals = findnz(adj)
 					neighbors = [Int[] for _ in 1:n]
-					
 					for k in eachindex(vals)
-						i, j = rows[k], cols[k]
+						i = rows[k]; j = cols[k]
 						if i != j
-							push!(neighbors[i], j)
-							push!(neighbors[j], i)
+							push!(neighbors[i], j); push!(neighbors[j], i)
 						end
 					end
 				
 				#	Phase 1: Local node moves
 					node_order = randperm(n)
-					
 					for node in node_order
 						current_comm = membership[node]
 						
-						#	Find neighbor communities
+						#	Neighbor communities
 							neighbor_comms = Set{Int}()
 							for other in neighbors[node]
 								push!(neighbor_comms, membership[other])
 							end
 						
-						#	Evaluate moves
+						#	Best move selection
 							best_comm = current_comm
 							best_Q = Q
-							
 							for target in neighbor_comms
 								if target == current_comm
 									continue
 								end
-								
-								#	Test move
-									membership[node] = target
-									new_Q = calculate_modularity(adj, membership, resolution)
-									
-									if new_Q > best_Q
-										best_Q = new_Q
-										best_comm = target
-									end
+								membership[node] = target
+								new_Q = calculate_modularity(adj, membership, resolution)
+								if new_Q > best_Q
+									best_Q = new_Q
+									best_comm = target
+								end
 							end
-							
+						
 						#	Apply best move
 							if best_comm != current_comm
 								membership[node] = best_comm
@@ -2996,35 +2992,86 @@ module Large_Graph_Similarity
 							end
 					end
 				
-				#	Phase 2: Refinement (ensure connectivity)
+				#	Phase 2: Refinement (ensure intra-community connectivity)
 					_refine_connectivity!(adj, membership)
 				
-				#	Phase 3: Graph contraction
+				#	Phase 3: Contraction (community → supernode)
 					unique_comms = sort(unique(membership))
 					label_map = Dict(old => new for (new, old) in enumerate(unique_comms))
-					
-					#	Update original node mapping
-						for i in 1:n0
-							orig_to_curr[i] = label_map[membership[orig_to_curr[i]]]
-						end
-					
-					#	Contract graph
-						adj = _contract_by_membership(adj, membership)
-						membership = collect(1:size(adj, 1))
-						Q = calculate_modularity(adj, membership, resolution)
+					#	Update original→current mapping
+					for i in 1:n0
+						orig_to_curr[i] = label_map[membership[orig_to_curr[i]]]
+					end
+					#	Contract and reset current-level membership
+					adj = _contract_by_membership(adj, membership)
+					adj = max.(adj, adj')                 # keep symmetric
+					membership = collect(1:size(adj, 1))  # each supernode its own community
+					Q = calculate_modularity(adj, membership, resolution)
 			end
 		
-		#	Map back to original nodes
+		#	Map labels back to ORIGINAL nodes and score on ORIGINAL adjacency
 			final_membership = [membership[orig_to_curr[i]] for i in 1:n0]
-			Q_final = calculate_modularity(adj, membership, resolution)
+			Q_final = calculate_modularity(adj0, final_membership, resolution)
 		
-		#	Return results
-			return (
-				membership = final_membership,
-				modularity = Q_final,
-				n_communities = length(unique(final_membership)),
-				node_names = idx_to_node
-			)
+		return (
+			membership = final_membership,
+			modularity = Q_final,
+			n_communities = length(unique(final_membership))
+		)
+	end
+
+#	Leiden Community Detection (multi-run; returns best by modularity; preserves original-node names)
+	function leiden_community_detection(edges::DataFrame;
+	                                   resolution::Float64=1.0,
+	                                   n_iterations::Int=10,
+	                                   n_runs::Int=1,
+	                                   weighted::Bool=false,
+	                                   seed::Union{Int,Nothing}=nothing)
+		"""
+		Args:
+			edges::DataFrame: edge list with :src, :dst (required), optional :weight
+			resolution::Float64: resolution parameter γ (default = 1.0)
+			n_iterations::Int: iterations per run (default = 10)
+			n_runs::Int: independent runs; best modularity returned (default = 1)
+			weighted::Bool: use weights if present (default = false)
+			seed::Union{Int,Nothing}: base seed; each run uses (seed + run - 1) (default = nothing)
+		Returns:
+			NamedTuple: (membership::Vector{Int}, modularity::Float64, n_communities::Int, node_names::Vector)
+		Notes:
+			• Builds adjacency once from the edgelist (respecting `weighted`).
+			• Performs `n_runs` independent Leiden runs; picks the partition with the highest modularity
+			  evaluated on the ORIGINAL adjacency.
+			• `node_names` aligns 1:1 with `membership` (original input node order).
+		"""
+		
+		#	Build adjacency
+			clean_edges = _aggregate_multi_edges(edges; agg_func=(weighted ? sum : maximum))
+			use_weights = weighted && hasproperty(clean_edges, :weight)
+			adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=use_weights)
+			adj = max.(adj, adj')  # enforce symmetry once
+		
+		#	Track best across runs
+			best_membership = Vector{Int}()
+			best_modularity = -Inf
+			best_n_communities = 0
+		
+		#	Multiple independent runs
+			for run in 1:n_runs
+				seed_run = (seed === nothing) ? nothing : (seed + run - 1)
+				res = _leiden_single_run(adj, resolution, n_iterations; seed=seed_run)
+				if res.modularity > best_modularity
+					best_modularity = res.modularity
+					best_membership = res.membership
+					best_n_communities = res.n_communities
+				end
+			end
+		
+		return (
+			membership = best_membership,
+			modularity = best_modularity,
+			n_communities = best_n_communities,
+			node_names = idx_to_node
+		)
 	end
 	@doc raw"""
 	**Description**
@@ -3099,55 +3146,63 @@ module Large_Graph_Similarity
 	**References**
 	Traag VA, Waltman L, van Eck NJ (2019). "From Louvain to Leiden: guaranteeing 
 	well-connected communities." Scientific Reports 9(1):5233. doi:10.1038/s41598-019-41695-z
-	""" leiden_community_detection
+	"""leiden_community_detection
 
-#	Helper Function for CHAMP: calculate partition coefficients
+#	Helper Function for CHAMP: Calculate Partition Coefficients
 	function _calculate_partition_coefficients(adj::SparseMatrixCSC, membership::Vector{Int}, weighted::Bool)
 		"""
 		Args:
-			adj::SparseMatrixCSC: adjacency matrix
-			membership::Vector{Int}: community assignments
-			weighted::Bool: whether to use weights
+			adj::SparseMatrixCSC: symmetric (undirected) adjacency for THESE nodes; may be weighted
+			membership::Vector{Int}: community id per node (length == size(adj,1))
+			weighted::Bool: unused in computation (kept for interface parity); adj already encodes weights
 		Returns:
-			Tuple: (A, P) - internal edges and expected edges
+			Tuple{Float64,Float64}: (A, P)
+				A = Σ_c Σ_{i∈c} Σ_{j∈c} A_ij        (block-sum; off-diagonals counted twice)
+				P = Σ_c (K_c^2) / (2m)              with K_c = Σ_{i∈c} k_i,  k_i = Σ_j A_ij,  2m = Σ_{ij} A_ij
 		Notes:
-			A = sum of internal edges, P = expected edges under null model
+			• A: Sum of internal edges as defined above
+			• P: Sum of expected edges under the null model
+			• With these definitions, modularity is  Q(γ) = (1/(2m)) * (A − γ * P).
+			• Using block-sum A keeps CHAMP’s linear objective consistent with your modularity scorer.
+			• Assumes adj is (or will be made) symmetric; we enforce symmetry read-only here.
 		"""
+		#	Validate and symmetrize (read-only)
+			@assert issparse(adj) "_calculate_partition_coefficients: adj must be SparseMatrixCSC"
+			@assert size(adj,1) == length(membership) "_calculate_partition_coefficients: membership length must match adj size"
+			S = max.(adj, adj')   # avoid weight inflation; no rescaling
 		
-		#	Calculate total weight
-			if weighted
-				m = sum(adj) / 2
-			else
-				m = nnz(adj) / 2
-			end
-			
-			if m == 0
+		#	Totals and degrees
+			two_m = sum(S)
+			if two_m == 0.0
 				return (0.0, 0.0)
 			end
+			m = two_m / 2.0
+			degrees = vec(sum(S, dims=2))  # k_i
 		
-		#	Calculate degrees
-			degrees = vec(sum(adj, dims=2))
-		
-		#	Calculate A and P
+		#	Accumulate A (block-sum) and P (expected term scaled by 2m)
 			A = 0.0
 			P = 0.0
-			communities = unique(membership)
-			
-			for comm in communities
-				nodes_in_comm = findall(x -> x == comm, membership)
-				
-				#	Internal edges (A term)
-					if length(nodes_in_comm) > 1
-						submatrix = adj[nodes_in_comm, nodes_in_comm]
-						A += sum(submatrix) / 2
+			for c in unique(membership)
+				#	Checking Community Memberships
+					nodes = findall(==(c), membership)
+					if isempty(nodes)
+						continue
 					end
-				
-				#	Expected edges (P term)
-					degree_sum = sum(degrees[nodes_in_comm])
-					P += (degree_sum^2) / (4 * m)
+
+				#	A_c^(2): block-sum over community (counts off-diagonals twice; includes self-loops if present)
+					Ac2 = 0.0
+					for i in nodes
+						Ac2 += sum(view(S, i, nodes))
+					end
+					A += Ac2
+
+				#	P_c: (K_c^2) / (2m)
+					Kc = sum(degrees[nodes])
+					P += (Kc * Kc) / (2.0 * m)
 			end
 		
-		return (A, P)
+		#	Sum of internal edges and Sum of expected edges under the null model
+			return (A, P)
 	end
 
 #	CHAMP: Convex Hull of Admissible Modularity Partitions
@@ -3158,177 +3213,151 @@ module Large_Graph_Similarity
 	                                   weighted::Bool=false,
 	                                   agg_func::Union{Function,Nothing}=nothing,
 	                                   n_runs_per_gamma::Int=5,
+	                                   n_iterations_per_run::Int=10,
 	                                   seed::Union{Int,Nothing}=nothing)
 		"""
 		Args:
-			edges::DataFrame: edge list with :src, :dst, and optional :weight columns
-			resolution::Union{Float64,Nothing}: specific resolution or nothing for sweep (default = nothing)
-			resolution_range::Tuple{Float64,Float64}: range for sweep (default = (0.5, 1.8))
-			n_resolutions::Int: number of resolution values in sweep (default = 20)
-			weighted::Bool: use edge weights if present (default = false)
-			agg_func::Union{Function,Nothing}: aggregation for parallel edges
-			n_runs_per_gamma::Int: Leiden runs per resolution value (default = 5)
-			seed::Union{Int,Nothing}: random seed for reproducibility
+			edges::DataFrame: :src, :dst (required), optional :weight
+			resolution::Union{Float64,Nothing}: fixed γ or nothing to sweep
+			resolution_range::Tuple{Float64,Float64}: sweep range if γ not given
+			n_resolutions::Int: number of γ values in sweep (default 20)
+			weighted::Bool: if true and :weight exists, use it
+			agg_func::Union{Function,Nothing}: aggregation for parallel edges (default: sum if weighted else maximum)
+			n_runs_per_gamma::Int: independent Leiden runs per γ (default 5)
+			n_iterations_per_run::Int: iterations per single Leiden run (default 10)
+			seed::Union{Int,Nothing}: base RNG seed
 		Returns:
 			NamedTuple: (membership, resolution_used, modularity, n_communities, node_names)
 		Notes:
-			Implements CHAMP to find optimal partition across resolutions.
-			Performs parameter sweep unless specific resolution provided.
+			• Threads `n_iterations_per_run` into each call to `leiden_community_detection` so you can
+			  control the convergence budget per γ without changing global defaults.
 		"""
-		
 		#	Validation
-			if !hasproperty(edges, :src) || !hasproperty(edges, :dst)
-				throw(ArgumentError("edges must have :src and :dst columns"))
-			end
-		
-		#	Handle empty edge list
+			@assert hasproperty(edges, :src) && hasproperty(edges, :dst) "edges must have :src and :dst columns"
 			if nrow(edges) == 0
-				return (
-					membership = Int[],
-					resolution_used = 0.0,
-					modularity = 0.0,
-					n_communities = 0,
-					node_names = String[]
-				)
+				return (membership = Int[], resolution_used = 0.0, modularity = 0.0, n_communities = 0, node_names = String[])
 			end
 		
-		#	Set random seed if provided
+		#	Seeding
 			if seed !== nothing
 				Random.seed!(seed)
 			end
 		
-		#	Set default aggregation function
+		#	Aggregation default
 			if isnothing(agg_func)
 				agg_func = (weighted && hasproperty(edges, :weight)) ? sum : maximum
 			end
 		
-		#	Determine resolution values
-			if resolution !== nothing
-				#	Use specified resolution
-					gammas = [resolution]
-			else
-				#	Perform sweep
-					gammas = range(resolution_range[1], resolution_range[2], length=n_resolutions)
-			end
+		#	Resolution grid
+			gammas = resolution !== nothing ? [resolution] : collect(range(resolution_range[1], resolution_range[2], length=n_resolutions))
 		
-		#	Aggregate multi-edges
+		#	Aggregate and build ORIGINAL adjacency once (for coefficients)
 			clean_edges = _aggregate_multi_edges(edges; agg_func=agg_func)
-		
-		#	Build adjacency matrix
 			use_weights = weighted && hasproperty(clean_edges, :weight)
 			adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=use_weights)
+			adj = max.(adj, adj')  # ensure symmetry once
 			n = size(adj, 1)
 			node_names = [idx_to_node[i] for i in 1:n]
 		
-		#	Collect all partitions
-			all_partitions = []
-			all_coefficients = []
-			
-			for gamma in gammas
-				#	Run Leiden for this resolution
-					result = leiden_community_detection(
+		#	Collect partitions and coefficients
+			all_partitions = NamedTuple[]
+			all_coefficients = Vector{Float64}[]  # each entry = [A, P]
+		
+		#	Iterating Over γ Values
+			for γ in gammas
+				#	Leiden (best-of-k runs for this γ) — now with per-run iteration budget
+					res = leiden_community_detection(
 						clean_edges;
-						resolution = gamma,
-						n_iterations = 10,
+						resolution = γ,
+						n_iterations = n_iterations_per_run,
 						n_runs = n_runs_per_gamma,
 						weighted = use_weights,
 						seed = seed
 					)
 				
-				#	Calculate coefficients
-					A, P = _calculate_partition_coefficients(adj, result.membership, use_weights)
+				#	( A, P ) for CHAMP linearization on ORIGINAL adjacency
+					A, P = _calculate_partition_coefficients(adj, res.membership, use_weights)
 				
-				#	Store partition and coefficients
-					push!(all_partitions, (
-						membership = result.membership,
-						gamma = gamma,
-						modularity = result.modularity,
-						n_communities = result.n_communities,
-						A = A,
-						P = P
-					))
+				#	Record
+					push!(all_partitions, (membership=res.membership, gamma=γ, modularity=res.modularity, n_communities=res.n_communities, A=A, P=P))
 					push!(all_coefficients, [A, P])
 			end
 		
-		#	Find dominant partitions using convex hull
-			if length(gammas) > 1
-				#	Calculate which partitions are dominant
-					n_partitions = length(all_partitions)
-					dominant_indices = Int[]
-					
-					for i in 1:n_partitions
-						is_dominant = true
-						A_i, P_i = all_coefficients[i]
-						
-						#	Check if any other partition dominates this one
-							for j in 1:n_partitions
-								if i == j
-									continue
-								end
+		#	Select best via dominance (A − γP linearization over γ grid)
+			best_partition = all_partitions[1]		#	Default: first partition (fallback if no sweep)
+			if length(gammas) > 1					#	Only run dominance logic when sweeping γ
+				#	Setting Parameters: γ-evaluated partitions and Mask (true ⇢ candidate remains on upper envelope)
+					nP = length(all_partitions)			
+					dominant = trues(nP)				#	
+		
+				#	Outer loop: test whether partition i is dominated by any j
+					for i in 1:nP
+						#	(A_i, P_i) for partition i
+							Ai, Pi = all_coefficients[i]
+
+						#	Inner loop: compare i against every other partition j
+							for j in 1:nP
+								#	Skip self-comparison
+									i == j && continue			
+
+								#	(A_j, P_j) for partition j
+									Aj, Pj = all_coefficients[j]#	
 								
-								A_j, P_j = all_coefficients[j]
-								
-								#	Check dominance for all gamma values
-									gamma_cross = (A_j - A_i) / (P_i - P_j + 1e-10)
-									
-									if P_i ≈ P_j
-										#	Same expected edges, compare internal edges
-											if A_j > A_i
-												is_dominant = false
-												break
+								#	Case 1: non-parallel lines (P_i ≠ P_j) ⇒ compute crossing γ_x
+									if !isapprox(Pi, Pj; atol=1e-12)
+										#	Crossing of (A−γP) lines for i and j
+											γx = (Aj - Ai) / (Pi - Pj + 1e-12)	
+										
+										#	If crossing falls in (or very near) the searched γ-range, test mid-γ
+											if γx > minimum(gammas) - 1e-6 && γx < maximum(gammas) + 1e-6
+												γt = clamp((γx + all_partitions[i].gamma) / 2, minimum(gammas), maximum(gammas))
+
+												#	Compare linearized qualities at γ_t
+													if (Aj - γt * Pj) > (Ai - γt * Pi) + 1e-12
+														dominant[i] = false			#	j dominates i at γ_t ⇒ drop i
+														break
+													end
+
+												#	Else: no meaningful crossing in range ⇒ compare at i’s native γ
+													elseif (Aj - all_partitions[i].gamma * Pj) > (Ai - all_partitions[i].gamma * Pi) + 1e-12
+														dominant[i] = false				#	j better than i at γ_i ⇒ drop i
+														break
 											end
-									elseif gamma_cross > 0 && gamma_cross < 2.0
-										#	There's a valid crossing point in reasonable range
-											gamma_test = (gamma_cross + all_partitions[i].gamma) / 2
-											Q_i = A_i - gamma_test * P_i
-											Q_j = A_j - gamma_test * P_j
-											
-											if Q_j > Q_i
-												#	Partition j dominates at this gamma
-													is_dominant = false
-													break
-											end
+									else #	Case 2: parallel lines (P_i ≈ P_j) ⇒ higher A wins for all γ
+										if Aj > Ai + 1e-12
+											dominant[i] = false				#	j strictly better intercept ⇒ drop i
+											break
+										end
 									end
 							end
-						
-						if is_dominant
-							push!(dominant_indices, i)
-						end
 					end
-				
-				#	Select best from dominant partitions
-					if length(dominant_indices) > 0
-						#	Choose partition with highest modularity at its optimal gamma
-							best_idx = dominant_indices[1]
-							best_quality = -Inf
-							
-							for idx in dominant_indices
-								part = all_partitions[idx]
-								quality = part.A - part.gamma * part.P
-								if quality > best_quality
-									best_quality = quality
-									best_idx = idx
-								end
-							end
-							
-							best_partition = all_partitions[best_idx]
-					else
-						#	Fallback: choose partition with highest modularity
-							best_idx = argmax([p.modularity for p in all_partitions])
-							best_partition = all_partitions[best_idx]
-					end
-			else
-				#	Single resolution, return that partition
-					best_partition = all_partitions[1]
-			end
 		
-		#	Return results
+				#	Select best among dominant partitions by their own γ: maximize (A − γP)
+					if any(dominant)
+						best_idx = findfirst(dominant)	#	Init with first dominant index
+						best_score = -Inf
+						for (idx, keep) in enumerate(dominant)
+							keep || continue
+							part = all_partitions[idx]
+							score = part.A - part.gamma * part.P
+							if score > best_score
+								best_score = score
+								best_idx = idx
+							end
+						end
+						best_partition = all_partitions[best_idx]
+					else #	Fallback: if all marked non-dominant (numerical edge cases), use max modularity
+						best_partition = all_partitions[argmax(getfield.(all_partitions, :modularity))]
+					end
+			end
+
+		#	Return CHAMP Results
 			return (
-				membership = best_partition.membership,
+				membership      = best_partition.membership,
 				resolution_used = best_partition.gamma,
-				modularity = best_partition.modularity,
-				n_communities = best_partition.n_communities,
-				node_names = node_names
+				modularity      = best_partition.modularity,
+				n_communities   = best_partition.n_communities,
+				node_names      = node_names
 			)
 	end
 	@doc raw"""
