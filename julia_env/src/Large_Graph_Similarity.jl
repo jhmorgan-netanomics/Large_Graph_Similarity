@@ -2711,7 +2711,7 @@ module Large_Graph_Similarity
 	- Lempel, R., & Moran, S. (2001). *SALSA: The Stochastic Approach for Link-Structure Analysis.* ACM TOIS 19(2), 131–160.
 	""" salsa_centrality
 
-#	Helper Function: LogSumExp for numerical stability for Leiden Community Detection
+#	Helper Function: LogSumExp for numerical stability (Leiden)
 	function logsumexp(x::Vector{Float64})
 		"""
 		Args:
@@ -2720,150 +2720,164 @@ module Large_Graph_Similarity
 			Float64: log(sum(exp(x)))
 		Notes:
 			Numerically stable computation of log-sum-exp.
+			Prevents overflow/underflow in probability calculations.
 		"""
-		if isempty(x)
-			return -Inf
-		end
 		
-		max_x = maximum(x)
-		if !isfinite(max_x)
-			return max_x
-		end
+		#	Handle empty vector
+			if isempty(x)
+				return -Inf
+			end
 		
-		return max_x + log(sum(exp.(x .- max_x)))
+		#	Extract maximum for stability
+			max_x = maximum(x)
+			if !isfinite(max_x)
+				return max_x
+			end
+		
+		#	Compute log-sum-exp with offset
+			return max_x + log(sum(exp.(x .- max_x)))
 	end
 
-#	Helper Function for Leiden: Calculate Standard Modularity
+#	Helper Function: Calculate Modularity for Leiden
 	function calculate_modularity(adj::SparseMatrixCSC, membership::Vector{Int}, resolution::Float64)
 		"""
 		Args:
-			adj::SparseMatrixCSC: symmetric (undirected) adjacency for THESE nodes; may include self-loops
-			membership::Vector{Int}: community label per node (length == size(adj,1))
-			resolution::Float64: γ (γ=1.0 Newman–Girvan)
+			adj::SparseMatrixCSC: symmetric adjacency matrix (may include self-loops)
+			membership::Vector{Int}: community label per node (1-based)
+			resolution::Float64: resolution parameter γ (1.0 = standard Newman-Girvan)
 		Returns:
-			Float64: modularity Q (typically ~[0, 0.8] on real data)
+			Float64: modularity Q ∈ [-0.5, 1] typically
 		Notes:
-			• Read-only: does NOT rescale or duplicate weights. Assumes symmetry upstream.
-			• Formula (block-sum version, self-loop aware):
-			  Q = (1/(2m)) * Σ_c [ Σ_{i∈c}Σ_{j∈c} A_ij  −  γ * (K_c^2 / (2m)) ],
-			    with k_i = Σ_j A_ij and 2m = Σ_{i,j} A_ij.
-			• If your pipeline could produce slight asymmetry, enforce once upstream:
-			  adj = max.(adj, adj')
+			Block-sum formula: Q = (1/2m) Σ_c [E_c - γ(K_c²/2m)]
+			where E_c = internal edges, K_c = sum of degrees in community c.
+			Assumes symmetric matrix; enforce upstream if needed.
 		"""
+		
 		#	Validation
 			@assert issparse(adj) "calculate_modularity: adj must be SparseMatrixCSC"
 			@assert size(adj,1) == length(membership) "calculate_modularity: membership length must match adj size"
 		
-		#	Totals (2m) and degrees
+		#	Calculate total edge weight and degrees
 			two_m = sum(adj)
 			if two_m == 0.0
 				return 0.0
 			end
 			m = two_m / 2.0
-			degrees = vec(sum(adj, dims=2))  # k_i
+			degrees = vec(sum(adj, dims=2))
 		
-		#	Community block sums
+		#	Sum over communities
 			Q = 0.0
 			for c in unique(membership)
 				nodes = findall(==(c), membership)
 				if isempty(nodes)
 					continue
 				end
-				#	E_c2 = Σ_{i∈c} Σ_{j∈c} A_ij  (counts off-diagonals twice; consistent with 2m)
+				
+				#	Internal edges (counts each twice for undirected)
 					E_c2 = 0.0
 					for i in nodes
 						E_c2 += sum(view(adj, i, nodes))
 					end
-				#	Expectation under null
-					Kc = sum(degrees[nodes])
-					exp_term = resolution * (Kc * Kc) / (2.0 * m)
 				
-				Q += (E_c2 - exp_term) / (2.0 * m)
+				#	Expected edges under null model
+					K_c = sum(degrees[nodes])
+					exp_term = resolution * (K_c * K_c) / (2.0 * m)
+				
+				#	Add contribution to modularity
+					Q += (E_c2 - exp_term) / (2.0 * m)
 			end
+			
 		return Q
 	end
 
-#	Helper Function for Leiden: Refinement by Intra-Community Connectivity
+#	Helper Function: Ensure Connectivity Within Communities
 	function _refine_connectivity!(adj::SparseMatrixCSC, membership::Vector{Int})
 		"""
 		Args:
-			adj::SparseMatrixCSC: symmetric adjacency
-			membership::Vector{Int}: community labels
+			adj::SparseMatrixCSC: symmetric adjacency matrix
+			membership::Vector{Int}: community labels (modified in-place)
 		Returns:
 			Nothing (membership updated in-place)
 		Notes:
-			Ensures each community induces a connected subgraph.
-			If disconnected, splits components into new community labels.
+			Splits disconnected communities into separate components.
+			Ensures each community forms a connected subgraph.
 		"""
-		n = size(adj, 1)
-		rows, cols, vals = findnz(adj)
-		neighbors = [Int[] for _ in 1:n]
-		for k in eachindex(vals)
-			i, j = rows[k], cols[k]
-			if i != j
-				push!(neighbors[i], j)
-				push!(neighbors[j], i)
-			end
-		end
 		
-		current_max = maximum(membership)
-		comms = unique(membership)
-		
-		for c in comms
-			nodes = findall(==(c), membership)
-			if length(nodes) ≤ 1
-				continue
-			end
+		#	Build neighbor lists
+			n = size(adj, 1)
+			rows, cols, vals = findnz(adj)
+			neighbors = [Int[] for _ in 1:n]
 			
-			unvisited = Set(nodes)
-			while !isempty(unvisited)
-				start = first(unvisited)
-				queue = [start]
-				component = Int[]
-				delete!(unvisited, start)
-				
-				while !isempty(queue)
-					v = popfirst!(queue)
-					push!(component, v)
-					for nbr in neighbors[v]
-						if nbr in unvisited && membership[nbr] == c
-							delete!(unvisited, nbr)
-							push!(queue, nbr)
-						end
-					end
+			for k in eachindex(vals)
+				i, j = rows[k], cols[k]
+				if i != j
+					push!(neighbors[i], j)
+					push!(neighbors[j], i)
+				end
+			end
+		
+		#	Process each community
+			current_max = maximum(membership)
+			comms = unique(membership)
+			
+			for c in comms
+				nodes = findall(==(c), membership)
+				if length(nodes) ≤ 1
+					continue
 				end
 				
-				#	If this is not the first component, assign new label
-					if !isempty(unvisited)
-						current_max += 1
-						for v in component
-							membership[v] = current_max
+				#	BFS to find connected components
+					unvisited = Set(nodes)
+					first_component = true
+					
+					while !isempty(unvisited)
+						start = first(unvisited)
+						queue = [start]
+						component = Int[]
+						delete!(unvisited, start)
+						
+						while !isempty(queue)
+							v = popfirst!(queue)
+							push!(component, v)
+							for nbr in neighbors[v]
+								if nbr in unvisited && membership[nbr] == c
+									delete!(unvisited, nbr)
+									push!(queue, nbr)
+								end
+							end
 						end
+						
+						#	Assign new label if not first component
+							if !first_component
+								current_max += 1
+								for v in component
+									membership[v] = current_max
+								end
+							end
+							first_component = false
 					end
 			end
-		end
 	end
 
-#	Helper Function for Leiden: Contract Graph by Membership
+#	Helper Function: Contract Graph by Community Structure
 	function _contract_by_membership(adj::SparseMatrixCSC, membership::Vector{Int})
 		"""
 		Args:
 			adj::SparseMatrixCSC: symmetric adjacency matrix
 			membership::Vector{Int}: community labels for each node
 		Returns:
-			S::SparseMatrixCSC: contracted adjacency matrix between communities
+			SparseMatrixCSC: contracted adjacency (communities as supernodes)
 		Notes:
-			Each community becomes a single supernode. 
-			Edge weights between communities are summed.
-			Self-loops retain internal weights.
+			Aggregates edges between communities.
+			Self-loops represent internal community edges.
 		"""
 		
-		#	Renumber communities to consecutive indices
+		#	Map communities to consecutive indices
 			unique_comms = sort(unique(membership))
 			label_map = Dict(old => new for (new, old) in enumerate(unique_comms))
 			C = length(unique_comms)
 		
-		#	Accumulate weights between communities
+		#	Aggregate inter-community edges
 			rows, cols, vals = findnz(adj)
 			I = Int[]
 			J = Int[]
@@ -2877,16 +2891,14 @@ module Large_Graph_Similarity
 				push!(V, vals[k])
 			end
 		
-		#	Build new contracted adjacency
+		#	Build contracted adjacency
 			S = sparse(I, J, V, C, C)
-		
-		#	Ensure symmetry
-			S = max.(S, S')
+			S = max.(S, S')  # Ensure symmetry
 		
 		return S
 	end
 
-#	Simplified Leiden Implementation
+#	Leiden Community Detection
 	function leiden_community_detection(edges::DataFrame;
 	                                   resolution::Float64=1.0,
 	                                   n_iterations::Int=10,
@@ -2895,71 +2907,67 @@ module Large_Graph_Similarity
 		"""
 		Args:
 			edges::DataFrame: edge list with :src, :dst, optional :weight
-			resolution::Float64: resolution parameter (default = 1.0)
-			n_iterations::Int: max iterations (default = 10)
-			weighted::Bool: use weights if present (default = false)
-			seed::Union{Int,Nothing}: random seed
+			resolution::Float64: resolution parameter γ (default = 1.0)
+			n_iterations::Int: maximum iterations (default = 10)
+			weighted::Bool: use edge weights if present (default = false)
+			seed::Union{Int,Nothing}: random seed for reproducibility
 		Returns:
 			NamedTuple: (membership, modularity, n_communities, node_names)
 		Notes:
-			Simplified Leiden focusing on standard modularity optimization.
-			Adds (1) intra-community connectivity refinement and (2) multilevel contraction.
-			Crucially, preserves a membership vector aligned to the ORIGINAL nodes.
+			Implements simplified Leiden with local moves, refinement, and contraction.
+			Preserves mapping to original nodes through multilevel hierarchy.
 		"""
 		
-		#	Set seed if provided
+		#	Set random seed if provided
 			if seed !== nothing
 				Random.seed!(seed)
 			end
 		
-		#	Aggregate edges and build matrix
+		#	Prepare adjacency matrix
 			clean_edges = _aggregate_multi_edges(edges; agg_func=(weighted ? sum : maximum))
 			use_weights = weighted && hasproperty(clean_edges, :weight)
 			adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=use_weights)
-			adj = max.(adj, adj')  # enforce symmetry
+			adj = max.(adj, adj')  # Enforce symmetry
 		
-		#	Original-node bookkeeping
+		#	Initialize tracking
 			n0 = size(adj, 1)
-			orig_to_curr = collect(1:n0)  # maps each original node → current-level node index
-		
-		#	Initialize communities (current level)
+			orig_to_curr = collect(1:n0)  # Maps original nodes to current level
 			membership = collect(1:size(adj, 1))
 			Q = calculate_modularity(adj, membership, resolution)
 			iteration = 0
 			improved = true
 		
-		#	Leiden main loop
+		#	Main optimization loop
 			while improved && iteration < n_iterations
-				#	Specifying Parameters for Iteration
-					improved = false
-					iteration += 1
+				improved = false
+				iteration += 1
 				
-				#	Per-iteration neighbor lists (ensure sparse)
-					@assert issparse(adj) "adj must be SparseMatrixCSC before local moving."
+				#	Build neighbor lists for current level
 					n = size(adj, 1)
 					rows, cols, vals = findnz(adj)
 					neighbors = [Int[] for _ in 1:n]
+					
 					for k in eachindex(vals)
-						i = rows[k]; j = cols[k]
+						i, j = rows[k], cols[k]
 						if i != j
 							push!(neighbors[i], j)
 							push!(neighbors[j], i)
 						end
 					end
 				
-				#	Local node moving
-					node_order = randperm(length(membership))
+				#	Phase 1: Local node moves
+					node_order = randperm(n)
+					
 					for node in node_order
-						#	Isolating each Node
-							current_comm = membership[node]
+						current_comm = membership[node]
 						
-						#	Neighbor communities
+						#	Find neighbor communities
 							neighbor_comms = Set{Int}()
 							for other in neighbors[node]
 								push!(neighbor_comms, membership[other])
 							end
 						
-						#	Finding Optimal Community Configuration
+						#	Evaluate moves
 							best_comm = current_comm
 							best_Q = Q
 							
@@ -2967,14 +2975,18 @@ module Large_Graph_Similarity
 								if target == current_comm
 									continue
 								end
-								membership[node] = target
-								new_Q = calculate_modularity(adj, membership, resolution)
-								if new_Q > best_Q
-									best_Q = new_Q
-									best_comm = target
-								end
+								
+								#	Test move
+									membership[node] = target
+									new_Q = calculate_modularity(adj, membership, resolution)
+									
+									if new_Q > best_Q
+										best_Q = new_Q
+										best_comm = target
+									end
 							end
 							
+						#	Apply best move
 							if best_comm != current_comm
 								membership[node] = best_comm
 								Q = best_Q
@@ -2984,33 +2996,29 @@ module Large_Graph_Similarity
 							end
 					end
 				
-				#	Leiden refinement (intra-community connectivity)
+				#	Phase 2: Refinement (ensure connectivity)
 					_refine_connectivity!(adj, membership)
 				
-				#	Contraction (each community → supernode) with original-node mapping update
-				#	Renumber labels to 1..C' exactly as the contraction will
+				#	Phase 3: Graph contraction
 					unique_comms = sort(unique(membership))
 					label_map = Dict(old => new for (new, old) in enumerate(unique_comms))
 					
-				#	Update original-node → current-level node mapping through the contraction
-					for i in 1:n0
-						orig_to_curr[i] = label_map[membership[orig_to_curr[i]]]
-					end
+					#	Update original node mapping
+						for i in 1:n0
+							orig_to_curr[i] = label_map[membership[orig_to_curr[i]]]
+						end
 					
-				#	Build contracted graph
-					adj = _contract_by_membership(adj, membership)   # returns SparseMatrixCSC
-					adj = max.(adj, adj')                             # keep symmetric
-					
-				#	Reset current-level membership and quality for the new (smaller) graph
-					membership = collect(1:size(adj, 1))              # one comm per supernode
-					Q = calculate_modularity(adj, membership, resolution)
+					#	Contract graph
+						adj = _contract_by_membership(adj, membership)
+						membership = collect(1:size(adj, 1))
+						Q = calculate_modularity(adj, membership, resolution)
 			end
 		
-		#	Map final current-level labels back to ORIGINAL nodes
+		#	Map back to original nodes
 			final_membership = [membership[orig_to_curr[i]] for i in 1:n0]
 			Q_final = calculate_modularity(adj, membership, resolution)
 		
-		#	Return Community Assignments & Quality Metrics
+		#	Return results
 			return (
 				membership = final_membership,
 				modularity = Q_final,
@@ -3020,83 +3028,77 @@ module Large_Graph_Similarity
 	end
 	@doc raw"""
 	**Description**
-	Performs community detection using a simplified Leiden algorithm that optimizes modularity through iterative node moves and community merging.
+	Detects communities using the Leiden algorithm, which guarantees well-connected 
+	communities through iterative local moves, refinement, and graph contraction.
 
 	**Usage**
 	`leiden_community_detection(edges; resolution=1.0, n_iterations=10, weighted=false, seed=nothing)`
 
 	**Arguments**
-	- `edges::DataFrame`: Edge list with columns `:src` and `:dst` (required), and optionally `:weight`
-	- `resolution::Float64`: Resolution parameter γ controlling community granularity (default `1.0`)
-	  - Values < 1.0 favor larger communities
-	  - Values > 1.0 favor smaller communities
-	  - Standard modularity uses γ = 1.0
-	- `n_iterations::Int`: Maximum number of optimization iterations (default `10`)
-	- `weighted::Bool`: Whether to use edge weights if present (default `false`)
-	- `seed::Union{Int,Nothing}`: Random seed for reproducible results (default `nothing`)
+	- `edges::DataFrame`: Edge list with `:src` and `:dst` columns (required), optionally `:weight`
+	- `resolution::Float64`: Resolution parameter γ (default `1.0`)
+	  - γ < 1.0: Favors larger communities
+	  - γ = 1.0: Standard Newman-Girvan modularity
+	  - γ > 1.0: Favors smaller communities
+	- `n_iterations::Int`: Maximum optimization iterations (default `10`)
+	- `weighted::Bool`: Use edge weights if present (default `false`)
+	- `seed::Union{Int,Nothing}`: Random seed for reproducibility (default `nothing`)
 
 	**Details**
-	The algorithm follows a two-phase iterative approach:
+	The algorithm optimizes modularity through three phases:
 	
-	Phase 1 - Local Moves: Each node considers moving to neighboring communities, selecting moves that increase modularity.
+	1. **Local Moves**: Nodes move to neighboring communities to increase modularity
+	2. **Refinement**: Ensures each community is internally connected
+	3. **Contraction**: Aggregates communities into supernodes for hierarchical optimization
 	
-	Phase 2 - Community Renumbering: Communities are renumbered to maintain consecutive indices.
-	
-	The modularity function optimized is:
-	Q = (1/2m) Σ[A_ij - γ(k_i × k_j)/(2m)] δ(c_i, c_j)
-	
-	where:
-	- A_ij = edge weight between nodes i and j
-	- k_i = degree (or strength) of node i
-	- m = total edge weight in the network
-	- γ = resolution parameter
-	- δ(c_i, c_j) = 1 if nodes i and j are in the same community, 0 otherwise
+	Modularity function:
+```
+	Q = (1/2m) Σ[A_ij - γ(k_i·k_j)/(2m)] δ(c_i, c_j)
+```
+	where A_ij = edge weight, k_i = node degree, m = total edge weight, 
+	γ = resolution, δ(c_i,c_j) = 1 if nodes i,j in same community
 
 	**Value**
-	Returns a NamedTuple with:
-	- `membership::Vector{Int}`: Community assignment for each node (1-based indices)
-	- `modularity::Float64`: Final modularity score Q ∈ [-1, 1]
+	NamedTuple containing:
+	- `membership::Vector{Int}`: Community assignment per node (1-based)
+	- `modularity::Float64`: Final modularity score Q
 	- `n_communities::Int`: Number of detected communities
-	- `node_names::Vector`: Original node identifiers matching membership order
+	- `node_names::Vector`: Original node identifiers
 
 	**Examples**
 ```julia
-	# Unweighted network with default resolution
+	# Basic unweighted network
 	edges = DataFrame(
-	    src = ["A", "A", "B", "C", "D", "D"],
-	    dst = ["B", "C", "C", "D", "E", "F"]
+	    src = ["A", "B", "B", "C", "D", "D"],
+	    dst = ["B", "C", "D", "D", "E", "F"]
 	)
 	result = leiden_community_detection(edges)
-	println("Found $(result.n_communities) communities")
 	
-	# Weighted network with higher resolution
-	edges_weighted = DataFrame(
+	# Weighted network with custom resolution
+	weighted_edges = DataFrame(
 	    src = ["A", "A", "B", "C"],
 	    dst = ["B", "C", "C", "D"],
 	    weight = [3.0, 1.0, 2.0, 4.0]
 	)
-	result = leiden_community_detection(edges_weighted; 
-	                                   resolution=1.5, 
+	result = leiden_community_detection(weighted_edges;
+	                                   resolution=1.5,
 	                                   weighted=true,
 	                                   seed=42)
 	
-	# View community assignments
+	# Display results
 	for (node, comm) in zip(result.node_names, result.membership)
-	    println("Node $node → Community $comm")
+	    println("$node → Community $comm")
 	end
 ```
 
 	**See Also**
-	- `champ_community_detection`: For resolution parameter selection
-	- `adjusted_rand_index`: For comparing partitions
-	- `test_leiden_consistency`: For evaluating partition stability
+	- `champ_community_detection`: Resolution parameter selection
+	- `adjusted_rand_index`: Partition comparison
+	- `test_leiden_consistency`: Algorithm stability testing
 
 	**References**
-	Traag VA, Waltman L, van Eck NJ (2019). "From Louvain to Leiden: guaranteeing well-connected communities." 
-	Scientific Reports 9(1):5233. doi:10.1038/s41598-019-41695-z
-	
-	Note: This is a simplified implementation optimized for standard modularity. For the full Leiden algorithm with 
-	refinement phases, consider the research implementation or specialized graph packages.
+	Traag VA, Waltman L, van Eck NJ (2019). "From Louvain to Leiden: guaranteeing 
+	well-connected communities." Scientific Reports 9(1):5233. doi:10.1038/s41598-019-41695-z
 	""" leiden_community_detection
 
 #	Helper Function for CHAMP: calculate partition coefficients
