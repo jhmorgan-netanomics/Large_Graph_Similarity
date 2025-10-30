@@ -2303,7 +2303,7 @@
 						                       n_resolutions = 15, weighted = true, n_runs_per_gamma = 10, n_iterations_per_run = 10,
 							                   seed = 45)
 
-#	Test Modularity Vitality Hub
+#	Test Modularity Vitality Hub & Bridge
 
 ##########################
 #   CORE DECOMPOSITION   #
