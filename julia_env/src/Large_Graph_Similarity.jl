@@ -2741,56 +2741,45 @@ module Large_Graph_Similarity
 			return max_x + log(sum(exp.(x .- max_x)))
 	end
 
-#	Helper Function: Calculate Modularity for Leiden
+#	Helper Function: Calculate Modularity for Leiden, CHAMP, & Modularity Vitality Functions
 	function calculate_modularity(adj::SparseMatrixCSC, membership::Vector{Int}, resolution::Float64)
 		"""
 		Args:
-			adj::SparseMatrixCSC: symmetric adjacency matrix (may include self-loops)
-			membership::Vector{Int}: community label per node (1-based)
-			resolution::Float64: resolution parameter γ (1.0 = standard Newman-Girvan)
+			adj::SparseMatrixCSC{Float64,Int}: symmetric adjacency matrix from getSparseA
+			membership::Vector{Int}: 1-based community labels (length = n)
+			resolution::Float64: γ parameter (1.0 = standard Newman–Girvan)
 		Returns:
 			Float64: modularity Q ∈ [-0.5, 1] typically
 		Notes:
-			Block-sum formula: Q = (1/2m) Σ_c [E_c - γ(K_c²/2m)]
-			where E_c = internal edges, K_c = sum of degrees in community c.
-			Assumes symmetric matrix; enforce upstream if needed.
+			Matches Matt Magelinski’s definition used in newMods():
+			- adj built via getSparseA (self-loops halved before symmetrization)
+			- m = sum(adj)/2.0
+			- Q = (1/(2m)) Σ₍ij₎ [Aᵢⱼ – γ kᵢ kⱼ / (2m)] δ(cᵢ,cⱼ)
 		"""
-		
-		#	Validation
-			@assert issparse(adj) "calculate_modularity: adj must be SparseMatrixCSC"
-			@assert size(adj,1) == length(membership) "calculate_modularity: membership length must match adj size"
-		
-		#	Calculate total edge weight and degrees
-			two_m = sum(adj)
-			if two_m == 0.0
+
+		# 	Validation
+			@assert issymmetric(adj) "calculate_modularity: A must be symmetric"
+			n = size(adj,1)
+			@assert length(membership) == n "calculate_modularity: membership length mismatch"
+
+		# 	Mass and degrees
+			m = sum(adj) / 2.0
+			if m == 0.0
 				return 0.0
 			end
-			m = two_m / 2.0
-			degrees = vec(sum(adj, dims=2))
-		
-		#	Sum over communities
-			Q = 0.0
-			for c in unique(membership)
-				nodes = findall(==(c), membership)
-				if isempty(nodes)
-					continue
-				end
-				
-				#	Internal edges (counts each twice for undirected)
-					E_c2 = 0.0
-					for i in nodes
-						E_c2 += sum(view(adj, i, nodes))
-					end
-				
-				#	Expected edges under null model
-					K_c = sum(degrees[nodes])
-					exp_term = resolution * (K_c * K_c) / (2.0 * m)
-				
-				#	Add contribution to modularity
-					Q += (E_c2 - exp_term) / (2.0 * m)
-			end
-			
-		return Q
+			k = vec(sum(adj, dims=2))
+			C = maximum(membership)
+
+		# 	Community indicator matrix (n × C)
+			S = sparse(collect(1:n), membership, ones(Float64, n), n, C)
+
+		# 	Compute intra-community totals and null model expectations
+			E_c = diag(S' * adj * S)
+			K_c = S' * k
+			Q_num = sum(E_c .- resolution .* (K_c .^ 2) ./ (2.0 * m))
+
+		#	Return Modularity Score
+			return Q_num / (2.0 * m)
 	end
 
 #	Helper Function: Ensure Connectivity Within Communities
@@ -3592,7 +3581,7 @@ module Large_Graph_Similarity
 			@assert n == length(membership) "newMods: membership must align to A's node order"
 
 		#	precompute masses and helpers
-			m = (sum(A) + sum(diag(A))) / 2.0
+			m = sum(A) / 2.0
 			if m == 0.0
 				return zeros(Float64, n)
 			end
@@ -3690,7 +3679,6 @@ module Large_Graph_Similarity
 				• Hubs: v > 0 (removal decreases modularity)
 				• Bridges: v < 0 (removal increases modularity)
 		"""
-
 		#	Validation
 			cols = propertynames(edges)
 			@assert (:src in cols) && (:dst in cols) "modularity_vitality: edges must have :src and :dst columns"
@@ -3699,15 +3687,16 @@ module Large_Graph_Similarity
 			edge_order = unique(vcat(edges.src, edges.dst))
 			n = length(edge_order)
 			if n == 0
-				df = DataFrame(node=String[], modularity_vitality_hub=Float64[],
-							modularity_vitality_bridge=Float64[], community=Int[])
+				df = DataFrame(node=String[], modularity_vitality=Float64[],
+							modularity_vitality_hub=Float64[], modularity_vitality_bridge=Float64[], community=Int[])
 				return (results_df=df, resolution_used=resolution, modularity=0.0, n_communities=0)
 			end
 
-		#	Resolve membership and q0
-			membership = Int[]               # will fill below, aligned to edge_order
+		#	Membership + q0
+			membership = Int[]
 			resolution_used = resolution
 			n_communities   = 0
+			q0 = 0.0
 
 			if provided_membership === nothing
 				#	Detect partition
@@ -3722,12 +3711,11 @@ module Large_Graph_Similarity
 							seed               = seed,
 							show_progress      = true
 						)
-						# remap detector labels → edge_order
 						dmap = Dict(det.node_names .=> det.membership)
 						@assert all(haskey.(Ref(dmap), edge_order)) "modularity_vitality: detector missing nodes for remap"
-						membership = [Int(dmap[v]) for v in edge_order]
-						resolution_used = det.resolution_used
-						n_communities   = maximum(membership)
+						membership       = [Int(dmap[v]) for v in edge_order]
+						resolution_used  = det.resolution_used
+						n_communities    = maximum(membership)
 					else
 						det = leiden_community_detection(
 							edges;
@@ -3739,21 +3727,21 @@ module Large_Graph_Similarity
 						)
 						dmap = Dict(det.node_names .=> det.membership)
 						@assert all(haskey.(Ref(dmap), edge_order)) "modularity_vitality: detector missing nodes for remap"
-						membership = [Int(dmap[v]) for v in edge_order]
-						resolution_used = resolution
-						n_communities   = maximum(membership)
+						membership       = [Int(dmap[v]) for v in edge_order]
+						resolution_used  = resolution
+						n_communities    = maximum(membership)
 					end
 
-				#	Compute q0 on the same A used by newMods (Matt-faithful)
+				#	q₀ on Matt-faithful A
 					A0 = getSparseA(edges)
+					@assert issymmetric(A0) "getSparseA: adjacency must be symmetric"
+					@assert size(A0, 1) == length(membership) "q₀ check: A–membership mismatch"
 					q0 = calculate_modularity(A0, membership, resolution_used)
-
 			else
 				#	User-provided partition
 					if provided_membership isa DataFrame
 						colsyms = Symbol.(names(provided_membership))
 						@assert (:node in colsyms) && (:community in colsyms) "provided_membership must contain :node and :community"
-						# left-join to align with edge_order
 						node_df = DataFrame(node=edge_order)
 						mapped  = leftjoin(node_df, provided_membership, on=:node)
 						@assert !any(ismissing, mapped.community) "modularity_vitality: missing community labels after join"
@@ -3768,28 +3756,28 @@ module Large_Graph_Similarity
 					resolution_used = resolution
 					n_communities   = maximum(membership)
 
-				#	q0 on the Matt-faithful A
 					A0 = getSparseA(edges)
+					@assert issymmetric(A0) "getSparseA: adjacency must be symmetric"
 					q0 = calculate_modularity(A0, membership, resolution_used)
 			end
 
-		#	Sanity checks before newMods
+		#	Sanity
 			@assert length(membership) == n "modularity_vitality: membership length mismatch"
 			@assert all(membership .>= 1) "modularity_vitality: community labels must be positive"
-			# Optionally: @assert issorted(unique(membership)) == collect(1:maximum(membership))
 
-		#	Per-node Q(G\\i) via Matt-faithful core
+		#	Per-node Q(G\i)
 			q1s = newMods(edges, membership)
 
-		#	Vitality & hub/bridge split
+		#	Vitality & hub/bridge
 			v = q0 .- q1s
 			ϵ = 1e-12
 			hub_scores    = map(x -> x > ϵ  ? x  : 0.0, v)
 			bridge_scores = map(x -> x < -ϵ ? -x : 0.0, v)
 
-		#	Results (use edge_order for node column)
+		#	Results (include raw modularity_vitality as 2nd column for Matt parity)
 			df = DataFrame(
 				node                       = edge_order,
+				modularity_vitality        = v,
 				modularity_vitality_hub    = hub_scores,
 				modularity_vitality_bridge = bridge_scores,
 				community                  = membership
@@ -3798,13 +3786,12 @@ module Large_Graph_Similarity
 			sort!(df, :total_vitality, rev=true)
 			select!(df, Not(:total_vitality))
 
-		#	Return
-			return (
-				results_df      = df,
-				resolution_used = resolution_used,
-				modularity      = q0,
-				n_communities   = n_communities
-			)
+		return (
+			results_df      = df,
+			resolution_used = resolution_used,
+			modularity      = q0,
+			n_communities   = n_communities
+		)
 	end
 	@doc raw"""
 	**Description**  
@@ -4114,6 +4101,7 @@ module Large_Graph_Similarity
 		   pagerank_local_ora,
 		   pagerank_stitched,
 		   salsa_centrality,
+		   calculate_modularity,
 		   leiden_community_detection,
 		   champ_community_detection,
 		   modularity_vitality,
