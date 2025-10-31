@@ -2249,8 +2249,9 @@
 	comm_sizes = combine(groupby(community_index, :community), nrow => :count)
 	sort!(comm_sizes, :count, rev = true)
 
-#	Modularity Vitality Hub
-
+#	Modularity Vitality: Fixed Resolution & Sweep
+	modularity_vitality(agent_agent_all_com.edges; resolution_sweep=false, resolution=1.0)
+	modularity_vitality(agent_agent_all_com.edges; resolution_sweep=true, n_resolutions=20, weighted=true)
 
 #	CONDUCT TESTS
 
@@ -2303,7 +2304,48 @@
 						                       n_resolutions = 15, weighted = true, n_runs_per_gamma = 10, n_iterations_per_run = 10,
 							                   seed = 45)
 
-#	Test Modularity Vitality Hub & Bridge
+#	Construct Comparison Set for Modularity Tests
+	res_1_modularity = modularity_vitality(agent_agent_all_com.edges; resolution_sweep=false, resolution=1.0)
+	keep_index = DataFrame(node = res_1_modularity.results_df.node, keep = ones(Int64, length(res_1_modularity.results_df.node)))
+
+	ora_moduarlity_scores = CSV.read("/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data/All_Comm_Modularity_Vitality_Scores.csv", 
+					                 DataFrame, types=Dict(1 => String))
+	rename!(ora_moduarlity_scores, ["node", "Modularity_Vitality_Bridge_All_Comm", "Modularity_Vitality_Hub_All_Comm", "community"])
+	leftjoin!(keep_index, ora_moduarlity_scores, on=:node)
+	keep_index[!,3] = convert.(Float64, keep_index[:,3])
+	keep_index[!,4] = convert.(Float64, keep_index[:,4])
+	keep_index[!,5] = convert.(Int64, keep_index[:,5])
+	select!(keep_index, [1,3,4,5])
+	community_index = keep_index[:,[1,4]]
+
+#	Compare Modularity Vitality Hub & Bridge to ORA
+	leftjoin!(keep_index, res_1_modularity.results_df[:,(1:3)], on=:node)
+	keep_index = keep_index[:,[1,4,3,5,2,6]]
+	keep_index.modularity_vitality_hub = convert.(Float64, keep_index.modularity_vitality_hub)
+	keep_index.modularity_vitality_bridge = convert.(Float64, keep_index.modularity_vitality_bridge)
+
+	hub_scores = keep_index[:,[1,3,4]]
+	DataFrames.sort(hub_scores, [:Modularity_Vitality_Hub_All_Comm], rev=[true])
+
+	bridge_scores = keep_index[:,[1,5,6]]
+	DataFrames.sort(bridge_scores, [:Modularity_Vitality_Bridge_All_Comm], rev=[true])
+
+#	COME BACK HERE!!
+
+	fixed_modularity = modularity_vitality(agent_agent_all_com.edges; resolution_sweep=false, provided_membership= community_index)
+	leftjoin!(keep_index, fixed_modularity.results_df[:,(1:3)], on=[:node])
+	keep_index = keep_index[:,[1,4,3,5,2,6]]
+	keep_index.modularity_vitality_hub = convert.(Float64, keep_index.modularity_vitality_hub)
+	keep_index.modularity_vitality_bridge = convert.(Float64, keep_index.modularity_vitality_bridge)
+
+	hub_scores = keep_index[:,[1,3,4]]
+	bridge_scores = keep_index[:,[1,5,6]]
+
+
+	
+
+	
+
 
 ##########################
 #   CORE DECOMPOSITION   #

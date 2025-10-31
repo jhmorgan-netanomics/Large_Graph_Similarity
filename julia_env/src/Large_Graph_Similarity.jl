@@ -3472,227 +3472,242 @@ module Large_Graph_Similarity
 	2. github.com/wweir827/CHAMP
 	""" champ_community_detection
 
-#	Helper Function for modularity_vitality: Fast vitality core (O(m + n·C))
-	function _vitality_fast(adj::SparseMatrixCSC,
-	                        membership::Vector{Int},
-	                        γ::Float64)
+#	Helper Function for modularity_vitality: getSparseA(edges) → A
+	function getSparseA(edges::DataFrame)
 		"""
 		Args:
-			adj::SparseMatrixCSC: symmetric (weighted allowed) adjacency matrix A.
-			membership::Vector{Int}: community id per node (1..C).
-			γ::Float64: resolution parameter (CHAMP-style γ).
-
+			edges::DataFrame: edge list with :src, :dst, optional :weight
 		Returns:
-			Vector{Float64}: modularity vitality per node i, i.e., Q(G) − Q(G \\ i).
-
+			SparseMatrixCSC{Float64,Int}
 		Notes:
-			Uses CHAMP-style coefficients:
-				Q = (1/(2m)) * ( Σ_c E_c  -  γ * (Σ_c K_c^2) / (2m) )
-			For removal of node i in community c:
-				m'    = m - k_i/2
-				ΣE'   = ΣE - ( 2*s_i[c] - A_ii )
-				K_d'  = K_d - s_i[d] - (d==c ? k_i : 0)
-				ΣK'^2 = Σ_d (K_d')^2
-				Q'    = (1/(2m')) * ( ΣE' - γ * ΣK'^2 / (2m') )
-			where:
-				k_i    = degree(i) = Σ_j A_ij
-				s_i[d] = Σ_{v∈ community d} A_iv   (row i projected to community d)
-				A_ii   = diagonal (self-loop) at i
-
-			Assumes A is symmetric and real-valued. Matches calculate_modularity()
-			conventions for block-sums E_c and degrees K_c. (Style: developer block lives
-			inside the function; user docstring, if any, would be attached after.) 
+			Builds a symmetric adjacency matrix A matching Matt’s implementation:
+			- Aggregate duplicate edges by sum
+			- Halve self-loops before symmetrization
+			- Symmetrize by addition (A = A + A')
+			- Returns A where diagonal equals the *original* loop weight
 		"""
 
-		#	Validation
-			@assert issparse(adj) "_vitality_fast: adj must be SparseMatrixCSC"
-			@assert size(adj,1) == length(membership) "_vitality_fast: membership length must match adj"
-			n = size(adj, 1)
-			C = maximum(membership)
+		#	Aggregate by sum
+			clean_edges = _aggregate_multi_edges(edges; agg_func=sum)
 
-		#	Precompute degrees and community summaries
-			k         = vec(sum(adj, dims=2))           # degree per node k_i
-			two_m     = sum(adj)                        # 2m (since A is symmetric)
-			m         = two_m / 2.0
-			diagA     = diag(adj)                       # A_ii (self-loops)
-
-		#	Early return
-			if two_m == 0.0
-				return zeros(Float64, n)                # empty graph ⇒ zero vitality
+		#	Ensure weight column exists
+			if !hasproperty(clean_edges, :weight)
+				clean_edges.weight = ones(Float64, nrow(clean_edges))
+			else
+				clean_edges.weight = Float64.(clean_edges.weight)
 			end
 
-		#	Community indicator S (n×C), one-hot
-			rows      = collect(1:n)
-			cols      = membership
-			vals      = ones(Float64, n)
-			S         = sparse(rows, cols, vals, n, C)
+		#	Halve self-loops before symmetrization
+			self_mask = clean_edges.src .== clean_edges.dst
+			clean_edges.weight[self_mask] ./= 2.0
 
-		#	Row→community projection M = A*S  (M[i,d] = s_i[d])
-			M         = adj * S
+		#	Build directed adjacency
+			adj_dir, _, _ = _edgelist_to_sparse_matrix(clean_edges; weighted=true)
 
-		#	Block sums and community degrees
-			E_by_c    = zeros(Float64, C)
-			K_by_c    = zeros(Float64, C)
-			@inbounds for i in 1:n
-				c = membership[i]
-				E_by_c[c] += M[i, c]                    # sum_i s_i[c]
-				K_by_c[c] += k[i]
-			end
-			SumE      = sum(E_by_c)                     # Σ_c E_c
-			SumK2     = sum(K_by_c .^ 2)                # Σ_c K_c^2
+		#	Symmetrize by addition
+			A = adj_dir + adj_dir'
 
-		#	Main computation (vitality per node)
-			vitality  = zeros(Float64, n)
-			@inbounds for i in 1:n
-				c      = membership[i]
-				k_i    = k[i]
-				Aii    = diagA[i]
-				mprime = m - 0.5*k_i
+		#	Assertions to verify construction
+			@assert issymmetric(A) "getSparseA: adjacency matrix must be symmetric"
+			@assert sum(A .< 0.0) == 0 "getSparseA: adjacency matrix must not contain negative weights"
+			@assert size(A,1) == size(A,2) "getSparseA: adjacency matrix must be square"
+			@assert !any(isnan, A.nzval) "getSparseA: adjacency matrix contains NaN values"
 
-				if mprime <= 0.0
-					Qprime = 0.0                         # removing i leaves no edges
-				else
-					#	Update ΣE: only community c’s block changes
-						SumEprime = SumE - (2.0 * M[i, c] - Aii)
-
-					#	Update ΣK^2 in a single pass: K_d' = K_d - s_i[d] - (d==c ? k_i : 0)
-						sumK2prime = 0.0
-						@inbounds for d in 1:C
-							sd = M[i, d]
-							kd = K_by_c[d]
-							kdprime = kd - sd - (d == c ? k_i : 0.0)
-							sumK2prime += kdprime * kdprime
-						end
-
-					#	Q' with updated mass
-						inv2m  = 1.0 / (2.0 * mprime)
-						Qprime = inv2m * (SumEprime - γ * sumK2prime * inv2m)
-				end
-
-				#	Original Q via precomputed scalars
-					inv2m = 1.0 / (2.0 * m)
-					Q     = inv2m * (SumE - γ * SumK2 * inv2m)
-
-				#	Store vitality
-					vitality[i] = Q - Qprime
-			end
-
-		#	Assembling Result
-			return vitality
+		#	Return Adjacency Matrix
+			return A
 	end
 
-
-#	Helper Function for modularity_vitality: Fallback exact vitality (O(n) modularity recomputations)
-	function _vitality_exact(adj::SparseMatrixCSC,
-							membership::Vector{Int},
-							γ::Float64)
+#	Helper Function for modularity_vitality: getGroupIndicator(A, membership; rows=nothing)  → S (n×C, one-hot)
+	function getGroupIndicator(A::SparseMatrixCSC,
+	                           membership::Vector{Int};
+	                           rows::Union{Nothing,Vector{Int}}=nothing)
 		"""
+		Group indicator matrix S (n×C), one-hot per node's community.
 		Args:
-			adj::SparseMatrixCSC: symmetric adjacency matrix A (weights allowed).
-			membership::Vector{Int}: community id per node (1..C).
-			γ::Float64: resolution parameter for modularity.
-
+			A::SparseMatrixCSC: adjacency used only for n
+			membership::Vector{Int}: 1-based community labels (1..C)
+			rows::Union{Nothing,Vector{Int}}: optional row indices (default 1:n)
 		Returns:
-			Vector{Float64}: q_without[i] = Q(G \\ i), the modularity of the graph with node i removed.
-
-		Notes:
-			Pure, exact path used for validation or numerically robust fallback.
-			Caller computes vitality as Q(G) − q_without[i].
+			SparseMatrixCSC{Float64,Int}: indicator matrix S
 		"""
+		n = size(A,1)
+		C = maximum(membership)
+		r = isnothing(rows) ? collect(1:n) : rows
+		@assert length(r) == n "getGroupIndicator: rows length must equal number of nodes"
+		vals = ones(Float64, n)
+		S = sparse(r, membership, vals, n, C)
+		return S
+	end
 
-		#	Validation
-			@assert issparse(adj) "_vitality_exact: adj must be SparseMatrixCSC"
-			@assert size(adj,1) == length(membership) "_vitality_exact: membership length must match adj"
-			n = size(adj, 1)
+#	Helper Function for modularity_vitality: getDegMat(node_deg_by_group, rows, cols)  → (degrees, deg_mat)
+	function getDegMat(node_deg_by_group::SparseMatrixCSC,
+	                   rows::Vector{Int},
+	                   cols::Vector{Int})
+		"""
+		Compute degrees (per node) and a sparse matrix with degrees placed at (rows[i], cols[i]).
+		Args:
+			node_deg_by_group::SparseMatrixCSC: (n×C) matrix (typically A*S or similar)
+			rows::Vector{Int}: row indices (1..n)
+			cols::Vector{Int}: community label per row (1..C)
+		Returns:
+			Tuple:
+				degrees::Vector{Float64}  # length n
+				deg_mat::SparseMatrixCSC{Float64,Int}  # same shape as node_deg_by_group
+		"""
+		degrees = vec(sum(node_deg_by_group, dims=2))
+		n, C = size(node_deg_by_group)
+		@assert length(rows) == n && length(cols) == n "getDegMat: rows/cols must have length n"
+		deg_mat = sparse(rows, cols, degrees, n, C)
+		return degrees, deg_mat
+	end
 
-		#	Early return
-			if nnz(adj) == 0
+#	Helper Function for modularity_vitality: newMods(edges, membership)  → q1s (per-node Q(G\i))
+	function newMods(edges::DataFrame, membership::Vector{Int})
+		"""
+		Matt-faithful vectorized computation of q1s[i] = Q(G \\ i) for all nodes i.
+		Args:
+			edges::DataFrame: edgelist with :src, :dst, optional :weight
+			membership::Vector{Int}: 1-based community label per node (aligned to A's row order)
+		Returns:
+			Vector{Float64}: q1s (length n), modularity after removal of each node
+		Notes:
+			Follows the Python reference exactly, with Julia 1-based indexing:
+			  m              = sum(A) / 2
+			  node_deg_by_grp= A * S
+			  internal_edges = (Σ_i node_deg_by_grp[i, c(i)] + Σ_i A_ii) / 2
+			  degrees,degmat = getDegMat(...)
+			  node_deg_by_grp += degmat
+			  group_degs      = column-sum( degmat + Diagonal(diag(A)) * S )
+			  internal_deg[i] = node_deg_by_grp[i, c(i)] - degrees[i]
+			  starCenter      = (degrees[i] == m) [within tolerance]
+			  q1_links[i]     = (internal_edges - internal_deg[i]) / (m - degrees[i])
+			  expected_impact = ||group_degs||^2 - 2*(row⋅group_degs) + ||row||^2
+			  q1_degrees[i]   = expected_impact / (4 * (m - degrees[i])^2)
+			  q1s[i]          = q1_links[i] - q1_degrees[i]
+			  q1s[starCenter] = 0
+		"""
+		#	build A (symmetric; diagonal equals original loop weight)
+			A = getSparseA(edges)
+			n = size(A,1)
+			@assert n == length(membership) "newMods: membership must align to A's node order"
+
+		#	precompute masses and helpers
+			m = (sum(A) + sum(diag(A))) / 2.0
+			if m == 0.0
 				return zeros(Float64, n)
 			end
+			S = getGroupIndicator(A, membership)
+			node_deg_by_group = A * S                       # (n×C)
+			Aii = diag(A)
+			self_loops = sum(Aii)
 
-		#	Main computation
-			q_without = zeros(Float64, n)
+		#	internal edges: use node_deg_by_group BEFORE adding deg_mat
+			internal_edges_sum = 0.0
 			@inbounds for i in 1:n
-				#	Induced subgraph without i
-					keep     = (1:n) .!= i
-					A_sub    = adj[keep, keep]
+				internal_edges_sum += node_deg_by_group[i, membership[i]]
+			end
+			internal_edges = (internal_edges_sum + self_loops) / 2.0
 
-				#	Exact modularity for subgraph
-					if nnz(A_sub) == 0
-						q_without[i] = 0.0
-					else
-						memb_sub      = membership[keep]
-						q_without[i]  = calculate_modularity(A_sub, memb_sub, γ)
-					end
+		#	degrees & degree matrix; then update node_deg_by_group
+			rows = collect(1:n)
+			degrees, deg_mat = getDegMat(node_deg_by_group, rows, membership)
+			node_deg_by_group .+= deg_mat
+
+		#	group_degs = column-sum(deg_mat + Diagonal(Aii) * S)
+			C = size(S, 2)
+			group_degs = zeros(Float64, C)
+			@inbounds for i in 1:n
+				group_degs[membership[i]] += degrees[i] + Aii[i]
+			end
+			norm_group_degs_sq = sum(group_degs .^ 2)
+
+		#	internal_deg[i] = node_deg_by_group[i, c(i)] - degrees[i]
+			internal_deg = similar(degrees)
+			@inbounds for i in 1:n
+				internal_deg[i] = node_deg_by_group[i, membership[i]] - degrees[i]
 			end
 
-		#	Assembling Result
-			return q_without
+		#	q1s via Matt's formulas
+			q1s = zeros(Float64, n)
+			@inbounds for i in 1:n
+				#	star center guard
+					den = m - degrees[i]
+					if abs(den) ≤ 1e-12    
+						q1s[i] = 0.0
+						continue
+					end
+
+				#	expected_impact = ||group_degs||² − 2*(row⋅group_degs) + ||row||²
+					dot_i = 0.0
+					row_norm_sq = 0.0
+					@inbounds for c in 1:C
+						mic = node_deg_by_group[i, c]
+						dot_i       += mic * group_degs[c]
+						row_norm_sq += mic * mic
+					end
+					expected_impact = norm_group_degs_sq - 2.0 * dot_i + row_norm_sq
+
+				#	Calculating Community-Level Ranking Based on Degree
+					q1_links   = (internal_edges - internal_deg[i]) / den
+					q1_degrees = expected_impact / (4.0 * den * den)
+					q1s[i]     = q1_links - q1_degrees
+			end
+
+			return q1s
 	end
 
-#	Modularity Vitality (hubs & bridges)
+#	Modularity Vitality
 	function modularity_vitality(edges::DataFrame;
-								resolution_sweep::Bool=false,
-								resolution::Float64=1.0,
-								weighted::Bool=false,
-								n_resolutions::Int=15,
-								n_runs_per_gamma::Int=5,
-								seed::Union{Int,Nothing}=nothing,
-								provided_membership::Union{Nothing,Vector{Int},Dict}=nothing,
-								use_exact::Bool=false)
+                             resolution_sweep::Bool=false,
+                             resolution::Float64=1.0,
+                             weighted::Bool=false,
+                             n_resolutions::Int=15,
+                             n_runs_per_gamma::Int=5,
+                             seed::Union{Int,Nothing}=nothing,
+                             provided_membership::Union{Nothing,DataFrame,Vector{Int},Dict}=nothing)
 		"""
 		Args:
-			edges::DataFrame: Edge list with :src, :dst, optional :weight.
-			resolution_sweep::Bool: Use CHAMP sweep (true) or fixed γ (false) if no partition provided.
-			resolution::Float64: Fixed γ when not sweeping (default = 1.0).
-			weighted::Bool: Use edge weights when available (default = false).
-			n_resolutions::Int: Number of γ values in CHAMP sweep (default = 15).
-			n_runs_per_gamma::Int: Leiden runs per γ in either CHAMP or fixed-γ path (default = 5).
-			seed::Union{Int,Nothing}: RNG seed for reproducibility.
-			provided_membership::Union{Nothing,Vector{Int},Dict}: Optional user partition.
-				• Vector{Int}: labels aligned to internal node order (see Notes).
-				• Dict(node=>label): labels keyed by node id (order agnostic).
-			use_exact::Bool: If true, compute vitality via exact recomputation (slow, for validation).
-
+			edges::DataFrame: edge list with :src, :dst, optional :weight
+			resolution_sweep::Bool: run CHAMP sweep (true) or fixed-γ Leiden (false)
+			resolution::Float64: single γ for Leiden when not sweeping (default = 1.0)
+			weighted::Bool: use edge weights during community detection (default = false)
+			n_resolutions::Int: number of γ values for CHAMP sweep (default = 15)
+			n_runs_per_gamma::Int: Leiden runs per γ (default = 5)
+			seed::Union{Int,Nothing}: random seed for reproducibility
+			provided_membership::Union{Nothing,DataFrame,Vector{Int},Dict}: optional user partition
+				• DataFrame: must contain columns [:node, :community], left-joined on node id
+				• Vector{Int}: community labels aligned to canonical node order
+				• Dict(node⇒label): order-agnostic node-community mapping
 		Returns:
 			NamedTuple: (results_df, resolution_used, modularity, n_communities)
-
 		Notes:
-			• If `provided_membership` is given, community detection is skipped.
-			• Adjacency and membership are aligned to a canonical node order `node_names`
-			derived from the edgelist; providing a Dict for membership avoids order bugs.
-			• Vitality sign:
-				> 0  ⇒ hub-like (removal decreases modularity)
-				< 0  ⇒ bridge-like (removal increases modularity)
+			Implements Matt Magelinski’s modularity vitality pipeline with strict order alignment:
+			1) Canonical node order is derived from edges (first-appearance order).
+			2) Community labels (detected or provided) are remapped to that order.
+			3) Baseline modularity q₀ is computed on getSparseA(edges), matching newMods().
+			4) Node-removal modularities q₁ = newMods(edges, membership).
+			5) Vitality v = q₀ − q₁:
+				• Hubs: v > 0 (removal decreases modularity)
+				• Bridges: v < 0 (removal increases modularity)
 		"""
 
 		#	Validation
-			@assert isa(edges, DataFrame) "modularity_vitality: edges must be a DataFrame"
-			@assert all(haskey.(Ref(propertynames(edges)), [:src, :dst])) "modularity_vitality: edges must have :src and :dst columns"
-			@assert n_resolutions > 0 "modularity_vitality: n_resolutions must be positive"
-			@assert n_runs_per_gamma > 0 "modularity_vitality: n_runs_per_gamma must be positive"
+			cols = propertynames(edges)
+			@assert (:src in cols) && (:dst in cols) "modularity_vitality: edges must have :src and :dst columns"
 
-		#	Build canonical adjacency (order = node_names)
-			agg         = (weighted && hasproperty(edges, :weight)) ? sum : maximum
-			clean_edges = _aggregate_multi_edges(edges; agg_func=agg)
-			use_weights = weighted && hasproperty(clean_edges, :weight)
-			adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=use_weights)
-			adj        = max.(adj, adj')                             # enforce symmetry
-			node_names = [idx_to_node[i] for i in 1:size(adj,1)]
-			n          = length(node_names)
-
-		#	Early return
-			if n == 0 || nnz(adj) == 0
+		#	Canonical edge-based node order (must match newMods/getSparseA)
+			edge_order = unique(vcat(edges.src, edges.dst))
+			n = length(edge_order)
+			if n == 0
 				df = DataFrame(node=String[], modularity_vitality_hub=Float64[],
 							modularity_vitality_bridge=Float64[], community=Int[])
 				return (results_df=df, resolution_used=resolution, modularity=0.0, n_communities=0)
 			end
 
-		#	Obtain/align membership
-			membership::Vector{Int}
-			resolution_used::Float64
-			final_modularity::Float64
-			n_communities::Int
+		#	Resolve membership and q0
+			membership = Int[]               # will fill below, aligned to edge_order
+			resolution_used = resolution
+			n_communities   = 0
 
 			if provided_membership === nothing
 				#	Detect partition
@@ -3707,10 +3722,12 @@ module Large_Graph_Similarity
 							seed               = seed,
 							show_progress      = true
 						)
-						membership       = det.membership
-						resolution_used  = det.resolution_used
-						final_modularity = det.modularity
-						n_communities    = det.n_communities
+						# remap detector labels → edge_order
+						dmap = Dict(det.node_names .=> det.membership)
+						@assert all(haskey.(Ref(dmap), edge_order)) "modularity_vitality: detector missing nodes for remap"
+						membership = [Int(dmap[v]) for v in edge_order]
+						resolution_used = det.resolution_used
+						n_communities   = maximum(membership)
 					else
 						det = leiden_community_detection(
 							edges;
@@ -3720,120 +3737,115 @@ module Large_Graph_Similarity
 							weighted     = weighted,
 							seed         = seed
 						)
-						membership       = det.membership
-						resolution_used  = resolution
-						final_modularity = det.modularity
-						n_communities    = det.n_communities
+						dmap = Dict(det.node_names .=> det.membership)
+						@assert all(haskey.(Ref(dmap), edge_order)) "modularity_vitality: detector missing nodes for remap"
+						membership = [Int(dmap[v]) for v in edge_order]
+						resolution_used = resolution
+						n_communities   = maximum(membership)
 					end
+
+				#	Compute q0 on the same A used by newMods (Matt-faithful)
+					A0 = getSparseA(edges)
+					q0 = calculate_modularity(A0, membership, resolution_used)
+
 			else
-				#	User-supplied partition
-					if provided_membership isa Dict
-						mem = Vector{Int}(undef, n)
-						@inbounds for (i, name) in enumerate(node_names)
-							mem[i] = provided_membership[name]
-						end
-						membership = mem
+				#	User-provided partition
+					if provided_membership isa DataFrame
+						colsyms = Symbol.(names(provided_membership))
+						@assert (:node in colsyms) && (:community in colsyms) "provided_membership must contain :node and :community"
+						# left-join to align with edge_order
+						node_df = DataFrame(node=edge_order)
+						mapped  = leftjoin(node_df, provided_membership, on=:node)
+						@assert !any(ismissing, mapped.community) "modularity_vitality: missing community labels after join"
+						membership = Int.(mapped.community)
+					elseif provided_membership isa Dict
+						@assert all(haskey.(Ref(provided_membership), edge_order)) "modularity_vitality: provided_membership Dict missing nodes"
+						membership = [Int(provided_membership[v]) for v in edge_order]
 					else
-						@assert length(provided_membership) == n "provided_membership length must equal number of nodes"
-						membership = provided_membership::Vector{Int}
+						@assert length(provided_membership) == n "provided_membership length must equal node count"
+						membership = Int.(provided_membership)
 					end
-					resolution_used  = resolution
-					final_modularity = calculate_modularity(adj, membership, resolution_used)
-					n_communities    = maximum(membership)
+					resolution_used = resolution
+					n_communities   = maximum(membership)
+
+				#	q0 on the Matt-faithful A
+					A0 = getSparseA(edges)
+					q0 = calculate_modularity(A0, membership, resolution_used)
 			end
 
-		#	Compute vitality (fast or exact)
-			vitality_vec = if use_exact
-				#	Exact recomputation path
-					q_without = _vitality_exact(adj, membership, resolution_used)
-					Q         = calculate_modularity(adj, membership, resolution_used)  # ensure consistency
-					Q .- q_without
-			else
-				#	Fast O(m + n·C) updates
-					_vitality_fast(adj, membership, resolution_used)
-			end
+		#	Sanity checks before newMods
+			@assert length(membership) == n "modularity_vitality: membership length mismatch"
+			@assert all(membership .>= 1) "modularity_vitality: community labels must be positive"
+			# Optionally: @assert issorted(unique(membership)) == collect(1:maximum(membership))
 
-		#	Hub/bridge decomposition
-			hub_scores    = max.(vitality_vec, 0.0)
-			bridge_scores = abs.(min.(vitality_vec, 0.0))
+		#	Per-node Q(G\\i) via Matt-faithful core
+			q1s = newMods(edges, membership)
 
-		#	Results table
+		#	Vitality & hub/bridge split
+			v = q0 .- q1s
+			ϵ = 1e-12
+			hub_scores    = map(x -> x > ϵ  ? x  : 0.0, v)
+			bridge_scores = map(x -> x < -ϵ ? -x : 0.0, v)
+
+		#	Results (use edge_order for node column)
 			df = DataFrame(
-				node                       = node_names,
+				node                       = edge_order,
 				modularity_vitality_hub    = hub_scores,
 				modularity_vitality_bridge = bridge_scores,
 				community                  = membership
 			)
-			df.total_vitality = abs.(vitality_vec)
+			df.total_vitality = abs.(v)
 			sort!(df, :total_vitality, rev=true)
 			select!(df, Not(:total_vitality))
 
-		#	Assembling Result
+		#	Return
 			return (
 				results_df      = df,
 				resolution_used = resolution_used,
-				modularity      = final_modularity,
+				modularity      = q0,
 				n_communities   = n_communities
 			)
 	end
 	@doc raw"""
 	**Description**  
-	Identifies hub and bridge nodes using modularity vitality, measuring each node's
-	contribution to community structure.
+	Identifies hub and bridge nodes using modularity vitality, following Matt Magelinski’s
+	reference implementation. The function detects communities (Leiden or CHAMP) unless a
+	partition is provided, then computes per-node modularity vitality via `newMods(edges, membership)`.
 
 	**Usage**  
-	`modularity_vitality(edges; resolution_sweep=false, resolution=1.0,
-						weighted=false, n_resolutions=15, n_runs_per_gamma=5, seed=nothing)`
+	`modularity_vitality(edges; resolution_sweep=false, resolution=1.0, weighted=false,
+						n_resolutions=15, n_runs_per_gamma=5, seed=nothing,
+						provided_membership=nothing)`
 
 	**Arguments**
 	- `edges::DataFrame`: Edge list with `:src`, `:dst`, optional `:weight`
-	- `resolution_sweep::Bool`: Use CHAMP sweep (true) or fixed γ (false)
-	- `resolution::Float64`: Fixed resolution if not sweeping (default `1.0`)
-	- `weighted::Bool`: Use edge weights (default `false`)
-	- `n_resolutions::Int`: Number of resolutions for CHAMP (default `15`)
-	- `n_runs_per_gamma::Int`: Leiden runs per resolution (default `5`)
+	- `resolution_sweep::Bool`: Use CHAMP sweep (true) or fixed-γ Leiden (false)
+	- `resolution::Float64`: Resolution γ for Leiden when not sweeping (default `1.0`)
+	- `weighted::Bool`: Use edge weights during detection (default `false`)
+	- `n_resolutions::Int`: Number of γ values for CHAMP sweep (default `15`)
+	- `n_runs_per_gamma::Int`: Leiden runs per γ (default `5`)
 	- `seed::Int`: Random seed for reproducibility
+	- `provided_membership::Union{Nothing,DataFrame,Vector{Int},Dict}`:
+	Optional community mapping.  
+	*If DataFrame, must contain columns `[:node, :community]` and is left-joined on node id to preserve order.*
 
 	**Details**  
-	Modularity vitality measures how removing each node affects network modularity:
-
-	- **Hubs**: Nodes with positive vitality (removal decreases modularity)  
-	- **Bridges**: Nodes with negative vitality (removal increases modularity)
-
-	The algorithm:
-	1. Detects communities using Leiden or CHAMP (unless a partition is provided)
-	2. Computes modularity change from removing each node (fast update or exact path)
-	3. Classifies nodes as hubs or bridges based on vitality sign
+	- If communities are detected, the detector’s modularity (`part.modularity`) is used as `q0`.  
+	- If a membership is provided, `q0` is computed as `calculate_modularity(getSparseA(edges), membership, γ)`.  
+	- Per-node removal modularities `q1s` are computed by `newMods(edges, membership)`.  
+	- Vitality is `v = q0 - q1s`.  
+	- **Hubs**: `v > 0` (removal decreases modularity)  
+	- **Bridges**: `v < 0` (removal increases modularity)
 
 	**Value**  
-	NamedTuple containing:
-	- `results_df::DataFrame`: Columns `[node, modularity_vitality_hub, modularity_vitality_bridge, community]`
-	- `resolution_used::Float64`: Resolution parameter γ used
-	- `modularity::Float64`: Network modularity
-	- `n_communities::Int`: Number of communities detected
+	NamedTuple with:
+	- `results_df::DataFrame`: `[node, modularity_vitality_hub, modularity_vitality_bridge, community]`
+	- `resolution_used::Float64`
+	- `modularity::Float64` (baseline `q0`)
+	- `n_communities::Int`
 
-	**Examples**
-	```julia
-	# Fixed resolution
-	result = modularity_vitality(edges;
-								resolution_sweep=false,
-								resolution=1.0)
-
-	# CHAMP sweep
-	result = modularity_vitality(edges;
-								resolution_sweep=true,
-								n_resolutions=20,
-								weighted=true)
-
-	# Top hubs
-	top_hubs = first(sort(result.results_df, :modularity_vitality_hub, rev=true), 10)
-
-	# Top bridges
-	top_bridges = first(sort(result.results_df, :modularity_vitality_bridge, rev=true), 10)
-	References
-	Magelinski T, Bartulovic M, Carley KM (2021). “Measuring node contribution to
-	community structure with modularity vitality.” IEEE Transactions on Network Science and Engineering 8(1):707–723.
-
+	**References**  
+	Magelinski T, Bartulovic M, Carley KM (2021). Measuring node contribution to community structure with modularity vitality. IEEE TNSE 8(1):707–723.  
 	GitHub: github.com/tmagelinski/modularity_vitality
 	""" modularity_vitality
 
@@ -4073,7 +4085,7 @@ module Large_Graph_Similarity
 
 #   Degree Assortativity
 
-#   Modularity
+#   Note: Modularity is Reported When Modularity Vitality Statistics Are Calculated
 
 ############################
 #   FEATURE CONSTRUCTORS   #
