@@ -2744,6 +2744,170 @@
 
 	degrees, deg_mat = getDegMat(edges, S, A, test_flag = false)
 
+#	Helper Function for modularity_vitality: newMods(edges, A, S, resolution; …) → q1s (Q after removing each node)
+	function newMods(edges::DataFrame,
+	                 A::SparseMatrixCSC,
+	                 S::SparseMatrixCSC,
+	                 resolution::Float64;
+	                 test_flag::Bool = false,
+	                 sentinel_id::AbstractString = "828033366712688640")
+		"""
+		Args:
+			edges::DataFrame: edge list (used for readable debug ID↔index mapping when test_flag=true)
+			A::SparseMatrixCSC: n×n symmetric adjacency from getSparseA (self-loop convention preserved)
+			S::SparseMatrixCSC: n×C one-hot group indicator from getGroupIndicator (rows sum to 1)
+			resolution::Float64: γ parameter for calculate_modularity (used for Q₀ reporting in tests)
+
+			test_flag::Bool: when true, prints a full walk-through for `sentinel_id`
+			sentinel_id::AbstractString: external node ID to trace (default = "828033366712688640")
+
+		Returns:
+			Vector{Float64}: q1s of length n, where q1s[i] is the **modularity after removing node i**
+			                 (identical to Matt Magelinski’s newMods return; vitality = Q₀ - q1s[i])
+
+		Notes:
+			- Follows Matt’s Python implementation algebra 1:1:
+				A*S → node_deg_by_group
+				internal_edges = (Σ_i (A*S)[i, m[i]] + Σ_i A[i,i]) / 2
+				degrees from getDegMat; augment node_deg_by_group with deg_mat
+				group_degs = (deg_mat + Diag(diag(A)) * S) column-sums
+				internal_deg = (node_deg_by_group_aug[i, m[i]] - degrees[i])
+				q1_links, q1_degrees, q1s per-node as in original code
+			- Q₀ is computed **only for test reporting** via calculate_modularity(A, m, γ).
+		"""
+
+		#	Validation
+			@assert issymmetric(A) "newMods: A must be symmetric"
+			n = size(A, 1)
+			@assert size(A,2) == n "newMods: A must be square"
+			@assert size(S,1) == n "newMods: S must have n rows"
+
+		#	S should be one-hot by row (light check)
+			if test_flag
+				rs = vec(sum(S, dims=2))
+				if any(abs.(rs .- 1.0) .> eps(Float64))
+					throw(AssertionError("newMods: S must be one-hot per row"))
+				end
+			end
+
+		#	Mass and membership
+			mass = sum(A) / 2.0
+			if mass == 0.0
+				return zeros(Float64, n)
+			end
+
+			I, J, _ = findnz(S)		# recover membership (contiguous 1..C)
+			m = zeros(Int, n)
+			for k in eachindex(I)
+				m[I[k]] = J[k]
+			end
+			C = maximum(m)
+
+		#	Node-degree-by-group and per-node totals (reuse your helper for consistency)
+			degrees, deg_mat = getDegMat(edges, S, A; test_flag = false)	# prints elsewhere if requested
+			node_deg_by_group = A * S
+
+		#	Self-loops & internal edges (E_total)
+		#  	The linear index trick above selects (i, m[i]) for i=1..n on an n×C matrix column-major.
+			self_loops = sum(diag(A))
+			internal_edges = (sum(node_deg_by_group[collect(1:n) .+ (m .- 1) .* n]) + self_loops) / 2.0
+		
+		#	Augment node_deg_by_group with deg_mat (Matt’s trick)
+			node_deg_by_group_aug = node_deg_by_group + deg_mat
+
+		#	Group degrees (per community) = (deg_mat + Diag(diag(A)) * S) column sums
+			group_degs_mat = deg_mat + (spdiagm(0 => diag(A)) * S)
+			group_degs = vec(sum(group_degs_mat, dims=1))	# length C, Float64
+
+		#	Internal degree per node to its own community
+			internal_deg = Array{Float64}(undef, n)
+			for i in 1:n
+				internal_deg[i] = node_deg_by_group_aug[i, m[i]] - degrees[i]
+			end
+
+		#	Star-center guard (avoid divide-by-zero when degrees[i] == mass)
+			starCenter = degrees .== mass
+			deg_safe = copy(degrees)
+			deg_safe[starCenter] .= 0.0
+
+		#	q1_links term
+			q1_links = (internal_edges .- internal_deg) ./ (mass .- deg_safe)
+
+		#	Expected_impact term using expanded form:
+		# 	term1: sum(group_degs.^2) — scalar
+			term1 = sum(group_degs .^ 2)
+
+		# 	term2: 2 * (node_deg_by_group_aug * group_degs) — vector length n, then scalar multiply by -1
+			term2_vec = vec(node_deg_by_group_aug * group_degs)	# length n
+
+		#	 term3: row-wise sum of squares of node_deg_by_group_aug
+			term3 = vec(sum(node_deg_by_group_aug .* node_deg_by_group_aug, dims=2))	# length n
+
+			expected_impact = term1 .- 2.0 .* term2_vec .+ term3
+
+		#	q1_degrees term
+			den = 4.0 .* (mass .- deg_safe) .^ 2
+			q1_degrees = expected_impact ./ den
+
+		#	Final q1s (Q after removal)
+			q1s = q1_links .- q1_degrees
+			q1s[starCenter] .= 0.0
+
+		#	Optional: test walk-through for sentinel_id
+			if test_flag
+				#	Readable externalID → rowIndex map
+					clean_edges = _aggregate_multi_edges(edges; agg_func=sum)
+					_, node_to_idx, _ = _edgelist_to_sparse_matrix(clean_edges;)
+
+				#	Resolve sentinel row index
+					i_s = haskey(node_to_idx, sentinel_id) ? node_to_idx[sentinel_id] : nothing
+					i_s === nothing && println("DEBUG newMods: sentinel '", sentinel_id, "' not found in node_to_idx")
+
+				#	Global/Q₀ and community context
+					Q0 = calculate_modularity(A, m, resolution)
+					println("DEBUG newMods: mass (m) = ", mass, " | Q₀ = ", Q0)
+
+					if i_s !== nothing
+						c_s = m[i_s]
+						in_cs = findall(j -> m[j] == c_s, 1:n)
+						K_cs = sum(degrees[in_cs])
+						sum_internal_deg_cs = sum(node_deg_by_group[j, c_s] for j in in_cs)
+						sum_self_loops_cs   = sum(A[j, j] for j in in_cs)
+						E_cs = (sum_internal_deg_cs + sum_self_loops_cs) / 2.0
+
+						println("DEBUG newMods: sentinel=", sentinel_id,
+						        " (row ", i_s, ", comm ", c_s, ")")
+						println("DEBUG newMods:  k_i (total) = ", degrees[i_s],
+						        " | k_i^comm = ", node_deg_by_group[i_s, c_s])
+						println("DEBUG newMods:  internal_edges (Σ_c E_c) = ", internal_edges)
+						println("DEBUG newMods:  K_c(s) = ", K_cs, " | E_c(s) = ", E_cs)
+						println("DEBUG newMods:  group_degs[c_s] = ", group_degs[c_s])
+
+						println("DEBUG newMods:  internal_deg[i_s] = ", internal_deg[i_s])
+						println("DEBUG newMods:  q1_links[i_s] = ", q1_links[i_s])
+						println("DEBUG newMods:  q1_degrees[i_s] = ", q1_degrees[i_s])
+						println("DEBUG newMods:  q1s[i_s] (Q after removal) = ", q1s[i_s])
+						println("DEBUG newMods:  vitality[i_s] = Q₀ - q1s[i_s] = ", Q0 - q1s[i_s])
+					end
+
+				#	Cross-checks
+					E_sum = 0.0
+					for c in 1:C
+						in_c = findall(j -> m[j] == c, 1:n)
+						E_c = (sum(node_deg_by_group[j, c] for j in in_c) + sum(A[j, j] for j in in_c)) / 2.0
+						E_sum += E_c
+					end
+					println("DEBUG newMods: Σ_c E_c = ", E_sum, " (should equal internal_edges)")
+
+					if abs(E_sum - internal_edges) > 1e-9
+						println("WARN newMods: Σ_c E_c (", E_sum, ") ≠ internal_edges (", internal_edges, ")")
+					end
+			end
+
+		#	Return vector of Q after removal for each node
+			return q1s
+	end
+
 #	Come Back Here
 
 
