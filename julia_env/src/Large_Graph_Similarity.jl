@@ -434,6 +434,92 @@ module Large_Graph_Similarity
 			return (adj_matrix, node_to_idx, idx_to_node)
 	end
 
+#	Helper: graph (nodes + edges) to sparse adjacency with fixed node universe
+	function _graph_to_sparse_matrix(edges::DataFrame;
+									nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}}=nothing,
+									weighted::Bool=true)
+		"""
+		Args:
+			edges::DataFrame
+				Required columns: :src, :dst
+				Optional column:  :weight
+				src/dst are node IDs (treated as String; supports long IDs)
+		
+			nodes::Union{Nothing,DataFrame,Vector{<:AbstractString}}
+				Nothing  → infer nodes from edges (isolates excluded)
+				DataFrame: columns :id and :label (both string vectors). Uses :id as the ID universe.
+				Vector   : string vector of node IDs forming the ID universe (includes isolates, if any)
+		
+			weighted::Bool
+				If true and edges has :weight, use it; otherwise use ones.
+				If false, ignore any :weight column and use ones.
+		
+		Returns:
+			Tuple{SparseMatrixCSC{Float64,Int64}, Dict{Any,Int}, Vector{Any}}
+				(adj_matrix, node_to_idx, idx_to_node)
+		
+		Notes:
+			- When `nodes` is provided, the returned matrix is sized to that universe
+			(so isolates are included). All edge endpoints must exist in `nodes`.
+			- When `nodes` is not provided, falls back to `_edgelist_to_sparse_matrix`
+			which infers the node set from edge endpoints only.
+		"""
+
+		#	Basic validation for edge columns
+			@assert hasproperty(edges, :src) && hasproperty(edges, :dst) "_graph_to_sparse_matrix: edges must have :src and :dst"
+
+		#	Fallback: no nodes supplied → just delegate to the existing helper
+			if nodes === nothing
+				return _edgelist_to_sparse_matrix(edges; weighted=weighted)
+			end
+
+		#	Build the fixed node universe (idx_to_node) and mapping (node_to_idx)
+			ids = String[]
+			if nodes isa DataFrame
+				#	Nodes as a DataFrame of IDs and Labels (Screen Names)
+					ndf = nodes::DataFrame
+					@assert hasproperty(ndf, :id) && hasproperty(ndf, :label) "_graph_to_sparse_matrix: nodes DataFrame must have :id and :label"
+					ids = String.(ndf.id)
+			else
+				#	Vector of node IDs
+					ids = String.(nodes::AbstractVector{<:AbstractString})
+			end
+
+		#	Specifyign Node Specific Return Objects
+			n = length(ids)
+			node_to_idx = Dict{Any,Int}(id => i for (i, id) in enumerate(ids))
+			if(typeof(nodes) == DataFrame)
+				idx_to_node = nodes
+			else
+				idx_to_node = Vector{Any}(ids)  # keep Any to match requested return type
+			end
+
+		#	Map edge endpoints to indices (validate all endpoints are known)
+			src_ids = String.(edges.src)
+			dst_ids = String.(edges.dst)
+
+			unknown_src = Set{String}(s for s in src_ids if !haskey(node_to_idx, s))
+			unknown_dst = Set{String}(d for d in dst_ids if !haskey(node_to_idx, d))
+			if !isempty(unknown_src) || !isempty(unknown_dst)
+				missing_ids = union(unknown_src, unknown_dst)
+				examples = join(collect(Iterators.take(missing_ids, 5)), ", ")
+				throw(ArgumentError("_graph_to_sparse_matrix: edges reference IDs not present in supplied nodes (examples: $examples)"))
+			end
+
+			src_idx = [node_to_idx[s] for s in src_ids]
+			dst_idx = [node_to_idx[d] for d in dst_ids]
+
+		#	Determine edge weights per spec
+			use_weights = weighted && hasproperty(edges, :weight)
+			weights = use_weights ? Float64.(edges.weight) : ones(Float64, nrow(edges))
+
+		#	Construct sparse adjacency (no symmetrization here; caller decides)
+			adj_matrix = sparse(src_idx, dst_idx, weights, n, n)
+
+		#	Return adjacency and mappings
+			return (adj_matrix, node_to_idx, idx_to_node)
+	end
+
 #	Helper Function for degree calculations: aggregate duplicate edges
 	function _aggregate_multi_edges(edges::DataFrame; agg_func::Function=sum)
 		"""
@@ -2741,45 +2827,101 @@ module Large_Graph_Similarity
 			return max_x + log(sum(exp.(x .- max_x)))
 	end
 
+
 #	Helper Function: Calculate Modularity for Leiden, CHAMP, & Modularity Vitality Functions
-	function calculate_modularity(adj::SparseMatrixCSC, membership::Vector{Int}, resolution::Float64)
+	function calculate_modularity(adj::SparseMatrixCSC,
+								membership::Vector{Int},
+								resolution::Float64;
+								min_group_size::Int = 5,
+								filter_small_groups::Bool = true,
+								loop_convention::Symbol = :as_is)
 		"""
 		Args:
-			adj::SparseMatrixCSC{Float64,Int}: symmetric adjacency matrix from getSparseA
-			membership::Vector{Int}: 1-based community labels (length = n)
-			resolution::Float64: γ parameter (1.0 = standard Newman–Girvan)
+			adj::SparseMatrixCSC{Float64,Int}: symmetric adjacency matrix
+			membership::Vector{Int}: 1-based community labels aligned to adj rows (length = n)
+			resolution::Float64: γ parameter (1.0 = Newman–Girvan)
+			min_group_size::Int: groups with size < min_group_size are dropped before computing Q (default 5)
+			filter_small_groups::Bool: if true, apply ORA-style node filtering (induced subgraph on kept groups)
+			loop_convention::Symbol:
+				:as_is  → use A as provided by getSparseA for example (Default)
+				:igraph → double diagonal entries to match igraph's undirected self-loop convention
+
 		Returns:
-			Float64: modularity Q ∈ [-0.5, 1] typically
+			Float64: modularity Q on the (possibly filtered) induced subgraph.
+
 		Notes:
-			Matches Matt Magelinski’s definition used in newMods():
-			- adj built via getSparseA (self-loops halved before symmetrization)
-			- m = sum(adj)/2.0
-			- Q = (1/(2m)) Σ₍ij₎ [Aᵢⱼ – γ kᵢ kⱼ / (2m)] δ(cᵢ,cⱼ)
+			- This implements the “identify small groups first → filter nodes → recompute Q” logic.
+			- If all groups are filtered out, returns 0.0.
 		"""
 
-		# 	Validation
+		#	Validation
 			@assert issymmetric(adj) "calculate_modularity: A must be symmetric"
-			n = size(adj,1)
+			n = size(adj, 1)
 			@assert length(membership) == n "calculate_modularity: membership length mismatch"
 
-		# 	Mass and degrees
-			m = sum(adj) / 2.0
-			if m == 0.0
+		#	Optional: match igraph's loop convention (double diagonal)
+			A = adj
+			if loop_convention === :igraph
+				d = diag(A)
+				if any(d .!= 0.0)
+					A = copy(A)
+					for i in 1:n
+						if d[i] != 0.0
+							A[i, i] = 2.0 * d[i]
+						end
+					end
+				end
+			elseif loop_convention === :as_is
+				# no-op
+			else
+				throw(ArgumentError("calculate_modularity: unknown loop_convention=$(loop_convention)"))
+			end
+
+		#	Identify nodes to keep (ORA-style): keep communities with size ≥ min_group_size
+			keep_idx = collect(1:n)
+			if filter_small_groups
+				counts = Dict{Int,Int}()
+				for c in membership
+					counts[c] = get(counts, c, 0) + 1
+				end
+				keep_mask = [get(counts, membership[i], 0) >= min_group_size for i in 1:n]
+				if !any(keep_mask)
+					return 0.0
+				end
+				keep_idx = findall(keep_mask)
+			end
+
+		#	Induced subgraph & filtered membership
+			Af = A[keep_idx, keep_idx]
+			mf = membership[keep_idx]
+			nf = length(mf)
+
+		#	Remap labels to contiguous 1..C on the filtered set
+			labels = sort(unique(mf))
+			label_to_col = Dict{Int,Int}(lab => i for (i, lab) in enumerate(labels))
+			mr = Vector{Int}(undef, nf)
+			for i in 1:nf
+				mr[i] = label_to_col[mf[i]]
+			end
+			C = length(labels)
+
+		#	Mass and degrees on the filtered graph
+			mass = sum(Af) / 2.0
+			if mass == 0.0
 				return 0.0
 			end
-			k = vec(sum(adj, dims=2))
-			C = maximum(membership)
+			k = vec(sum(Af, dims=2))
 
-		# 	Community indicator matrix (n × C)
-			S = sparse(collect(1:n), membership, ones(Float64, n), n, C)
+		#	Indicator matrix on filtered graph
+			S = sparse(collect(1:nf), mr, ones(Float64, nf), nf, C)
 
-		# 	Compute intra-community totals and null model expectations
-			E_c = diag(S' * adj * S)
+		#	Intra-community totals and null model expectations
+			E_c = diag(S' * Af * S)
 			K_c = S' * k
-			Q_num = sum(E_c .- resolution .* (K_c .^ 2) ./ (2.0 * m))
+			Q_num = sum(E_c .- resolution .* (K_c .^ 2) ./ (2.0 * mass))
 
-		#	Return Modularity Score
-			return Q_num / (2.0 * m)
+		#	Return modularity
+			return Q_num / (2.0 * mass)
 	end
 
 #	Helper Function: Ensure Connectivity Within Communities
@@ -3461,188 +3603,537 @@ module Large_Graph_Similarity
 	2. github.com/wweir827/CHAMP
 	""" champ_community_detection
 
-#	Helper Function for modularity_vitality: getSparseA(edges) → A
-	function getSparseA(edges::DataFrame)
+
+#	Helper: graph (nodes + edges) to sparse adjacency with fixed node universe
+	function _graph_to_sparse_matrix(edges::DataFrame;
+									nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}}=nothing,
+									weighted::Bool=true)
 		"""
 		Args:
-			edges::DataFrame: edge list with :src, :dst, optional :weight
+			edges::DataFrame
+				Required columns: :src, :dst
+				Optional column:  :weight
+				src/dst are node IDs (treated as String; supports long IDs)
+		
+			nodes::Union{Nothing,DataFrame,Vector{<:AbstractString}}
+				Nothing  → infer nodes from edges (isolates excluded)
+				DataFrame: columns :id and :label (both string vectors). Uses :id as the ID universe.
+				Vector   : string vector of node IDs forming the ID universe (includes isolates, if any)
+		
+			weighted::Bool
+				If true and edges has :weight, use it; otherwise use ones.
+				If false, ignore any :weight column and use ones.
+		
+		Returns:
+			Tuple{SparseMatrixCSC{Float64,Int64}, Dict{Any,Int}, Vector{Any}}
+				(adj_matrix, node_to_idx, idx_to_node)
+		
+		Notes:
+			- When `nodes` is provided, the returned matrix is sized to that universe
+			(so isolates are included). All edge endpoints must exist in `nodes`.
+			- When `nodes` is not provided, falls back to `_edgelist_to_sparse_matrix`
+			which infers the node set from edge endpoints only.
+		"""
+
+		#	Basic validation for edge columns
+			@assert hasproperty(edges, :src) && hasproperty(edges, :dst) "_graph_to_sparse_matrix: edges must have :src and :dst"
+
+		#	Fallback: no nodes supplied → just delegate to the existing helper
+			if nodes === nothing
+				return _edgelist_to_sparse_matrix(edges; weighted=weighted)
+			end
+
+		#	Build the fixed node universe (idx_to_node) and mapping (node_to_idx)
+			ids = String[]
+			if nodes isa DataFrame
+				#	Nodes as a DataFrame of IDs and Labels (Screen Names)
+					ndf = nodes::DataFrame
+					@assert hasproperty(ndf, :id) && hasproperty(ndf, :label) "_graph_to_sparse_matrix: nodes DataFrame must have :id and :label"
+					ids = String.(ndf.id)
+			else
+				#	Vector of node IDs
+					ids = String.(nodes::AbstractVector{<:AbstractString})
+			end
+
+		#	Specifyign Node Specific Return Objects
+			n = length(ids)
+			node_to_idx = Dict{Any,Int}(id => i for (i, id) in enumerate(ids))
+			if(typeof(nodes) == DataFrame)
+				idx_to_node = nodes
+			else
+				idx_to_node = Vector{Any}(ids)  # keep Any to match requested return type
+			end
+
+		#	Map edge endpoints to indices (validate all endpoints are known)
+			src_ids = String.(edges.src)
+			dst_ids = String.(edges.dst)
+
+			unknown_src = Set{String}(s for s in src_ids if !haskey(node_to_idx, s))
+			unknown_dst = Set{String}(d for d in dst_ids if !haskey(node_to_idx, d))
+			if !isempty(unknown_src) || !isempty(unknown_dst)
+				missing_ids = union(unknown_src, unknown_dst)
+				examples = join(collect(Iterators.take(missing_ids, 5)), ", ")
+				throw(ArgumentError("_graph_to_sparse_matrix: edges reference IDs not present in supplied nodes (examples: $examples)"))
+			end
+
+			src_idx = [node_to_idx[s] for s in src_ids]
+			dst_idx = [node_to_idx[d] for d in dst_ids]
+
+		#	Determine edge weights per spec
+			use_weights = weighted && hasproperty(edges, :weight)
+			weights = use_weights ? Float64.(edges.weight) : ones(Float64, nrow(edges))
+
+		#	Construct sparse adjacency (no symmetrization here; caller decides)
+			adj_matrix = sparse(src_idx, dst_idx, weights, n, n)
+
+		#	Return adjacency and mappings
+			return (adj_matrix, node_to_idx, idx_to_node)
+	end
+
+#	Helper Function for modularity_vitality: getSparseA(edges) → A
+	function getSparseA(edges::DataFrame;
+						nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}}=nothing,
+						weighted::Bool=true,
+						test_flag::Bool=false,
+						sentinel_node::AbstractString="828033366712688640",  # MyriadCsPhantom (ID)
+						selfloop_node::AbstractString="INDOPACOM")
+		"""
+		Args:
+			edges::DataFrame
+				Required columns: :src, :dst
+				Optional column:  :weight
+				src/dst treated as String IDs (supports long IDs)
+
+			nodes::Union{Nothing,DataFrame,Vector{<:AbstractString}}
+				Nothing  → infer nodes from edges (isolates excluded)
+				DataFrame: columns :id and :label (both strings). Uses :id as fixed universe (includes isolates)
+				Vector   : string vector of node IDs forming fixed universe (includes isolates)
+
+			weighted::Bool
+				If true and edges has :weight, use it; otherwise use ones.
+				If false, ignore any :weight column and use ones.
+				(Self-loop halving is applied in all cases.)
+
+			test_flag::Bool
+				When true, run dataset-specific debug checks (sentinel and self-loop probes)
+
+			sentinel_node::AbstractString
+				Node key for targeted checks (may be an ID or, when nodes DataFrame provided, a label)
+
+			selfloop_node::AbstractString
+				Node key for self-loop checks (may be an ID or, when nodes DataFrame provided, a label)
+
 		Returns:
 			SparseMatrixCSC{Float64,Int}
+
 		Notes:
-			Builds a symmetric adjacency matrix A matching Matt’s implementation:
+			Builds a symmetric adjacency matrix A matching the established convention:
 			- Aggregate duplicate edges by sum
 			- Halve self-loops before symmetrization
 			- Symmetrize by addition (A = A + A')
-			- Returns A where diagonal equals the *original* loop weight
+			- Diagonal equals the *original* (pre-halving) loop weight
+			General invariants (symmetry, shape, non-negativity, NaNs) always run.
+			Dataset-specific checks only run when `test_flag=true`.
 		"""
 
-		#	Aggregate by sum
+		#	Aggregate duplicates by sum (work on a copy to avoid mutating caller’s DF)
 			clean_edges = _aggregate_multi_edges(edges; agg_func=sum)
 
-		#	Ensure weight column exists
-			if !hasproperty(clean_edges, :weight)
-				clean_edges.weight = ones(Float64, nrow(clean_edges))
-			else
+		#	Ensure weight semantics per `weighted`
+			if weighted && hasproperty(clean_edges, :weight)
 				clean_edges.weight = Float64.(clean_edges.weight)
+			else
+				clean_edges.weight = ones(Float64, nrow(clean_edges))
 			end
 
-		#	Halve self-loops before symmetrization
+		#	Record original self-loop weights (before halving)
 			self_mask = clean_edges.src .== clean_edges.dst
+			original_self_loops = Dict{Any,Float64}()
+			if any(self_mask)
+				for i in findall(self_mask)
+					original_self_loops[clean_edges.src[i]] = clean_edges.weight[i]
+				end
+			end
+			if test_flag && !isempty(original_self_loops)
+				if haskey(original_self_loops, selfloop_node)
+					println("DEBUG getSparseA: $selfloop_node original self-loop weight = $(original_self_loops[selfloop_node])")
+				end
+			end
+
+		#	Halve self-loops prior to symmetrization
 			clean_edges.weight[self_mask] ./= 2.0
 
-		#	Build directed adjacency
-			adj_dir, _, _ = _edgelist_to_sparse_matrix(clean_edges; weighted=true)
+		#	Expected sum after halving (used to verify symmetry sum later)
+			sum_before_symmetry = sum(clean_edges.weight)
+			if test_flag
+				println("DEBUG getSparseA: Sum of edge weights after halving = $sum_before_symmetry")
+			end
+
+		#	Build directed adjacency using the fixed-node helper (includes isolates when nodes provided)
+			adj_dir, node_to_idx, idx_to_node = _graph_to_sparse_matrix(clean_edges; nodes=nodes, weighted=true)
+
+		#	Resolver for external key → row index
+		#	- If idx_to_node is DataFrame, try :id first, then :label (both String)
+		#	- Else, fall back to node_to_idx (Dict)
+			_resolve_index = let node_to_idx=node_to_idx, idx_to_node=idx_to_node
+				key::AbstractString -> begin
+					if idx_to_node isa DataFrame
+						ndf = idx_to_node::DataFrame
+						# 	Try ID match
+							if hasproperty(ndf, :id)
+								pos = findfirst(==(key), String.(ndf.id))
+								if pos !== nothing
+									return pos
+								end
+							end
+
+						# 	Try label match
+							if hasproperty(ndf, :label)
+								pos = findfirst(==(key), String.(ndf.label))
+								if pos !== nothing
+									return pos
+								end
+							end
+							return nothing
+					else
+						return haskey(node_to_idx, key) ? node_to_idx[key] : nothing
+					end
+				end
+			end
+
+		#	Optional: Sentinel checks (pre-symmetrization row/col sums)
+			if test_flag
+				myriad_idx = _resolve_index(sentinel_node)
+				if myriad_idx !== nothing
+					println("DEBUG getSparseA: Sentinel '$sentinel_node' mapped to index $myriad_idx")
+					row_sum = sum(adj_dir[myriad_idx, :])
+					col_sum = sum(adj_dir[:, myriad_idx])
+					println("DEBUG getSparseA: Sentinel out-sum (row) = $row_sum")
+					println("DEBUG getSparseA: Sentinel in-sum  (col) = $col_sum")
+				else
+					println("DEBUG getSparseA: Sentinel '$sentinel_node' not present in mapping")
+				end
+			end
 
 		#	Symmetrize by addition
 			A = adj_dir + adj_dir'
 
-		#	Assertions to verify construction
+		#	Optional: Verify diagonal equals original self-loop for designated node (if resolvable)
+			if test_flag
+				sl_idx = _resolve_index(selfloop_node)
+				if sl_idx !== nothing
+					# 	If we have the original loop by ID, verify exactness
+						diag_val = A[sl_idx, sl_idx]
+						println("DEBUG getSparseA: $selfloop_node diagonal after symmetrization = $diag_val")
+					
+						if haskey(original_self_loops, selfloop_node)
+							@assert abs(diag_val - original_self_loops[selfloop_node]) < 1e-10 "Diagonal should equal original self-loop weight for $selfloop_node"
+						end
+				end
+			end
+
+		#	Total sum after symmetrization must match 2 * sum_after_halving
+			total_sum = sum(A)
+			expected_sum = 2 * sum_before_symmetry
+			if test_flag
+				println("DEBUG getSparseA: Total sum of A = $total_sum")
+				println("DEBUG getSparseA: Expected sum (2 * halved) = $expected_sum")
+			end
+			@assert abs(total_sum - expected_sum) < 1e-10 "Sum mismatch after symmetrization"
+
+		#	Optional: Sentinel degree and a few neighbor probes (if resolvable & present)
+			if test_flag
+				myriad_idx = _resolve_index(sentinel_node)
+				if myriad_idx !== nothing
+					#	Performing Degree Check
+					# 	If this dataset expects degree 3 for the sentinel, keep the check; otherwise comment/remove as needed
+					# 	@assert abs(myriad_degree - 3.0) < 1e-10 "Sentinel '$sentinel_node' should have degree 3 in this test dataset"
+						myriad_degree = sum(A[myriad_idx, :])
+						println("DEBUG getSparseA: Sentinel '$sentinel_node' total degree in A = $myriad_degree")
+
+					#	Checking Neighbor Degree Totals
+						for nbr in ("INDOPACOM", "PACAF", "US7thFleet")
+							j = _resolve_index(nbr)
+							if j !== nothing
+								println("DEBUG getSparseA: A[sentinel, $nbr] = $(A[myriad_idx, j])")
+							end
+						end
+				end
+			end
+
+		#	General invariants
 			@assert issymmetric(A) "getSparseA: adjacency matrix must be symmetric"
 			@assert sum(A .< 0.0) == 0 "getSparseA: adjacency matrix must not contain negative weights"
 			@assert size(A,1) == size(A,2) "getSparseA: adjacency matrix must be square"
 			@assert !any(isnan, A.nzval) "getSparseA: adjacency matrix contains NaN values"
 
-		#	Return Adjacency Matrix
-			return A
+		#	Optional: Summary
+			if test_flag
+				println("DEBUG getSparseA: Matrix size = $(size(A))")
+				println("DEBUG getSparseA: Number of non-zeros = $(nnz(A))")
+			end
+
+		#	Return Self-Loop/Symmetrized Adjacency Matrix
+			return A, idx_to_node
 	end
 
-#	Helper Function for modularity_vitality: getGroupIndicator(A, membership; rows=nothing)  → S (n×C, one-hot)
-	function getGroupIndicator(A::SparseMatrixCSC,
-	                           membership::Vector{Int};
-	                           rows::Union{Nothing,Vector{Int}}=nothing)
+#	Helper Function for modularity_vitality: getGroupIndicator
+	function getGroupIndicator(A::SparseMatrixCSC, node_index::AbstractDataFrame,
+							partition::DataFrame;
+							node_col::Symbol = :node,
+							community_col::Symbol = :community,
+							expected_sizes::Union{Nothing,Dict{Int,Int}} = Dict(0=>388, 2=>193, 5=>137, 16=>118),
+							perform_sanity_checks::Bool = true,
+							test_flag::Bool = false)
 		"""
-		Group indicator matrix S (n×C), one-hot per node's community.
 		Args:
-			A::SparseMatrixCSC: adjacency used only for n
-			membership::Vector{Int}: 1-based community labels (1..C)
-			rows::Union{Nothing,Vector{Int}}: optional row indices (default 1:n)
+			A::SparseMatrixCSC:
+				Symmetric adjacency; used to determine n (= size(A,1)) and ensure square shape.
+
+			node_index::DataFrame:
+				Node index aligned to A’s rows (length n). Typically the `idx_to_node` DataFrame
+				returned by `getSparseA(...)`, containing at least an ID column. By default this
+				function expects a column named by `node_col` (default `:node`). If `node_index`
+				instead has `:id`, it will be renamed on-the-fly to `node_col` for the join.
+
+			partition::DataFrame:
+				Arbitrary ordering of node-community assignments with columns:
+				- `node_col` (external node ID; e.g., string ID)
+				- `community_col` (original community label; can be non-contiguous like 0,2,5,16)
+
+			node_col::Symbol:
+				Column name for node IDs in both `node_index` and `partition` (default `:node`).
+
+			community_col::Symbol:
+				Column name for community labels in `partition` (default `:community`).
+
+			expected_sizes::Union{Nothing,Dict{Int,Int}}:
+				Optional map of **original labels** → expected counts. Checked only when `test_flag=true`.
+
+			perform_sanity_checks::Bool:
+				Run general validations (one-hot rows, no empty columns) on the returned indicator.
+
+			test_flag::Bool:
+				When true, additionally runs dataset-specific checks (e.g., `expected_sizes`).
+
 		Returns:
-			SparseMatrixCSC{Float64,Int}: indicator matrix S
+			SparseMatrixCSC{Float64,Int}:
+				Indicator matrix `S` of size n×C (one-hot per node). Original labels are remapped
+				internally to contiguous columns 1..C.
+
+		Notes:
+			- Row order strictly follows `node_index` (which must match A’s row order).
+			- Community labels from `partition` may be arbitrary (e.g., {0,2,5,16}) and are remapped
+			to contiguous columns internally.
+			- Dataset-specific size assertions (e.g., specific community counts) are executed **only**
+			when `test_flag=true`.
 		"""
-		n = size(A,1)
-		C = maximum(membership)
-		r = isnothing(rows) ? collect(1:n) : rows
-		@assert length(r) == n "getGroupIndicator: rows length must equal number of nodes"
-		vals = ones(Float64, n)
-		S = sparse(r, membership, vals, n, C)
-		return S
+
+		#	Validation
+			n = size(A, 1)
+			if size(A,1) != size(A,2)
+				throw(ArgumentError("get_group_indicator: A must be square"))
+			end
+			if !(hasproperty(partition, node_col) && hasproperty(partition, community_col))
+				throw(ArgumentError("get_group_indicator: partition must have columns $(node_col) and $(community_col)"))
+			end
+			if nrow(node_index) != n
+				throw(ArgumentError("get_group_indicator: node_index has $(nrow(node_index)) rows but A implies n=$(n). Provide a node_index aligned to A’s rows."))
+			end
+
+		#	Ensure node_index has the join key named node_col (support :id → node_col)
+			if !hasproperty(node_index, node_col) && hasproperty(node_index, :id)
+				rename!(node_index, :id => node_col)
+			end
+			if !hasproperty(node_index, node_col)
+				throw(ArgumentError("get_group_indicator: node_index must have a '$(node_col)' column (or an ':id' column to be renamed)"))
+			end
+
+		#	Join partition labels onto node_index (A’s order defines the rows)
+			ni = deepcopy(node_index)   # avoid mutating caller’s frame
+			leftjoin!(ni, partition, on=node_col)
+
+		#	Extract aligned vectors
+			if !hasproperty(ni, community_col)
+				throw(ArgumentError("get_group_indicator: join did not produce column $(community_col). Check node IDs and join key."))
+			end
+			nodes = ni[!, node_col]
+			comms = ni[!, community_col]
+
+			if length(nodes) != n || length(comms) != n
+				throw(ArgumentError("get_group_indicator: partition (after join) must have exactly n=$(n) rows (one per node in A)"))
+			end
+
+		#	Ensure every node has a community (isolates included)
+			if any(ismissing, comms)
+				missing_nodes = collect(nodes[ismissing.(comms)])
+				throw(ArgumentError("get_group_indicator: missing community assignments for $(length(missing_nodes)) node(s) present in A (examples: $(first(missing_nodes, min(5, length(missing_nodes)))))"))
+			end
+
+		#	Normalize community type to Int (after confirming no missings)
+			ni[!, community_col] = convert.(Int, ni[!, community_col])
+			comms = ni[!, community_col]
+
+		#	Remap community labels to contiguous 1..C
+			labels = sort(unique(comms))
+			C = length(labels)
+			label_to_col = Dict{eltype(labels),Int}(lab => i for (i, lab) in enumerate(labels))
+
+		#	Build membership vector m (1..C) aligned to node_index/A
+			m = Vector{Int}(undef, n)
+			for i in 1:n
+				m[i] = label_to_col[comms[i]]
+			end
+
+		#	Construct one-hot indicator S
+			vals = ones(Float64, n)
+			S = sparse(collect(1:n), m, vals, n, C)
+
+		#	Sanity checks (general + optional dataset-specific)
+			if perform_sanity_checks
+				#	One-hot per row
+					row_sums = vec(sum(S, dims=2))
+					if any(abs.(row_sums .- 1.0) .> eps(Float64))
+						throw(AssertionError("get_group_indicator: each row of S must sum to 1"))
+					end
+
+				#	No empty columns for observed labels
+					col_sums = vec(sum(S, dims=1))
+					if any(col_sums .== 0.0)
+						throw(AssertionError("get_group_indicator: found empty community column(s) after remapping"))
+					end
+
+				#	Dataset-specific assertions (original label sizes), only when test_flag
+					if test_flag && expected_sizes !== nothing
+						for (lab, expected) in expected_sizes
+							if haskey(label_to_col, lab)
+								col = label_to_col[lab]
+								actual = Int(round(col_sums[col]))
+								@assert actual == expected "get_group_indicator: community '$lab' size mismatch (actual=$actual, expected=$expected)"
+							end
+						end
+					end
+			end
+
+		#	Return indicator matrix
+			return S
 	end
 
-#	Helper Function for modularity_vitality: getDegMat(node_deg_by_group, rows, cols)  → (degrees, deg_mat)
-	function getDegMat(node_deg_by_group::SparseMatrixCSC,
-	                   rows::Vector{Int},
-	                   cols::Vector{Int})
+#	Helper Function for modularity_vitality: getDegMat(node_deg_by_group, rows, cols; …) → (degrees, deg_mat)
+	function getDegMat(edges::DataFrame, S::SparseMatrixCSC, A::Union{Nothing,SparseMatrixCSC};
+                   test_flag::Bool = false, sentinel_ids::Vector{String} = ["828033366712688640", "24112747", "25930421", "18749026"])
 		"""
-		Compute degrees (per node) and a sparse matrix with degrees placed at (rows[i], cols[i]).
 		Args:
-			node_deg_by_group::SparseMatrixCSC: (n×C) matrix (typically A*S or similar)
-			rows::Vector{Int}: row indices (1..n)
-			cols::Vector{Int}: community label per row (1..C)
+			edges::DataFrame: edge list used to derive ID→index mapping for debug output
+			S::SparseMatrixCSC: n×C one-hot indicator matrix (rows = nodes, cols = communities)
+			A::Union{Nothing,SparseMatrixCSC}: n×n symmetric adjacency used to compute A*S
+
+			test_flag::Bool: when true, run dataset-specific reporting (sentinel nodes, K_c / E_c)
+			sentinel_ids::Vector{Any}: node IDs to report (defaults include MyriadCsPhantom & ego)
+
 		Returns:
 			Tuple:
-				degrees::Vector{Float64}  # length n
-				deg_mat::SparseMatrixCSC{Float64,Int}  # same shape as node_deg_by_group
-		"""
-		degrees = vec(sum(node_deg_by_group, dims=2))
-		n, C = size(node_deg_by_group)
-		@assert length(rows) == n && length(cols) == n "getDegMat: rows/cols must have length n"
-		deg_mat = sparse(rows, cols, degrees, n, C)
-		return degrees, deg_mat
-	end
+				degrees::Vector{Float64}            # length n, total network degree per node
+				deg_mat::SparseMatrixCSC{Float64,Int}  # n×C with degree at (i, cols[i]), zeros elsewhere
 
-#	Helper Function for modularity_vitality: newMods(edges, membership)  → q1s (per-node Q(G\i))
-	function newMods(edges::DataFrame, membership::Vector{Int})
-		"""
-		Matt-faithful vectorized computation of q1s[i] = Q(G \\ i) for all nodes i.
-		Args:
-			edges::DataFrame: edgelist with :src, :dst, optional :weight
-			membership::Vector{Int}: 1-based community label per node (aligned to A's row order)
-		Returns:
-			Vector{Float64}: q1s (length n), modularity after removal of each node
 		Notes:
-			Follows the Python reference exactly, with Julia 1-based indexing:
-			  m              = sum(A) / 2
-			  node_deg_by_grp= A * S
-			  internal_edges = (Σ_i node_deg_by_grp[i, c(i)] + Σ_i A_ii) / 2
-			  degrees,degmat = getDegMat(...)
-			  node_deg_by_grp += degmat
-			  group_degs      = column-sum( degmat + Diagonal(diag(A)) * S )
-			  internal_deg[i] = node_deg_by_grp[i, c(i)] - degrees[i]
-			  starCenter      = (degrees[i] == m) [within tolerance]
-			  q1_links[i]     = (internal_edges - internal_deg[i]) / (m - degrees[i])
-			  expected_impact = ||group_degs||^2 - 2*(row⋅group_degs) + ||row||^2
-			  q1_degrees[i]   = expected_impact / (4 * (m - degrees[i])^2)
-			  q1s[i]          = q1_links[i] - q1_degrees[i]
-			  q1s[starCenter] = 0
+			- Total network degree per node: degrees[i] = sum_j A[i,j]
+			- Community-internal degree for node i: (A*S)[i, cols[i]]
+			- When `test_flag=true`, the function reports for sentinels:
+				• k_i (total) and k_i^comm (internal)
+				• K_c = ∑_{i∈c} k_i and
+				  E_c = (∑_{i∈c} (A*S)[i,c] + ∑_{i∈c} A[i,i]) / 2
+			  (matches “add self-loops, then divide by 2” convention).
 		"""
-		#	build A (symmetric; diagonal equals original loop weight)
-			A = getSparseA(edges)
-			n = size(A,1)
-			@assert n == length(membership) "newMods: membership must align to A's node order"
 
-		#	precompute masses and helpers
-			m = sum(A) / 2.0
-			if m == 0.0
-				return zeros(Float64, n)
+		#	Validation
+			@assert A !== nothing "getDegMat: A must be provided (needed to compute A * S)"
+
+		#	Calculate Node Degree by Group
+			node_deg_by_group = A * S
+
+		#	Derive n, m, rows, cols from A and S (explicit, no prior state)
+			n = size(A, 1)
+			I, J, _ = findnz(S)
+			m = zeros(Int, n)
+			for k in eachindex(I)
+				m[I[k]] = J[k]
 			end
-			S = getGroupIndicator(A, membership)
-			node_deg_by_group = A * S                       # (n×C)
-			Aii = diag(A)
-			self_loops = sum(Aii)
 
-		#	internal edges: use node_deg_by_group BEFORE adding deg_mat
-			internal_edges_sum = 0.0
-			@inbounds for i in 1:n
-				internal_edges_sum += node_deg_by_group[i, membership[i]]
-			end
-			internal_edges = (internal_edges_sum + self_loops) / 2.0
-
-		#	degrees & degree matrix; then update node_deg_by_group
 			rows = collect(1:n)
-			degrees, deg_mat = getDegMat(node_deg_by_group, rows, membership)
-			node_deg_by_group .+= deg_mat
+			cols = m
 
-		#	group_degs = column-sum(deg_mat + Diagonal(Aii) * S)
-			C = size(S, 2)
-			group_degs = zeros(Float64, C)
-			@inbounds for i in 1:n
-				group_degs[membership[i]] += degrees[i] + Aii[i]
+		#	Validation
+			n, C = size(node_deg_by_group)
+			if length(rows) != n || length(cols) != n
+				throw(ArgumentError("getDegMat: rows/cols must have length n (n=$(n))"))
 			end
-			norm_group_degs_sq = sum(group_degs .^ 2)
-
-		#	internal_deg[i] = node_deg_by_group[i, c(i)] - degrees[i]
-			internal_deg = similar(degrees)
-			@inbounds for i in 1:n
-				internal_deg[i] = node_deg_by_group[i, membership[i]] - degrees[i]
+			if any(x -> x < 1 || x > C, cols)
+				throw(ArgumentError("getDegMat: cols must be in 1..C (C=$(C))"))
 			end
 
-		#	q1s via Matt's formulas
-			q1s = zeros(Float64, n)
-			@inbounds for i in 1:n
-				#	star center guard
-					den = m - degrees[i]
-					if abs(den) ≤ 1e-12    
-						q1s[i] = 0.0
-						continue
+		#	Compute degrees (network totals)
+			degrees = vec(sum(node_deg_by_group, dims=2))  # size n
+
+		#	Assemble degree placement matrix
+			deg_mat = sparse(rows, cols, degrees, n, C)
+
+		#	Dataset-specific reporting (sentinels; K_c / E_c)
+			if test_flag
+				#	Build external ID → row index mapping from edges (for readable debug)
+					clean_edges = _aggregate_multi_edges(edges; agg_func=sum)
+					_, node_to_idx, _ = _edgelist_to_sparse_matrix(clean_edges;)
+
+				#	Helper: resolve external ID to row index (try exact key and stringified key)
+					_resolve_index = let node_to_idx = node_to_idx
+						id -> begin
+							if haskey(node_to_idx, id)
+								node_to_idx[id]
+							elseif !(id isa AbstractString) && haskey(node_to_idx, string(id))
+								node_to_idx[string(id)]
+							else
+								nothing
+							end
+						end
 					end
 
-				#	expected_impact = ||group_degs||² − 2*(row⋅group_degs) + ||row||²
-					dot_i = 0.0
-					row_norm_sq = 0.0
-					@inbounds for c in 1:C
-						mic = node_deg_by_group[i, c]
-						dot_i       += mic * group_degs[c]
-						row_norm_sq += mic * mic
-					end
-					expected_impact = norm_group_degs_sq - 2.0 * dot_i + row_norm_sq
+				#	Looping Over Check Nodes
+					for sid in sentinel_ids
+						#	Setting-Up Tests
+							i = _resolve_index(sid)
+							if i === nothing
+								println("DEBUG getDegMat: sentinel '", sid, "' not found in node_to_idx")
+								continue
+							end
 
-				#	Calculating Community-Level Ranking Based on Degree
-					q1_links   = (internal_edges - internal_deg[i]) / den
-					q1_degrees = expected_impact / (4.0 * den * den)
-					q1s[i]     = q1_links - q1_degrees
+							c = cols[i]
+							k_i_total  = degrees[i]
+							k_i_comm   = node_deg_by_group[i, c]
+
+							println("DEBUG getDegMat: node=", sid,
+									" (row ", i, ", comm ", c, ")",
+									" | k_i (total) = ", k_i_total,
+									" | k_i^comm (internal) = ", k_i_comm)
+
+						#	Report K_c and E_c for this node's community
+							in_c = findall(j -> cols[j] == c, 1:n)
+
+							#	K_c: sum of degrees of community members
+								K_c = sum(degrees[in_c])
+
+							#	E_c via your convention
+								sum_internal_deg = sum(node_deg_by_group[j, c] for j in in_c)
+								sum_self_loops_c = sum(A[j, j] for j in in_c)
+								E_c = (sum_internal_deg + sum_self_loops_c) / 2
+
+								println("DEBUG getDegMat: community ", c,
+										" | K_c (sum degrees) = ", K_c,
+										" | E_c (internal weight) = ", E_c)
+					end
 			end
 
-			return q1s
+		#	Return result
+			return degrees, deg_mat
 	end
 
 #	Modularity Vitality
