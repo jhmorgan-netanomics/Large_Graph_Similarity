@@ -566,21 +566,123 @@ module Large_Graph_Similarity
 
 #	NORMALIZATION FUNCTIONS
 
-#	Helper Function for freeman_degree_normalization: symmetry check
-	function _is_symmetric(adj::SparseMatrixCSC{<:Real,Int}; directed::Bool=true, atol::Float64=1e-12)
+#	Helper Function: Check Matrix Symmetry
+	function _is_symmetric(adj::SparseMatrixCSC{<:Real,Int}; 
+	                      directed::Union{Bool,Nothing}=nothing, 
+	                      atol::Float64=1e-12)
+		"""
+		Args:
+			adj::SparseMatrixCSC: matrix to check
+			directed::Union{Bool,Nothing}: graph type or nothing for pure check
+			atol::Float64: absolute tolerance (default = 1e-12)
+		Returns:
+			Bool: true if symmetric within tolerance
+		Notes:
+			If directed=nothing: checks actual numerical symmetry
+			If directed=false: returns true (undirected assumed symmetric)
+			If directed=true: checks actual numerical symmetry
+		"""
+		
 		#	Validation
 			if size(adj, 1) != size(adj, 2)
 				throw(ArgumentError("Adjacency must be square"))
 			end
-
-		#	Undirected => symmetric by convention
-			if !directed
-				return true
+		
+		#	Convention-Based Check
+			if directed === false
+				return true  # Undirected => symmetric by convention
 			end
-
-		#	Numerical symmetry check
+		
+		#	Numerical Symmetry Check
 			delta = adj - adj'
 			return LinearAlgebra.norm(delta, 1) <= atol
+	end
+
+#	Helper Function for leiden_community_detection: Detect Binary Matrix
+	function _is_binary_matrix(A::SparseMatrixCSC; directed::Bool, atol::Float64=1e-12)
+		"""
+		Args:
+			A::SparseMatrixCSC: matrix to check
+			directed::Bool: expected diagonal convention
+			atol::Float64: absolute tolerance (default = 1e-12)
+		Returns:
+			Bool: true if binary under convention
+		Notes:
+			Binary means off-diagonal ∈ {0,1}, diagonal ∈ {0,1} if directed
+			or {0,2} if undirected.
+		"""
+		
+		#	Extract Non-Zero Elements
+			rows, cols, vals = findnz(A)
+		
+		#	Check Each Non-Zero Value
+			for k in eachindex(vals)
+				i, j = rows[k], cols[k]
+				v = vals[k]
+				
+				if i == j
+					#	Diagonal Elements
+						if directed
+							valid = abs(v) ≤ atol || abs(v - 1.0) ≤ atol
+						else
+							valid = abs(v) ≤ atol || abs(v - 2.0) ≤ atol
+						end
+						if !valid
+							return false
+						end
+				else
+					#	Off-Diagonal Elements
+						if !(abs(v) ≤ atol || abs(v - 1.0) ≤ atol)
+							return false
+						end
+				end
+			end
+		
+		#	All Values Valid
+			return true
+	end
+
+#	Helper Function for leiden_community_detection: Binarize Matrix
+	function _binarize_matrix(A::SparseMatrixCSC; directed::Bool)
+		"""
+		Args:
+			A::SparseMatrixCSC: matrix to binarize
+			directed::Bool: graph type for diagonal convention
+		Returns:
+			SparseMatrixCSC: binarized copy of matrix
+		Notes:
+			Off-diagonal → {0,1}, diagonal → {0,1} if directed
+			or {0,2} if undirected. Symmetrizes if undirected.
+		"""
+		
+		#	Create Working Copy
+			B = copy(A)
+		
+		#	Binarize Off-Diagonal Elements
+			@inbounds for j in 1:size(B, 2)
+				for p in B.colptr[j]:(B.colptr[j+1] - 1)
+					i = B.rowval[p]
+					if i != j
+						B.nzval[p] = (B.nzval[p] > 0) ? 1.0 : 0.0
+					end
+				end
+			end
+		
+		#	Set Diagonal Convention
+			if directed
+				d = (diag(B) .> 0) .* 1.0
+			else
+				d = (diag(B) .> 0) .* 2.0
+			end
+			B = B + spdiagm(0 => (d .- diag(B)))
+		
+		#	Symmetrize for Undirected
+			if !directed
+				B = max.(B, B')
+			end
+		
+		#	Return Binarized Matrix
+			return B
 	end
 
 #	Helper Function for freeman_degree_normalization: bipartite mode counts
@@ -2827,281 +2929,417 @@ module Large_Graph_Similarity
 			return max_x + log(sum(exp.(x .- max_x)))
 	end
 
-
 #	Helper Function: Calculate Modularity for Leiden, CHAMP, & Modularity Vitality Functions
-	function calculate_modularity(adj::SparseMatrixCSC,
-								membership::Vector{Int},
-								resolution::Float64;
-								min_group_size::Int = 5,
-								filter_small_groups::Bool = true,
-								loop_convention::Symbol = :as_is)
+	function calculate_modularity(adj::SparseMatrixCSC, membership::Vector{Int};
+	                              weighted::Bool = true,
+	                              directed::Bool = false,
+	                              γ::Float64 = 1.0)
 		"""
 		Args:
-			adj::SparseMatrixCSC{Float64,Int}: symmetric adjacency matrix
-			membership::Vector{Int}: 1-based community labels aligned to adj rows (length = n)
-			resolution::Float64: γ parameter (1.0 = Newman–Girvan)
-			min_group_size::Int: groups with size < min_group_size are dropped before computing Q (default 5)
-			filter_small_groups::Bool: if true, apply ORA-style node filtering (induced subgraph on kept groups)
-			loop_convention::Symbol:
-				:as_is  → use A as provided by getSparseA for example (Default)
-				:igraph → double diagonal entries to match igraph's undirected self-loop convention
-
+			adj::SparseMatrixCSC: adjacency matrix (may contain weights)
+			membership::Vector{Int}: community assignment for each node
+			weighted::Bool: use edge weights if true (default = true)
+			directed::Bool: treat as directed graph (default = false)  
+			γ::Float64: resolution parameter (default = 1.0)
 		Returns:
-			Float64: modularity Q on the (possibly filtered) induced subgraph.
-
+			Float64: modularity score
 		Notes:
-			- This implements the “identify small groups first → filter nodes → recompute Q” logic.
-			- If all groups are filtered out, returns 0.0.
+			Matches igraph's modularity calculation for weighted/unweighted 
+			and directed/undirected graphs. Self-loops handled correctly.
 		"""
-
+		
 		#	Validation
-			@assert issymmetric(adj) "calculate_modularity: A must be symmetric"
 			n = size(adj, 1)
-			@assert length(membership) == n "calculate_modularity: membership length mismatch"
-
-		#	Optional: match igraph's loop convention (double diagonal)
-			A = adj
-			if loop_convention === :igraph
-				d = diag(A)
-				if any(d .!= 0.0)
-					A = copy(A)
-					for i in 1:n
-						if d[i] != 0.0
-							A[i, i] = 2.0 * d[i]
-						end
+			@assert length(membership) == n "membership length mismatch with adjacency matrix"
+		
+		#	Type Conversion for Consistency
+			adj = SparseMatrixCSC{Float64, Int}(adj)
+		
+		#	Handle Unweighted Case
+			if !weighted
+				I, J, _ = findnz(adj)
+				adj = sparse(I, J, ones(Float64, length(I)), n, n)
+			end
+		
+		#	Branch on Graph Type
+			if directed
+				#	Directed Degree Calculation
+					k_out = vec(sum(adj, dims = 2))  # out-degrees/strengths
+					k_in  = vec(sum(adj, dims = 1))  # in-degrees/strengths
+					m = sum(adj)                     # total weight
+					
+					if m == 0.0
+						return 0.0
 					end
-				end
-			elseif loop_convention === :as_is
-				# no-op
+				
+				#	Re-index Membership to 1..C
+					labs = unique(membership)
+					sort!(labs)
+					lab2col = Dict(labs[i] => i for i in eachindex(labs))
+					mem = [lab2col[x] for x in membership]
+					C = length(labs)
+				
+				#	Community Indicator Matrix
+					S = sparse(collect(1:n), mem, ones(Float64, n), n, C)
+				
+				#	Internal Edge Weight
+					block_sums = S' * adj * S
+					internal_edges = sum(diag(block_sums))
+				
+				#	Expected Edges (Directed Null Model)
+					K_out = vec(S' * k_out)
+					K_in  = vec(S' * k_in)
+					expected = sum((K_out .* K_in) ./ m)
+				
+				#	Return Directed Modularity
+					return (internal_edges - γ * expected) / m
+					
 			else
-				throw(ArgumentError("calculate_modularity: unknown loop_convention=$(loop_convention)"))
+				#	Symmetrize for Undirected
+					if !weighted
+						#	Unweighted: logical OR via max
+							adj = max.(adj, adj')
+					else
+						#	Weighted: average the directions
+							adj = 0.5 .* (adj + adj')
+					end
+				
+				#	Undirected Degree Calculation
+					k = vec(sum(adj, dims = 2))
+					two_m = sum(adj)
+					
+					if two_m == 0.0
+						return 0.0
+					end
+				
+				#	Re-index Membership to 1..C
+					labs = unique(membership)
+					sort!(labs)
+					lab2col = Dict(labs[i] => i for i in eachindex(labs))
+					mem = [lab2col[x] for x in membership]
+					C = length(labs)
+				
+				#	Community Indicator Matrix
+					S = sparse(collect(1:n), mem, ones(Float64, n), n, C)
+				
+				#	Internal Edge Weight
+					block_sums = S' * adj * S
+					internal_edges = sum(diag(block_sums))
+				
+				#	Expected Weight (Undirected Null Model)
+					Kc = vec(S' * k)
+					expected = sum((Kc .^ 2) ./ two_m)
+				
+				#	Return Undirected Modularity
+					return (internal_edges - γ * expected) / two_m
 			end
-
-		#	Identify nodes to keep (ORA-style): keep communities with size ≥ min_group_size
-			keep_idx = collect(1:n)
-			if filter_small_groups
-				counts = Dict{Int,Int}()
-				for c in membership
-					counts[c] = get(counts, c, 0) + 1
-				end
-				keep_mask = [get(counts, membership[i], 0) >= min_group_size for i in 1:n]
-				if !any(keep_mask)
-					return 0.0
-				end
-				keep_idx = findall(keep_mask)
-			end
-
-		#	Induced subgraph & filtered membership
-			Af = A[keep_idx, keep_idx]
-			mf = membership[keep_idx]
-			nf = length(mf)
-
-		#	Remap labels to contiguous 1..C on the filtered set
-			labels = sort(unique(mf))
-			label_to_col = Dict{Int,Int}(lab => i for (i, lab) in enumerate(labels))
-			mr = Vector{Int}(undef, nf)
-			for i in 1:nf
-				mr[i] = label_to_col[mf[i]]
-			end
-			C = length(labels)
-
-		#	Mass and degrees on the filtered graph
-			mass = sum(Af) / 2.0
-			if mass == 0.0
-				return 0.0
-			end
-			k = vec(sum(Af, dims=2))
-
-		#	Indicator matrix on filtered graph
-			S = sparse(collect(1:nf), mr, ones(Float64, nf), nf, C)
-
-		#	Intra-community totals and null model expectations
-			E_c = diag(S' * Af * S)
-			K_c = S' * k
-			Q_num = sum(E_c .- resolution .* (K_c .^ 2) ./ (2.0 * mass))
-
-		#	Return modularity
-			return Q_num / (2.0 * mass)
 	end
+	@doc raw"""
+	**Description**
+	Calculate the modularity of a graph with respect to a given community structure. Supports both weighted/unweighted and directed/undirected graphs, matching igraph's implementation.
+
+	**Usage**
+	`calculate_modularity(adj::SparseMatrixCSC, membership::Vector{Int}; weighted::Bool=true, directed::Bool=false, γ::Float64=1.0)`
+
+	**Arguments**
+	- `adj::SparseMatrixCSC`: Adjacency matrix of the graph (may contain edge weights)
+	- `membership::Vector{Int}`: Community assignment for each node
+	- `weighted::Bool`: If true, use edge weights; if false, treat as binary (default true)
+	- `directed::Bool`: If true, use directed formula; if false, symmetrize (default false)
+	- `γ::Float64`: Resolution parameter for generalized modularity (default 1.0)
+
+	**Details**
+	Implements Newman-Girvan modularity: Q = (1/2m) * Σ[Aij - γ*ki*kj/(2m)] * δ(ci,cj)
+	
+	For directed graphs, uses the directed null model: ki_out * kj_in / m
+	For undirected graphs, ensures symmetry and uses: ki * kj / 2m
+	
+	Self-loops are handled consistently with igraph's approach.
+
+	**Value**
+	Returns a `Float64` modularity score in range [-1, 1], where higher values indicate better community structure.
+
+	**Examples**
+```julia
+	using SparseArrays
+	
+	#	Simple unweighted graph
+		adj = sparse([1,2,3], [2,3,1], ones(3), 3, 3)
+		membership = [1, 1, 2]
+		Q = calculate_modularity(adj, membership; weighted=false)
+	
+	#	Weighted directed graph
+		adj = sparse([1,2], [2,3], [0.5, 1.0], 3, 3)
+		Q = calculate_modularity(adj, membership; directed=true)
+```
+
+	**References**
+	Newman & Girvan (2004). "Finding and evaluating community structure in networks." Phys Rev E 69:026113
+	""" calculate_modularity
 
 #	Helper Function: Ensure Connectivity Within Communities
-	function _refine_connectivity!(adj::SparseMatrixCSC, membership::Vector{Int})
+	function _refine_connectivity!(adj::SparseMatrixCSC, membership::Vector{Int}; directed::Bool=false)
 		"""
 		Args:
-			adj::SparseMatrixCSC: symmetric adjacency matrix
+			adj::SparseMatrixCSC: adjacency matrix
 			membership::Vector{Int}: community labels (modified in-place)
+			directed::Bool: whether graph is directed (default = false)
+
 		Returns:
 			Nothing (membership updated in-place)
+
 		Notes:
-			Splits disconnected communities into separate components.
-			Ensures each community forms a connected subgraph.
+			- Splits disconnected communities into separate components.
+			- Undirected: ensures connected subgraphs (standard connectivity).
+			- Directed: ensures weakly connected subgraphs (union of in/out edges).
+			- Defensive checks ensure |membership| == size(adj,1) and Int labels.
 		"""
-		
-		#	Build neighbor lists
+
+		#	Defensive checks
 			n = size(adj, 1)
+			@assert size(adj,1) == size(adj,2) "_refine_connectivity!: adj must be square"
+			@assert length(membership) == n "_refine_connectivity!: membership length must match adj"
+			@assert eltype(membership) <: Integer "_refine_connectivity!: membership labels must be integers"
+
+		#	Build neighbor lists (use sets to avoid duplicates)
 			rows, cols, vals = findnz(adj)
-			neighbors = [Int[] for _ in 1:n]
-			
-			for k in eachindex(vals)
-				i, j = rows[k], cols[k]
-				if i != j
-					push!(neighbors[i], j)
-					push!(neighbors[j], i)
-				end
+			if directed
+				#	Weak connectivity: undirected view of edges
+					neighbors_sets = [Set{Int}() for _ in 1:n]
+					for k in eachindex(vals)
+						i, j = rows[k], cols[k]
+						if i != j
+							push!(neighbors_sets[i], j)
+							push!(neighbors_sets[j], i)
+						end
+					end
+					neighbors = [collect(s) for s in neighbors_sets]
+			else
+				#	Undirected connectivity: bidirectional neighbors
+					neighbors_sets = [Set{Int}() for _ in 1:n]
+					for k in eachindex(vals)
+						i, j = rows[k], cols[k]
+						if i != j
+							push!(neighbors_sets[i], j)
+							push!(neighbors_sets[j], i)
+						end
+					end
+					neighbors = [collect(s) for s in neighbors_sets]
 			end
-		
-		#	Process each community
+
+		#	Process each community; split into components if needed
 			current_max = maximum(membership)
 			comms = unique(membership)
-			
 			for c in comms
 				nodes = findall(==(c), membership)
 				if length(nodes) ≤ 1
 					continue
 				end
-				
-				#	BFS to find connected components
-					unvisited = Set(nodes)
-					first_component = true
-					
-					while !isempty(unvisited)
+
+				unvisited = Set(nodes)
+				first_component = true
+
+				while !isempty(unvisited)
+					#	Create Iteration Objects
 						start = first(unvisited)
 						queue = [start]
 						component = Int[]
 						delete!(unvisited, start)
-						
+
+					#	BFS over the induced subgraph of community c
 						while !isempty(queue)
 							v = popfirst!(queue)
 							push!(component, v)
 							for nbr in neighbors[v]
-								if nbr in unvisited && membership[nbr] == c
+								if (nbr in unvisited) && (membership[nbr] == c)
 									delete!(unvisited, nbr)
 									push!(queue, nbr)
 								end
 							end
 						end
-						
-						#	Assign new label if not first component
-							if !first_component
-								current_max += 1
-								for v in component
-									membership[v] = current_max
-								end
+
+					#	Label additional components with new community IDs
+						if !first_component
+							current_max += 1
+							for v in component
+								membership[v] = current_max
 							end
-							first_component = false
-					end
+						end
+						first_component = false
+				end
 			end
+
+		#	Memberships Updated in Place
+			return nothing
 	end
 
 #	Helper Function: Contract Graph by Community Structure
-	function _contract_by_membership(adj::SparseMatrixCSC, membership::Vector{Int})
+	function _contract_by_membership(adj::SparseMatrixCSC,
+									membership::Vector{Int};
+									directed::Bool=false,
+									weighted::Bool=true)
 		"""
 		Args:
-			adj::SparseMatrixCSC: symmetric adjacency matrix
-			membership::Vector{Int}: community labels for each node
+			adj::SparseMatrixCSC: adjacency matrix
+			membership::Vector{Int}: community labels for each node (length == size(adj,1))
+			directed::Bool: preserve directionality (default = false)
+			weighted::Bool: preserve weights (true=sum weights; false=binarize/OR)
+
 		Returns:
-			SparseMatrixCSC: contracted adjacency (communities as supernodes)
+			SparseMatrixCSC{Float64,Int}: contracted adjacency (communities as supernodes)
+
 		Notes:
-			Aggregates edges between communities.
-			Self-loops represent internal community edges.
+			- Aggregates edges between communities.
+			- Self-loops in the contracted graph represent intra-community edges.
+			- For undirected graphs, the result is symmetrized at the end.
+			- For weighted=false, nonzero entries are binarized (set to 1.0).
+			- Defensive checks ensure |membership| == size(adj,1) and Int labels.
 		"""
-		
-		#	Map communities to consecutive indices
+
+		#	Defensive checks
+			n = size(adj, 1)
+			@assert size(adj,1) == size(adj,2) "_contract_by_membership: adj must be square"
+			@assert length(membership) == n "_contract_by_membership: membership length must match adj"
+			@assert eltype(membership) <: Integer "_contract_by_membership: membership labels must be integers"
+
+		#	Map communities to consecutive indices 1..C
 			unique_comms = sort(unique(membership))
 			label_map = Dict(old => new for (new, old) in enumerate(unique_comms))
 			C = length(unique_comms)
-		
-		#	Aggregate inter-community edges
+
+		#	Aggregate edges by community pairs
 			rows, cols, vals = findnz(adj)
-			I = Int[]
-			J = Int[]
-			V = Float64[]
-			
+			edge_dict = Dict{Tuple{Int,Int}, Float64}()
+
 			for k in eachindex(vals)
 				ci = label_map[membership[rows[k]]]
 				cj = label_map[membership[cols[k]]]
-				push!(I, ci)
-				push!(J, cj)
-				push!(V, vals[k])
+				key = (ci, cj)
+				edge_dict[key] = get(edge_dict, key, 0.0) + vals[k]
 			end
-		
-		#	Build contracted adjacency
+
+		#	Build sparse matrix from aggregated pairs
+			I = Int[]; J = Int[]; V = Float64[]
+			sizehint!(I, length(edge_dict))
+			sizehint!(J, length(edge_dict))
+			sizehint!(V, length(edge_dict))
+			for ((ci, cj), w) in edge_dict
+				push!(I, ci); push!(J, cj); push!(V, w)
+			end
 			S = sparse(I, J, V, C, C)
-			S = max.(S, S')  # Ensure symmetry
-		
-		return S
+
+		#	Binarize if unweighted was requested
+			if !weighted
+				#	Set all nonzeros to 1.0
+					S.nzval .= 1.0
+			end
+
+		#	Undirected: enforce symmetry
+			if !directed
+				if weighted
+					#	Average to re-impose exact symmetry without changing total mass
+						S = 0.5 .* (S + S')
+				else
+					#	Logical OR for unweighted undirected
+					# 	(since all nonzeros are 1.0 now, max acts as OR)
+						S = max.(S, S')
+						S.nzval .= 1.0  # keep it strictly binary
+				end
+			end
+
+		#	Returns Contracted Adjacency Matrix (communities as supernodes)
+			return S
 	end
 
 #	Helper Function: Single Leiden Run
-	function _leiden_single_run(adj::SparseMatrixCSC,
-	                            resolution::Float64,
-	                            n_iterations::Int;
-	                            seed::Union{Int,Nothing}=nothing)
+	function _leiden_single_run_preprocessed(adj::SparseMatrixCSC,
+	                                        resolution::Float64,
+	                                        n_iterations::Int;
+	                                        directed::Bool = false,
+	                                        seed::Union{Int,Nothing} = nothing)
 		"""
 		Args:
-			adj::SparseMatrixCSC: original symmetric adjacency matrix
+			adj::SparseMatrixCSC: preprocessed adjacency matrix
 			resolution::Float64: resolution parameter γ
 			n_iterations::Int: maximum iterations per run
+			directed::Bool: graph type for modularity (default = false)
 			seed::Union{Int,Nothing}: random seed for this run
 		Returns:
 			NamedTuple: (membership, modularity, n_communities)
 		Notes:
-			Single Leiden run with local moves, refinement, and contraction.
-			Preserves mapping to original nodes throughout multilevel hierarchy.
-			Final modularity computed on original adjacency.
+			Assumes adj is already preprocessed (no transformation needed).
+			Matrix is treated as weighted for modularity calculation.
 		"""
 		
-		#	Initialize run-specific RNG
+		#	Initialize Run-Specific RNG
 			if seed !== nothing
 				Random.seed!(seed)
 			end
 		
-		#	Ensure symmetry and preserve original
-			@assert issparse(adj) "_leiden_single_run: adj must be SparseMatrixCSC"
-			adj = max.(adj, adj')
+		#	Store Original Matrix
+			@assert issparse(adj) "_leiden_single_run_preprocessed: adj must be SparseMatrixCSC"
 			adj_original = adj
 		
-		#	Track original node mapping
+		#	Track Original Node Mapping
 			n_original = size(adj, 1)
 			orig_to_curr = collect(1:n_original)
 		
-		#	Initialize partition
+		#	Initialize Partition
 			membership = collect(1:size(adj, 1))
-			Q = calculate_modularity(adj, membership, resolution)
+			Q = calculate_modularity(adj, membership; weighted=true, directed=directed, γ=resolution)
 			iteration = 0
 			improved = true
 		
-		#	Main Leiden loop
+		#	Main Leiden Loop
 			while improved && iteration < n_iterations
 				improved = false
 				iteration += 1
 				
-				#	Build neighbor lists for current level
+				#	Build Neighbor Lists for Current Level
 					n = size(adj, 1)
 					rows, cols, vals = findnz(adj)
-					neighbors = [Int[] for _ in 1:n]
 					
-					for k in eachindex(vals)
-						i, j = rows[k], cols[k]
-						if i != j
-							push!(neighbors[i], j)
-							push!(neighbors[j], i)
-						end
+					if directed
+						#	Separate In- and Out-Neighbors
+							out_neighbors = [Int[] for _ in 1:n]
+							in_neighbors = [Int[] for _ in 1:n]
+							
+							for k in eachindex(vals)
+								i, j = rows[k], cols[k]
+								if i != j
+									push!(out_neighbors[i], j)
+									push!(in_neighbors[j], i)
+								end
+							end
+							
+						#	Combined Neighbor Set
+							neighbors = [union(Set(out_neighbors[i]), Set(in_neighbors[i])) |> collect for i in 1:n]
+					else
+						#	Undirected: Bidirectional Neighbors
+							neighbors = [Int[] for _ in 1:n]
+							
+							for k in eachindex(vals)
+								i, j = rows[k], cols[k]
+								if i != j
+									push!(neighbors[i], j)
+									push!(neighbors[j], i)
+								end
+							end
 					end
 				
-				#	Phase 1: Local moves
+				#	Phase 1: Local Moves
 					node_order = randperm(n)
 					
 					for node in node_order
 						current_comm = membership[node]
 						
-						#	Identify neighbor communities
+						#	Identify Neighbor Communities
 							neighbor_comms = Set{Int}()
 							for other in neighbors[node]
 								push!(neighbor_comms, membership[other])
 							end
 						
-						#	Evaluate best move
+						#	Evaluate Best Move
 							best_comm = current_comm
 							best_Q = Q
 							
@@ -3110,9 +3348,12 @@ module Large_Graph_Similarity
 									continue
 								end
 								
-								#	Test move
+								#	Test Move
 									membership[node] = target
-									new_Q = calculate_modularity(adj, membership, resolution)
+									new_Q = calculate_modularity(adj, membership; 
+									                            weighted=true, 
+									                            directed=directed, 
+									                            γ=resolution)
 									
 									if new_Q > best_Q
 										best_Q = new_Q
@@ -3120,7 +3361,7 @@ module Large_Graph_Similarity
 									end
 							end
 						
-						#	Apply optimal move
+						#	Apply Optimal Move
 							if best_comm != current_comm
 								membership[node] = best_comm
 								Q = best_Q
@@ -3130,28 +3371,36 @@ module Large_Graph_Similarity
 							end
 					end
 				
-				#	Phase 2: Connectivity refinement
-					_refine_connectivity!(adj, membership)
+				#	Phase 2: Connectivity Refinement
+					_refine_connectivity!(adj, membership; directed=directed)
 				
-				#	Phase 3: Graph contraction
+				#	Phase 3: Graph Contraction
 					unique_comms = sort(unique(membership))
 					label_map = Dict(old => new for (new, old) in enumerate(unique_comms))
 					
-					#	Update original-to-current mapping
+					#	Update Original-to-Current Mapping
 						for i in 1:n_original
 							orig_to_curr[i] = label_map[membership[orig_to_curr[i]]]
 						end
 					
-					#	Contract and reset
-						adj = _contract_by_membership(adj, membership)
-						adj = max.(adj, adj')
+					#	Contract (already preprocessed, so preserve type)
+						adj = _contract_by_membership(adj, membership; 
+						                            directed=directed, 
+						                            weighted=true)
+						
 						membership = collect(1:size(adj, 1))
-						Q = calculate_modularity(adj, membership, resolution)
+						Q = calculate_modularity(adj, membership; 
+						                        weighted=true, 
+						                        directed=directed, 
+						                        γ=resolution)
 			end
 		
-		#	Map back to original nodes
+		#	Map Back to Original Nodes
 			final_membership = [membership[orig_to_curr[i]] for i in 1:n_original]
-			Q_final = calculate_modularity(adj_original, final_membership, resolution)
+			Q_final = calculate_modularity(adj_original, final_membership; 
+			                              weighted=true, 
+			                              directed=directed, 
+			                              γ=resolution)
 		
 		#	Return Community Solution
 			return (
@@ -3163,66 +3412,152 @@ module Large_Graph_Similarity
 
 #	Leiden Community Detection (Main Interface)
 	function leiden_community_detection(edges::DataFrame;
-	                                   resolution::Float64=1.0,
+	                                   nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}}=nothing,
 	                                   n_iterations::Int=10,
-	                                   n_runs::Int=1,
-	                                   weighted::Bool=false,
-	                                   seed::Union{Int,Nothing}=nothing)
+	                                   n_runs::Int=5,
+	                                   resolution::Float64=1.0,
+	                                   weighted::Bool=true,
+	                                   directed::Bool=true,
+	                                   seed::Union{Nothing,Int}=nothing,
+	                                   test_flag::Bool=false)
 		"""
 		Args:
 			edges::DataFrame: edge list with :src, :dst, optional :weight
-			resolution::Float64: resolution parameter γ (default = 1.0)
-			n_iterations::Int: max iterations per run (default = 10)
-			n_runs::Int: independent runs (default = 1)
-			weighted::Bool: use edge weights (default = false)
-			seed::Union{Int,Nothing}: base random seed
+			nodes::Union{Nothing,DataFrame,Vector}: node universe (optional)
+			n_iterations::Int: max iterations per Leiden run (default = 10)
+			n_runs::Int: number of multi-start runs (default = 5)
+			resolution::Float64: γ resolution parameter (default = 1.0)
+			weighted::Bool: treat graph as weighted (default = true)
+			directed::Bool: treat graph as directed (default = true)
+			seed::Union{Nothing,Int}: RNG seed per run if provided
+			test_flag::Bool: print diagnostics (default = false)
 		Returns:
 			NamedTuple: (membership, modularity, n_communities, node_names)
 		Notes:
-			Multi-run Leiden returning best modularity partition.
-			Each run uses seed + run - 1 for reproducibility.
+			Enforces four preprocessing cases:
+			1) unweighted & undirected: binarize, loops={0,2}, symmetrize via max
+			2) unweighted & directed: binarize, loops={0,1}, no symmetrization
+			3) weighted & undirected: error if binary, symmetrize via 0.5*(A+A')
+			4) weighted & directed: error if binary, no symmetrization
 		"""
 		
-		#	Build adjacency matrix
-			clean_edges = _aggregate_multi_edges(edges; agg_func=(weighted ? sum : maximum))
-			use_weights = weighted && hasproperty(clean_edges, :weight)
-			adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=use_weights)
-			adj = max.(adj, adj')
+		#	Build Raw Adjacency Matrix
+			adj, node_to_idx, idx_to_node = _graph_to_sparse_matrix(edges; 
+			                                                        nodes=nodes, 
+			                                                        weighted=true)
+			@assert issparse(adj) "Adjacency must be sparse"
+			n = size(adj, 1)
+			@assert size(adj, 2) == n "Adjacency must be square"
 		
-		#	Track best result across runs
-			best_membership = Vector{Int}()
-			best_modularity = -Inf
-			best_n_communities = 0
-		
-		#	Execute multiple runs
-			for run in 1:n_runs
-				seed_run = (seed === nothing) ? nothing : (seed + run - 1)
-				res = _leiden_single_run(adj, resolution, n_iterations; seed=seed_run)
-				
-				if res.modularity > best_modularity
-					best_modularity = res.modularity
-					best_membership = res.membership
-					best_n_communities = res.n_communities
-				end
+		#	Handle Empty Graph
+			if n == 0
+				return (
+					membership = Int[],
+					modularity = 0.0,
+					n_communities = 0,
+					node_names = idx_to_node
+				)
 			end
 		
-		return (
-			membership = best_membership,
-			modularity = best_modularity,
-			n_communities = best_n_communities,
-			node_names = idx_to_node
-		)
+		#	Preprocess Matrix Based on Graph Type
+			A_eff = copy(adj)
+			
+			if !weighted && !directed
+				#	Case 1: Unweighted Undirected
+					if !_is_symmetric(A_eff)  # Check actual symmetry
+						A_eff = max.(A_eff, A_eff')
+					end
+					A_eff = _binarize_matrix(A_eff; directed=false)
+					
+			elseif !weighted && directed
+				#	Case 2: Unweighted Directed
+					A_eff = _binarize_matrix(A_eff; directed=true)
+					
+			elseif weighted && !directed
+				#	Case 3: Weighted Undirected
+					if _is_binary_matrix(A_eff; directed=false)
+						throw(ArgumentError("weighted=true not allowed on binary matrix (undirected)"))
+					end
+					if !_is_symmetric(A_eff)  # Check actual symmetry
+						A_eff = 0.5 .* (A_eff + A_eff')
+					end
+					
+			else
+				#	Case 4: Weighted Directed
+					if _is_binary_matrix(A_eff; directed=true)
+						throw(ArgumentError("weighted=true not allowed on binary matrix (directed)"))
+					end
+					# No transformation needed
+			end
+		
+		#	Debug Output
+			if test_flag
+				println("DEBUG leiden: n=$n  weighted=$weighted  directed=$directed")
+				println("DEBUG leiden: symmetric? ", _is_symmetric(A_eff))  # Actual check
+				println("DEBUG leiden: nnz(A_eff)=", nnz(A_eff), "  sum(A_eff)=", sum(A_eff))
+			end
+		
+		#	Multi-Start Leiden Optimization
+			best_Q = -Inf
+			best_m = Vector{Int}()
+			
+			for run in 1:n_runs
+				#	Set Run-Specific Seed
+					local_seed = seed === nothing ? nothing : seed + run - 1
+				
+				#	Execute Single Run on Preprocessed Matrix
+					res = _leiden_single_run_preprocessed(A_eff, resolution, n_iterations; 
+					                                     directed=directed, 
+					                                     seed=local_seed)
+				
+				#	Update Best Solution
+					if res.modularity > best_Q
+						best_Q = res.modularity
+						best_m = res.membership
+					end
+			end
+		
+		#	Handle Isolates if Node Universe Provided
+			if nodes !== nothing && length(best_m) < size(idx_to_node, 1)
+				#	Assign Isolates to Singleton Communities
+					full_membership = zeros(Int, length(idx_to_node))
+					next_comm = maximum(best_m) + 1
+					
+					for i in 1:length(idx_to_node)
+						if i ≤ length(best_m)
+							full_membership[i] = best_m[i]
+						else
+							full_membership[i] = next_comm
+							next_comm += 1
+						end
+					end
+					
+					best_m = full_membership
+			end
+		
+		#	Return Best Solution with Node Names
+			return (
+				membership = best_m,
+				modularity = best_Q,
+				n_communities = length(unique(best_m)),
+				node_names = idx_to_node
+			)
 	end
 	@doc raw"""
 	**Description**
 	Detects communities using the Leiden algorithm with guaranteed well-connected 
 	communities through local moves, refinement, and multilevel optimization.
+	Supports both directed and undirected graphs with optional weights.
 
 	**Usage**
-	`leiden_community_detection(edges; resolution=1.0, n_iterations=10, n_runs=1, weighted=false, seed=nothing)`
+	`leiden_community_detection(edges; nodes=nothing, resolution=1.0, n_iterations=10, n_runs=1, weighted=false, directed=false, seed=nothing)`
 
 	**Arguments**
 	- `edges::DataFrame`: Edge list with `:src` and `:dst` columns, optionally `:weight`
+	- `nodes::Union{Nothing,DataFrame,Vector}`: Node universe (includes isolates if provided)
+	  - `Nothing`: Infer from edges (default, excludes isolates)
+	  - `DataFrame`: Must have `:id` and `:label` columns
+	  - `Vector`: Node IDs as strings
 	- `resolution::Float64`: Resolution parameter γ (default `1.0`)
 	  - γ < 1.0: Larger communities
 	  - γ = 1.0: Standard modularity
@@ -3230,18 +3565,18 @@ module Large_Graph_Similarity
 	- `n_iterations::Int`: Maximum iterations per run (default `10`)
 	- `n_runs::Int`: Independent runs to perform (default `1`)
 	- `weighted::Bool`: Use edge weights if present (default `false`)
+	- `directed::Bool`: Treat graph as directed (default `false`)
 	- `seed::Union{Int,Nothing}`: Random seed for reproducibility
 
 	**Details**
 	Three-phase optimization per iteration:
 	1. **Local Moves**: Greedy node moves to neighboring communities
-	2. **Refinement**: Ensures internal connectivity within communities
-	3. **Contraction**: Hierarchical aggregation into supernodes
+	2. **Refinement**: Ensures connectivity (weak for directed)
+	3. **Contraction**: Hierarchical aggregation preserving directionality
 	
-	Optimizes modularity:
-```
-	Q = (1/2m) Σ[A_ij - γ(k_i·k_j)/(2m)] δ(c_i, c_j)
-```
+	Optimizes modularity based on graph type:
+	- **Undirected**: Q = (1/2m) Σ[A_ij - γ(k_i·k_j)/(2m)] δ(c_i, c_j)
+	- **Directed**: Q = (1/m) Σ[A_ij - γ(k_i^out·k_j^in)/m] δ(c_i, c_j)
 
 	**Value**
 	NamedTuple containing:
@@ -3252,15 +3587,23 @@ module Large_Graph_Similarity
 
 	**Examples**
 ```julia
-	# Standard detection
+	# Undirected unweighted (default)
 	result = leiden_community_detection(edges)
+	
+	# Directed weighted with isolates
+	result = leiden_community_detection(edges;
+	                                   nodes=node_df,
+	                                   weighted=true,
+	                                   directed=true,
+	                                   resolution=0.8,
+	                                   n_runs=10,
+	                                   seed=42)
 	
 	# Multiple runs for robustness
 	result = leiden_community_detection(edges;
-	                                   resolution=0.8,
 	                                   n_runs=10,
-	                                   weighted=true,
-	                                   seed=42)
+	                                   weighted=true)
+```
 
 	**References**
 	Traag VA, Waltman L, van Eck NJ (2019) Scientific Reports 9(1):5233
@@ -3602,7 +3945,6 @@ module Large_Graph_Similarity
 	1. Weir WH et al. (2017) Algorithms 10(3):93. doi:10.3390/a10030093
 	2. github.com/wweir827/CHAMP
 	""" champ_community_detection
-
 
 #	Helper: graph (nodes + edges) to sparse adjacency with fixed node universe
 	function _graph_to_sparse_matrix(edges::DataFrame;

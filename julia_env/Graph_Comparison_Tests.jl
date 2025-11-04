@@ -2288,12 +2288,21 @@
 	authority_centrality = salsa_centrality(agent_agent_all_com.edges; score=:authority)
 
 #	Leiden Community Detection
-	all_comm_communities = leiden_community_detection(agent_agent_all_com.edges; n_iterations=10, n_runs=5, resolution=1.0, weighted=false)
+	nodes = agents[:,(1:2)]
+	rename!(nodes, ["id", "label"])
+	all_comm_communities = leiden_community_detection(agent_agent_all_com.edges; nodes=nodes, n_iterations=10, 
+													  n_runs=5, resolution=1.0, weighted=false)
 	community_index = DataFrame(node = all_comm_communities.node_names, community = all_comm_communities.membership)
 	comm_sizes = combine(groupby(community_index, :community), nrow => :count)
 	sort!(comm_sizes, :count, rev = true)
 
-	all_comm_communities_weighted = leiden_community_detection(agent_agent_all_com.edges; n_iterations=10, n_runs=5, resolution=1.0, weighted=true)
+	all_comm_communities = leiden_community_detection(agent_agent_all_com.edges; nodes=nodes, n_iterations=10, 
+													  n_runs=5, resolution=1.0, weighted=true)
+	community_index = DataFrame(node = all_comm_communities.node_names, community = all_comm_communities.membership)
+	comm_sizes = combine(groupby(community_index, :community), nrow => :count)
+	sort!(comm_sizes, :count, rev = true)
+
+	all_comm_communities_weighted = leiden_community_detection(agent_agent_all_com.edges; nodes=nodes, n_iterations=10, n_runs=5, resolution=1.0, weighted=true)
 	community_index = DataFrame(node = all_comm_communities_weighted.node_names, community = all_comm_communities_weighted.membership)
 	comm_sizes = combine(groupby(community_index, :community), nrow => :count)
 	sort!(comm_sizes, :count, rev = true)
@@ -2330,7 +2339,7 @@
 
 #	Testing Leiden Community Detection: Weighted
 	res_w = leiden_community_detection(agent_agent_all_com.edges; resolution=1.0, weighted=true, seed=42)
-	println("Unweighted modularity: ", res_w.modularity)
+	println("Weighted modularity: ", res_w.modularity)
 	display(_community_sizes(res_w.membership))
 
 	t_w = test_leiden_consistency(agent_agent_all_com.edges; resolution=1.0, n_tests=10, weighted=true, verbose=true)
@@ -2371,12 +2380,18 @@
 	partition = CSV.read("/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data/balikatan_all_comm_partition_leiden_gamma1.csv",
 							               DataFrame, types=Dict(1 => String))
 	rename!(partition, ["node", "community"])
+	membership = partition.community
 
 	expected_sizes = Dict(0=>388, 2=>193, 5=>137, 16=>118)
 	perform_sanity_checks = true
 	node_col = :node
 	community_col = :community
 	sentinel_ids =  ["828033366712688640", "24112747", "25930421", "18749026"]
+	sentindel_id = "828033366712688640"
+	γ = 1.0
+	directed = true
+	weighted = true
+	adj, node_to_idx, idx_to_node = _graph_to_sparse_matrix(edges; nodes=nodes, weighted=true)
 
 #	Helper: graph (nodes + edges) to sparse adjacency with fixed node universe
 	function _graph_to_sparse_matrix(edges::DataFrame;
@@ -2462,73 +2477,6 @@
 
 		#	Return adjacency and mappings
 			return (adj_matrix, node_to_idx, idx_to_node)
-	end
-
-	function test_calculate_modularity_igraph(adj::SparseMatrixCSC, membership::Vector{Int}, γ::Float64=1.0)
-		"""
-		Args:
-			edges::DataFrame
-				Required columns: :src, :dst
-				Optional column:  :weight
-				src/dst are node IDs (treated as String; supports long IDs)
-		
-			nodes::Union{Nothing,DataFrame,Vector{<:AbstractString}}
-				Nothing  → infer nodes from edges (isolates excluded)
-				DataFrame: columns :id and :label (both string vectors). Uses :id as the ID universe.
-				Vector   : string vector of node IDs forming the ID universe (includes isolates, if any)
-		
-			weighted::Bool
-				If true and edges has :weight, use it; otherwise use ones.
-				If false, ignore any :weight column and use ones.
-		
-		Returns:
-			Tuple{SparseMatrixCSC{Float64,Int64}, Dict{Any,Int}, Vector{Any}}
-				(adj_matrix, node_to_idx, idx_to_node)
-		
-		Notes:
-			- When `nodes` is provided, the returned matrix is sized to that universe
-			(so isolates are included). All edge endpoints must exist in `nodes`.
-			- When `nodes` is not provided, falls back to `_edgelist_to_sparse_matrix`
-			which infers the node set from edge endpoints only.
-		"""
-		#	Quality Check
-			@assert issymmetric(adj) "calculate_modularity_igraph: adj must be symmetric"
-			n = size(adj,1)
-			@assert length(membership) == n "calculate_modularity_igraph: membership length mismatch"
-
-		#	Re-index membership to 1..C (handles 0-based, gaps, etc.)
-			labs = unique(membership)
-			sort!(labs)
-			lab2col = Dict(labs[i] => i for i in eachindex(labs))
-			m = [lab2col[x] for x in membership]
-			C = length(labs)
-
-		#	Effective totals (loops doubled on diagonal, like igraph)
-			d = diag(adj)                          # original loop weights
-			k = vec(sum(adj, dims=2))              # row sums from adj
-			k_eff = k .+ d                         # loops contribute twice to degree
-			two_m_eff = sum(adj) + sum(d)          # 2 * (nonloops + loops)
-			if two_m_eff == 0.0
-				return 0.0
-			end
-			m_eff = two_m_eff / 2.0
-
-		#	Community indicator S (n×C)
-			S = sparse(collect(1:n), m, ones(Float64, n), n, C)
-
-		#	Internal weight term: with loops doubled
-		# 	Aeff = adj with diag doubled ⇒ Aeff = adj + Diag(d)
-		#	Internal_weight_total = 0.5 * sum(diag(S' * Aeff * S))
-			Aeff_diag = spdiagm(0 => d)
-			Eeff2 = diag(S' * (adj + Aeff_diag) * S)   # community block sums (counts off-diagonals twice; loops twice)
-			internal_weight_total = 0.5 * sum(Eeff2)   # convert block-sum to undirected total
-
-		#	Null model term (undirected): sum_c (K_eff[c]/(2m_eff))^2
-			Keff = vec(S' * k_eff)
-			Q = internal_weight_total / m_eff - γ * sum((Keff ./ (2.0*m_eff)).^2)
-
-		#	Return Modularity
-			return Q
 	end
 
 #	Helper Function for modularity_vitality: getSparseA(edges) → A
@@ -3028,10 +2976,6 @@
 
 		#	Optional: test walk-through for sentinel_id
 			if test_flag
-				#	Readable externalID → rowIndex map
-					clean_edges = _aggregate_multi_edges(edges; agg_func=sum)
-					adj_matrix, node_to_idx, idx_to_node = _graph_to_sparse_matrix(clean_edges, nodes=nodes, weighted=true)
-
 				#	Resolve sentinel row index
 					node_to_idx = [1:1:nrow(node_index);]
 					node_to_idx = node_to_idx[node_index.node .== sentinel_id]
@@ -3040,7 +2984,6 @@
 
 				#	Global/Q₀ and community context
 					Q0 = test_calculate_modularity(A, membership,1.0)
-
 					println("DEBUG newMods: mass (m) = ", m, " | Q₀ = ", Q0)
 
 					if i_s !== nothing
