@@ -3996,92 +3996,6 @@ module Large_Graph_Similarity
 	2. github.com/wweir827/CHAMP
 	""" champ_community_detection
 
-#	Helper: graph (nodes + edges) to sparse adjacency with fixed node universe
-	function _graph_to_sparse_matrix(edges::DataFrame;
-									nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}}=nothing,
-									weighted::Bool=true)
-		"""
-		Args:
-			edges::DataFrame
-				Required columns: :src, :dst
-				Optional column:  :weight
-				src/dst are node IDs (treated as String; supports long IDs)
-		
-			nodes::Union{Nothing,DataFrame,Vector{<:AbstractString}}
-				Nothing  → infer nodes from edges (isolates excluded)
-				DataFrame: columns :id and :label (both string vectors). Uses :id as the ID universe.
-				Vector   : string vector of node IDs forming the ID universe (includes isolates, if any)
-		
-			weighted::Bool
-				If true and edges has :weight, use it; otherwise use ones.
-				If false, ignore any :weight column and use ones.
-		
-		Returns:
-			Tuple{SparseMatrixCSC{Float64,Int64}, Dict{Any,Int}, Vector{Any}}
-				(adj_matrix, node_to_idx, idx_to_node)
-		
-		Notes:
-			- When `nodes` is provided, the returned matrix is sized to that universe
-			(so isolates are included). All edge endpoints must exist in `nodes`.
-			- When `nodes` is not provided, falls back to `_edgelist_to_sparse_matrix`
-			which infers the node set from edge endpoints only.
-		"""
-
-		#	Basic validation for edge columns
-			@assert hasproperty(edges, :src) && hasproperty(edges, :dst) "_graph_to_sparse_matrix: edges must have :src and :dst"
-
-		#	Fallback: no nodes supplied → just delegate to the existing helper
-			if nodes === nothing
-				return _edgelist_to_sparse_matrix(edges; weighted=weighted)
-			end
-
-		#	Build the fixed node universe (idx_to_node) and mapping (node_to_idx)
-			ids = String[]
-			if nodes isa DataFrame
-				#	Nodes as a DataFrame of IDs and Labels (Screen Names)
-					ndf = nodes::DataFrame
-					@assert hasproperty(ndf, :id) && hasproperty(ndf, :label) "_graph_to_sparse_matrix: nodes DataFrame must have :id and :label"
-					ids = String.(ndf.id)
-			else
-				#	Vector of node IDs
-					ids = String.(nodes::AbstractVector{<:AbstractString})
-			end
-
-		#	Specifyign Node Specific Return Objects
-			n = length(ids)
-			node_to_idx = Dict{Any,Int}(id => i for (i, id) in enumerate(ids))
-			if(typeof(nodes) == DataFrame)
-				idx_to_node = nodes
-			else
-				idx_to_node = Vector{Any}(ids)  # keep Any to match requested return type
-			end
-
-		#	Map edge endpoints to indices (validate all endpoints are known)
-			src_ids = String.(edges.src)
-			dst_ids = String.(edges.dst)
-
-			unknown_src = Set{String}(s for s in src_ids if !haskey(node_to_idx, s))
-			unknown_dst = Set{String}(d for d in dst_ids if !haskey(node_to_idx, d))
-			if !isempty(unknown_src) || !isempty(unknown_dst)
-				missing_ids = union(unknown_src, unknown_dst)
-				examples = join(collect(Iterators.take(missing_ids, 5)), ", ")
-				throw(ArgumentError("_graph_to_sparse_matrix: edges reference IDs not present in supplied nodes (examples: $examples)"))
-			end
-
-			src_idx = [node_to_idx[s] for s in src_ids]
-			dst_idx = [node_to_idx[d] for d in dst_ids]
-
-		#	Determine edge weights per spec
-			use_weights = weighted && hasproperty(edges, :weight)
-			weights = use_weights ? Float64.(edges.weight) : ones(Float64, nrow(edges))
-
-		#	Construct sparse adjacency (no symmetrization here; caller decides)
-			adj_matrix = sparse(src_idx, dst_idx, weights, n, n)
-
-		#	Return adjacency and mappings
-			return (adj_matrix, node_to_idx, idx_to_node)
-	end
-
 #	Helper Function for modularity_vitality: getSparseA(edges) → A
 	function getSparseA(edges::DataFrame;
 						nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}}=nothing,
@@ -4986,8 +4900,9 @@ module Large_Graph_Similarity
 	GitHub: github.com/tmagelinski/modularity_vitality
 	""" modularity_vitality
 
-
 #   CORE DECOMPOSITION (Considering Using ORA K-Core Decomposition Here)
+
+
 
 #   In-Core Number
 
