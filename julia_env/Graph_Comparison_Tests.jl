@@ -2035,55 +2035,6 @@
 			return results
 	end
 
-#	Modularity Vitality Tests: Comparing m calculations
-	function diagnose_m_calculation(edges::DataFrame)
-		"""
-		Args:
-			edges::DataFrame: edge list with :src, :dst, optional :weight
-		Returns:
-			Tuple: (m_original, m_from_A, m_with_diag, m_no_loops)
-		Notes:
-			Compares different methods for computing m (total edge weight / 2):
-			- Original edge sum
-			- From getSparseA (sum(A)/2)
-			- From A with diagonal adjustment ((sum(A)+sum(diag(A)))/2)
-			- From A excluding self-loops
-		"""
-
-		#	Method 1: From original edges (raw input)
-			if hasproperty(edges, :weight)
-				m_original = sum(Float64.(edges.weight))
-			else
-				m_original = nrow(edges)
-			end
-
-		#	Method 2: From getSparseA (Matt-faithful adjacency)
-			A = getSparseA(edges)
-			m_from_A = sum(A) / 2.0
-
-		#	Method 3: Add back diagonal mass explicitly (loop weights contribute twice)
-			m_with_diag = (sum(A) + sum(diag(A))) / 2.0
-
-		#	Method 4: Remove all self-loops before summing
-			A_no_diag = copy(A)
-			for i in 1:size(A, 1)
-				A_no_diag[i, i] = 0.0
-			end
-			m_no_loops = sum(A_no_diag) / 2.0
-
-		#	Diagnostics summary
-			println("=== m calculation diagnostics ===")
-			println("Method 1 (original edges):        $m_original")
-			println("Method 2 (sum(A)/2):              $m_from_A")
-			println("Method 3 (sum(A)+diag)/2:         $m_with_diag")
-			println("Method 4 (no self-loops, sum/2):  $m_no_loops")
-			println("Number of self-loops:             $(sum(edges.src .== edges.dst))")
-			println("Sum of diagonal (Aii):            $(sum(diag(A)))")
-
-		#	Return Different M 
-			return (m_original, m_from_A, m_with_diag, m_no_loops)
-	end
-
 ##########################
 #   GRAPH IMPORT TESTS   #
 ##########################
@@ -2335,8 +2286,13 @@
 	sort!(comm_sizes, :count, rev = true)
 
 #	Modularity Vitality: Fixed Resolution & Sweep
-	modularity_vitality(agent_agent_all_com.edges; resolution_sweep=false, resolution=1.0)
-	modularity_vitality(agent_agent_all_com.edges; resolution_sweep=true, n_resolutions=20, weighted=true)
+	nodes = agents[:,(1:2)]
+	rename!(nodes, ["id", "label"])
+	modularity_vitality(agent_agent_all_com.edges; nodes=nodes, directed=true, weighted=true, resolution_sweep=false, resolution=1.0)
+	modularity_vitality(agent_agent_all_com.edges; nodes=nodes, directed=true, weighted=true, resolution_sweep=true, n_resolutions=20)
+
+	modularity_vitality(agent_agent_all_com.edges; directed=true, weighted=true, resolution_sweep=false, resolution=1.0)
+	modularity_vitality(agent_agent_all_com.edges; directed=true, weighted=true, resolution_sweep=true, n_resolutions=20)
 
 #	CONDUCT TESTS
 
@@ -2394,47 +2350,716 @@
 						                       n_resolutions = 15, weighted = true, directed = true, n_runs_per_gamma = 10, n_iterations_per_run = 10,
 							                   seed = 45)
 
-#	Modularity Vitality Tests: Python Tests
+#	Modularity Vitality Tests: Python Comparison Tests
 	community_index = CSV.read("/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data/balikatan_all_comm_partition_leiden_gamma1.csv",
 							   DataFrame, types=Dict(1 => String))
 	rename!(community_index, ["node", "community"])
 
-#	START BACK HERE!!!
-
-#	Compare Modularity Vitality to Python Scores
+#	Construct Nodes File for Comparison Tests
+	nodes = agents[:,(1:2)]
+	rename!(nodes, ["id", "label"])
+	
+#	Compare Modularity Vitality to Python Scores: Spearman Rank Correlation: 1.0 :-)
+	fixed_modularity = modularity_vitality(agent_agent_all_com.edges; nodes=nodes, directed=true, weighted=true, resolution_sweep=false, 
+					                       provided_membership=community_index)
 	python_results = CSV.read("/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data/balikatan_all_comm_vitality_results_python_gamma1.csv", 
 							  DataFrame, types=Dict(1 => String))
-
 	vitality_comparison = leftjoin(fixed_modularity.results_df[:,(1:2)], python_results[:,(1:2)], on=:node)
-	
-#	Construct Comparison Set for Modularity Tests: ORA Tests
-	res_1_modularity = modularity_vitality(agent_agent_all_com.edges; resolution_sweep=false, resolution=1.0)
-	keep_index = DataFrame(node = res_1_modularity.results_df.node, keep = ones(Int64, length(res_1_modularity.results_df.node)))
+	vitality_comparison.vitality = convert.(Float64, vitality_comparison.vitality)
+	vitality_comparison.delta = vitality_comparison.modularity_vitality .- vitality_comparison.vitality
+	mean(vitality_comparison.delta)
+	std(vitality_comparison.delta)
+	ρ = corspearman(Float64.(vitality_comparison.modularity_vitality), Float64.(vitality_comparison.vitality))
+	println("Spearman Rank Correlation: ", round(ρ, digits=6))
 
+#	Construct Comparison Set for Modularity Tests: ORA Tests
+	res_1_modularity = modularity_vitality(agent_agent_all_com.edges; nodes=nodes, directed=true, weighted=true, resolution_sweep=false, 
+					                       resolution=1.0)
+
+#	Compare Modularity Vitality Scores to ORA Hub & Bridge Scores: Hub ρ (0.97) and Bridge ρ (0.72)
 	ora_moduarlity_scores = CSV.read("/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data/All_Comm_Modularity_Vitality_Scores.csv", 
 					                 DataFrame, types=Dict(1 => String))
 	rename!(ora_moduarlity_scores, ["node", "Modularity_Vitality_Bridge_All_Comm", "Modularity_Vitality_Hub_All_Comm", "community"])
-	leftjoin!(keep_index, ora_moduarlity_scores, on=:node)
-	keep_index[!,3] = convert.(Float64, keep_index[:,3])
-	keep_index[!,4] = convert.(Float64, keep_index[:,4])
-	keep_index[!,5] = convert.(Int64, keep_index[:,5])
-	select!(keep_index, [1,3,4,5])
 	
-#	Comparing Modularity Vitality Hub and Bridge Scores to ORA
-	leftjoin!(keep_index, res_1_modularity.results_df[:,(1:3)], on=:node)
-	keep_index = keep_index[:,[1,4,3,5,2,6]]
-	keep_index.modularity_vitality_hub = convert.(Float64, keep_index.modularity_vitality_hub)
-	keep_index.modularity_vitality_bridge = convert.(Float64, keep_index.modularity_vitality_bridge)
+	combined_scores = leftjoin!(ora_moduarlity_scores[:,(1:3)], res_1_modularity.results_df[:,[1,3,4]], on=:node)
+	combined_scores = combined_scores[:,[1,3,4,2,5]]
+	combined_scores.modularity_vitality_hub = convert.(Float64, combined_scores.modularity_vitality_hub)
+	combined_scores.modularity_vitality_bridge = convert.(Float64, combined_scores.modularity_vitality_bridge)
 
-	hub_scores = keep_index[:,[1,3,4]]
-	DataFrames.sort(hub_scores, [:Modularity_Vitality_Hub_All_Comm], rev=[true])
+	hub_ρ = corspearman(Float64.(combined_scores.Modularity_Vitality_Hub_All_Comm), Float64.(combined_scores.modularity_vitality_hub))
+	bridge_ρ = corspearman(Float64.(combined_scores.Modularity_Vitality_Bridge_All_Comm), Float64.(combined_scores.modularity_vitality_bridge))
 
-	bridge_scores = keep_index[:,[1,5,6]]
-	DataFrames.sort(bridge_scores, [:Modularity_Vitality_Bridge_All_Comm], rev=[true])
+#	Python Partition Comparision: Hub 0.89 and Bridge 0.27
+	combined_scores = leftjoin!(ora_moduarlity_scores[:,(1:3)], fixed_modularity.results_df[:,[1,3,4]], on=:node)
+	combined_scores = combined_scores[:,[1,3,4,2,5]]
+	combined_scores.modularity_vitality_hub = convert.(Float64, combined_scores.modularity_vitality_hub)
+	combined_scores.modularity_vitality_bridge = convert.(Float64, combined_scores.modularity_vitality_bridge)
 
+	hub_ρ = corspearman(Float64.(combined_scores.Modularity_Vitality_Hub_All_Comm), Float64.(combined_scores.modularity_vitality_hub))
+	bridge_ρ = corspearman(Float64.(combined_scores.Modularity_Vitality_Bridge_All_Comm), Float64.(combined_scores.modularity_vitality_bridge))
+
+# 	Hub ranks
+	combined_scores.hub_rank_vitality = tiedrank(-combined_scores.modularity_vitality_hub)
+	combined_scores.hub_rank_allcomm  = tiedrank(-combined_scores.Modularity_Vitality_Hub_All_Comm)
+
+# 	Bridge ranks (if needed)
+	combined_scores.bridge_rank_vitality = tiedrank(-combined_scores.modularity_vitality_bridge)
+	combined_scores.bridge_rank_allcomm  = tiedrank(-combined_scores.Modularity_Vitality_Bridge_All_Comm)
+
+
+#	Compare Python and ORA Hub and Bridge Scores
+	python_ora = leftjoin!(python_results[:,[1,3,4]], ora_moduarlity_scores[:,(1:3)], on=:node)
+	python_ora = python_ora[:,[1,5,2,4,3]]
+	python_ora.Modularity_Vitality_Hub_All_Comm = convert.(Float64, python_ora.Modularity_Vitality_Hub_All_Comm)
+	python_ora.Modularity_Vitality_Bridge_All_Comm = convert.(Float64, python_ora.Modularity_Vitality_Bridge_All_Comm)
+
+	hub_ρ = corspearman(Float64.(python_ora.Modularity_Vitality_Hub_All_Comm), Float64.(python_ora.raw_hub))
+	bridge_ρ = corspearman(Float64.(python_ora.Modularity_Vitality_Bridge_All_Comm), Float64.(python_ora.raw_bridge))
+
+#	Writing-Out Result to Share with Jeff
+	directory = "/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data"
+	CSV.write(string(directory,"/","Python_ORA_Modularity_Vitality_Comparison.csv"), python_ora)
+	CSV.write(string(directory,"/","Julia_Python_Modularity_Vitalities.csv"), vitality_comparison)
+
+#	Once I hear back from Jeff about Bridge scores, revise this analysis.
+	
 ##########################
 #   CORE DECOMPOSITION   #
 ##########################
+
+#	FUNCTION TESTS (TEMPORARY)
+
+#	Helper Function for core_decomposition: Compute Initial K-core Degrees
+	function _compute_k_core_degrees(adj::SparseMatrixCSC, mode::String)
+		"""
+		Args:
+			adj::SparseMatrixCSC: adjacency matrix (self-loops already removed)
+			mode::String: "undirected", "in", "out", or "total"
+		Returns:
+			Vector{Int}: degree vector for each node
+		Notes:
+			For directed graphs with mode="undirected", uses total degree.
+		"""
+		
+		#	Extract Degrees Based on Mode
+			n = size(adj, 1)
+			
+			if mode == "undirected" || mode == "total"
+				#	Total Degree (In + Out)
+					degrees = vec(sum(adj, dims=1)) .+ vec(sum(adj, dims=2))
+					return round.(Int, degrees)
+					
+			elseif mode == "in"
+				#	In-Degree Only
+					degrees = vec(sum(adj, dims=1))
+					return round.(Int, degrees)
+					
+			elseif mode == "out"
+				#	Out-Degree Only
+					degrees = vec(sum(adj, dims=2))
+					return round.(Int, degrees)
+					
+			else
+				throw(ArgumentError("Unsupported mode: $mode"))
+			end
+	end
+
+#	Helper Function for core_decomposition: Update K-core Assignments
+	function _update_k_cores!(k::Int, degrees::Vector{Int}, 
+	                         cores::Vector{Int}, active::BitVector)
+		"""
+		Args:
+			k::Int: current k value
+			degrees::Vector{Int}: current degrees
+			cores::Vector{Int}: core assignments (modified in-place)
+			active::BitVector: active node mask
+		Returns:
+			NamedTuple: (frontier::Vector{Int}, core_size::Int)
+		Notes:
+			Sets cores[i] = k for active nodes with degree ≥ k.
+			Returns indices with degree exactly k as frontier.
+		"""
+		
+		#	Initialize Tracking Variables
+			frontier = Int[]
+			core_size = 0
+		
+		#	Update Core Assignments
+			@inbounds for i in eachindex(degrees)
+				if active[i] && degrees[i] >= k
+					cores[i] = k
+					core_size += 1
+					
+					#	Add to Frontier if Degree Exactly k
+						if degrees[i] == k
+							push!(frontier, i)
+						end
+				end
+			end
+		
+		#	Return Results
+			return (frontier = frontier, core_size = core_size)
+	end
+
+#	Helper Function for core_decomposition: Update Neighbor Degrees
+	function _update_k_neighbor_degrees!(adj::SparseMatrixCSC, u::Int, k::Int,
+	                                     degrees::Vector{Int}, active::BitVector,
+	                                     queue::Vector{Int}, mode::String)
+		"""
+		Args:
+			adj::SparseMatrixCSC: adjacency matrix
+			u::Int: node being removed
+			k::Int: current k threshold
+			degrees::Vector{Int}: degree vector (modified in-place)
+			active::BitVector: active mask
+			queue::Vector{Int}: removal queue (modified in-place)
+			mode::String: determines which neighbors affected
+		Returns:
+			Nothing (modifies in-place)
+		Notes:
+			Mode determines neighbor traversal:
+			- "in": affects out-neighbors
+			- "out": affects in-neighbors  
+			- "total": affects both
+			- "undirected": affects all neighbors
+		"""
+		
+		#	Get Adjacency Structure
+			n = size(adj, 1)
+			
+			if mode == "in"
+				#	When u Removed, Out-neighbors Lose In-degree
+					for j in 1:n
+						if active[j] && adj[u, j] > 0
+							degrees[j] -= 1
+							if degrees[j] <= k
+								push!(queue, j)
+							end
+						end
+					end
+					
+			elseif mode == "out"
+				#	When u Removed, In-neighbors Lose Out-degree
+					for i in 1:n
+						if active[i] && adj[i, u] > 0
+							degrees[i] -= 1
+							if degrees[i] <= k
+								push!(queue, i)
+							end
+						end
+					end
+					
+			elseif mode == "total"
+				#	Both Directions Affected
+					for j in 1:n
+						if active[j] && adj[u, j] > 0
+							degrees[j] -= 1
+							if degrees[j] <= k
+								push!(queue, j)
+							end
+						end
+					end
+					for i in 1:n
+						if active[i] && adj[i, u] > 0
+							degrees[i] -= 1
+							if degrees[i] <= k
+								push!(queue, i)
+							end
+						end
+					end
+					
+			else  # undirected
+				#	All Neighbors Affected
+					for j in 1:n
+						if active[j] && (adj[u, j] > 0 || adj[j, u] > 0)
+							degrees[j] -= 1
+							if degrees[j] <= k
+								push!(queue, j)
+							end
+						end
+					end
+			end
+	end
+
+#	Helper Function for core_decomposition: Remove Node Cascade
+	function _remove_k_nodes!(adj::SparseMatrixCSC, frontier::Vector{Int}, k::Int,
+	                          degrees::Vector{Int}, active::BitVector, mode::String)
+		"""
+		Args:
+			adj::SparseMatrixCSC: adjacency matrix
+			frontier::Vector{Int}: initial nodes to remove
+			k::Int: current k threshold
+			degrees::Vector{Int}: degree vector (modified in-place)
+			active::BitVector: active mask (modified in-place)
+			mode::String: decomposition mode
+		Returns:
+			Nothing (modifies in-place)
+		Notes:
+			Implements cascade removal with stack behavior (LIFO).
+		"""
+		
+		#	Initialize Queue with Frontier
+			queue = copy(frontier)
+		
+		#	Process Queue Until Empty
+			while !isempty(queue)
+				u = pop!(queue)  # Stack behavior (LIFO)
+				
+				#	Skip if Already Processed
+					if !active[u]
+						continue
+					end
+				
+				#	Mark as Inactive
+					active[u] = false
+				
+				#	Update Neighbor Degrees
+					_update_k_neighbor_degrees!(adj, u, k, degrees, active, queue, mode)
+			end
+	end
+
+#	Helper Function for core_decomposition: Main K-core Algorithm
+	function _k_core_compute(adj::SparseMatrixCSC, mode::String)
+		"""
+		Args:
+			adj::SparseMatrixCSC: adjacency matrix (no self-loops)
+			mode::String: "undirected", "in", "out", or "total"
+		Returns:
+			Vector{Int}: core number for each node
+		Notes:
+			Peeling algorithm that iteratively removes nodes with degree ≤ k.
+		"""
+		
+		#	Initialize Variables
+			n = size(adj, 1)
+			active = trues(n)
+			cores = zeros(Int, n)
+		
+		#	Compute Initial Degrees
+			degrees = _compute_k_core_degrees(adj, mode)
+		
+		#	Main Peeling Loop
+			k = 0
+			upd = _update_k_cores!(k, degrees, cores, active)
+			frontier = upd.frontier
+			core_size = upd.core_size
+		
+		#	Iterate Through k Values
+			while core_size > 0
+				#	Remove Nodes at Current k
+					_remove_k_nodes!(adj, frontier, k, degrees, active, mode)
+				
+				#	Increment k and Update
+					k += 1
+					upd = _update_k_cores!(k, degrees, cores, active)
+					frontier = upd.frontier
+					core_size = upd.core_size
+			end
+		
+		#	Return Core Assignments
+			return cores
+	end
+
+#	Helper Function for core_decomposition: Compute S-core Strengths
+	function _compute_s_core_strengths(adj::SparseMatrixCSC, mode::String)
+		"""
+		Args:
+			adj::SparseMatrixCSC: weighted adjacency matrix
+			mode::String: "undirected", "in", "out", or "total"
+		Returns:
+			Vector{Float64}: strength (weighted degree) for each node
+		Notes:
+			For undirected mode, assumes matrix already symmetrized.
+		"""
+		
+		#	Extract Strengths Based on Mode
+			if mode == "undirected" || mode == "total"
+				#	Total Strength
+					return vec(sum(adj, dims=1)) .+ vec(sum(adj, dims=2))
+					
+			elseif mode == "in"
+				#	In-Strength
+					return vec(sum(adj, dims=1))
+					
+			elseif mode == "out"
+				#	Out-Strength
+					return vec(sum(adj, dims=2))
+					
+			else
+				throw(ArgumentError("Unsupported mode: $mode"))
+			end
+	end
+
+#	Helper Function for core_decomposition: S-core Out-strength
+	function _s_core_out(W::SparseMatrixCSC, str_initial::Vector{Float64}, atol::Float64)
+		"""
+		Args:
+			W::SparseMatrixCSC: weighted adjacency matrix
+			str_initial::Vector{Float64}: initial out-strengths
+			atol::Float64: tolerance for comparisons
+		Returns:
+			Vector{Int}: s-core assignments
+		Notes:
+			Implements s-core based on out-strength thresholds.
+		"""
+		
+		#	Initialize Variables
+			n = length(str_initial)
+			str_tmp = copy(str_initial)
+			tokeep = str_tmp .> atol
+			s_core = zeros(Int, n)
+			ct = 1
+			prevstart = 1
+		
+		#	Find First Active Node
+			s_thr = 0.0
+			anynonzero = false
+			for i in 1:n
+				if tokeep[i]
+					anynonzero = true
+					s_thr = str_tmp[i]
+					prevstart = i + 1
+					break
+				end
+			end
+		
+		#	Main Peeling Loop
+			while anynonzero
+				#	Find Minimum Strength Threshold
+					for i in prevstart:n
+						if tokeep[i] && str_tmp[i] < s_thr
+							s_thr = str_tmp[i]
+						end
+					end
+				
+				#	Mark Nodes at Threshold
+					nodes_to_remove = Int[]
+					for i in 1:n
+						if tokeep[i] && isapprox(str_tmp[i], s_thr, atol=atol)
+							s_core[i] = ct
+							tokeep[i] = false
+							push!(nodes_to_remove, i)
+						end
+					end
+				
+				#	Update Strengths of Remaining Nodes
+					for i in nodes_to_remove
+						for j in 1:n
+							if tokeep[j]
+								str_tmp[j] -= W[i, j]
+							end
+						end
+					end
+				
+				#	Increment Core Level
+					ct += 1
+				
+				#	Find Next Active Node
+					anynonzero = false
+					for i in 1:n
+						if tokeep[i]
+							anynonzero = true
+							s_thr = str_tmp[i]
+							prevstart = i + 1
+							break
+						end
+					end
+			end
+		
+		#	Return S-core Assignments
+			return s_core
+	end
+
+#	Helper Function for core_decomposition: S-core In-strength
+	function _s_core_in(W::SparseMatrixCSC, str_initial::Vector{Float64}, atol::Float64)
+		"""
+		Args:
+			W::SparseMatrixCSC: weighted adjacency matrix
+			str_initial::Vector{Float64}: initial in-strengths
+			atol::Float64: tolerance for comparisons
+		Returns:
+			Vector{Int}: s-core assignments
+		Notes:
+			Implements s-core based on in-strength thresholds.
+		"""
+		
+		#	Initialize Variables
+			n = length(str_initial)
+			str_tmp = copy(str_initial)
+			tokeep = str_tmp .> atol
+			s_core = zeros(Int, n)
+			ct = 1
+			prevstart = 1
+		
+		#	Find First Active Node
+			s_thr = 0.0
+			anynonzero = false
+			for i in 1:n
+				if tokeep[i]
+					anynonzero = true
+					s_thr = str_tmp[i]
+					prevstart = i + 1
+					break
+				end
+			end
+		
+		#	Main Peeling Loop
+			while anynonzero
+				#	Find Minimum Strength Threshold
+					for i in prevstart:n
+						if tokeep[i] && str_tmp[i] < s_thr
+							s_thr = str_tmp[i]
+						end
+					end
+				
+				#	Mark Nodes at Threshold
+					nodes_to_remove = Int[]
+					for i in 1:n
+						if tokeep[i] && isapprox(str_tmp[i], s_thr, atol=atol)
+							s_core[i] = ct
+							tokeep[i] = false
+							push!(nodes_to_remove, i)
+						end
+					end
+				
+				#	Update Strengths of Remaining Nodes
+					for i in nodes_to_remove
+						for j in 1:n
+							if tokeep[j]
+								str_tmp[j] -= W[j, i]
+							end
+						end
+					end
+				
+				#	Increment Core Level
+					ct += 1
+				
+				#	Find Next Active Node
+					anynonzero = false
+					for i in 1:n
+						if tokeep[i]
+							anynonzero = true
+							s_thr = str_tmp[i]
+							prevstart = i + 1
+							break
+						end
+					end
+			end
+		
+		#	Return S-core Assignments
+			return s_core
+	end
+
+#	Helper Function for core_decomposition: S-core Total-strength
+	function _s_core_total(W::SparseMatrixCSC, atol::Float64)
+		"""
+		Args:
+			W::SparseMatrixCSC: weighted adjacency matrix
+			atol::Float64: tolerance for comparisons
+		Returns:
+			Vector{Int}: s-core assignments
+		Notes:
+			Symmetrizes W as W + W' then computes s-core.
+		"""
+		
+		#	Symmetrize Matrix
+			W_sym = W + W'
+		
+		#	Compute Initial Strengths
+			str_initial = vec(sum(W_sym, dims=1))
+		
+		#	Run S-core Algorithm
+			return _s_core_out(W_sym, str_initial, atol)
+	end
+
+#	Helper Function for core_decomposition: S-core Undirected
+	function _s_core_undirected(W::SparseMatrixCSC, atol::Float64)
+		"""
+		Args:
+			W::SparseMatrixCSC: weighted adjacency matrix (already symmetrized)
+			atol::Float64: tolerance for comparisons
+		Returns:
+			Vector{Int}: s-core assignments
+		Notes:
+			For undirected graphs, assumes W is already symmetric.
+		"""
+		
+		#	Compute Initial Strengths
+			str_initial = vec(sum(W, dims=1))
+		
+		#	Run S-core Algorithm
+			return _s_core_out(W, str_initial, atol)
+	end
+
+#	Helper Function for core_decomposition: Main S-core Algorithm
+	function _s_core_compute(adj::SparseMatrixCSC, mode::String, atol::Float64)
+		"""
+		Args:
+			adj::SparseMatrixCSC: weighted adjacency matrix
+			mode::String: "undirected", "in", "out", or "total"
+			atol::Float64: tolerance for floating-point comparisons
+		Returns:
+			Vector{Int}: s-core number for each node
+		Notes:
+			Generalization of k-core to weighted networks.
+		"""
+		
+		#	Dispatch Based on Mode
+			if mode == "undirected"
+				return _s_core_undirected(adj, atol)
+				
+			elseif mode == "in"
+				str_initial = vec(sum(adj, dims=1))
+				return _s_core_in(adj, str_initial, atol)
+				
+			elseif mode == "out"
+				str_initial = vec(sum(adj, dims=2))
+				return _s_core_out(adj, str_initial, atol)
+				
+			elseif mode == "total"
+				return _s_core_total(adj, atol)
+				
+			else
+				throw(ArgumentError("Unsupported mode: $mode"))
+			end
+	end
+
+#	Core Decomposition: K-core (unweighted) and S-core (weighted)
+	function core_decomposition(edges::DataFrame;
+	                          mode::String="undirected",
+	                          weighted::Bool=false,
+	                          nodes::Union{Nothing,DataFrame,Vector{<:AbstractString}}=nothing,
+	                          atol::Float64=1e-10)
+		"""
+		Args:
+			edges::DataFrame: edge list with :src, :dst, optional :weight
+			mode::String: "undirected", "in", "out", or "total"
+			weighted::Bool: use s-core (true) or k-core (false)
+			nodes::Union{Nothing,DataFrame,Vector}: node universe (optional)
+			atol::Float64: tolerance for s-core comparisons (default = 1e-10)
+		Returns:
+			DataFrame: columns [node, core_number]
+		Notes:
+			Self-loops excluded in all modes.
+			For weighted=false: standard k-core decomposition.
+			For weighted=true: s-core decomposition (Eidsaa & Almaas 2013).
+		"""
+		
+		#	Validation
+			@assert hasproperty(edges, :src) && hasproperty(edges, :dst) "edges must have :src and :dst"
+			@assert mode in ["undirected", "in", "out", "total"] "Invalid mode: $mode"
+			
+		#	Handle Empty Graph
+			if nrow(edges) == 0
+				return DataFrame(node=String[], core_number=Int[])
+			end
+		
+		#	Aggregate Multi-edges
+			agg_func = weighted ? sum : maximum
+			clean_edges = _aggregate_multi_edges(edges; agg_func=agg_func)
+		
+		#	Build Adjacency Matrix
+			adj, node_to_idx, idx_to_node = _graph_to_sparse_matrix(clean_edges; 
+			                                                        nodes=nodes, 
+			                                                        weighted=weighted)
+		
+		#	Remove Self-loops
+			n = size(adj, 1)
+			for i in 1:n
+				adj[i, i] = 0.0
+			end
+			dropzeros!(adj)
+		
+		#	Handle Undirected Mode
+			if mode == "undirected"
+				#	Symmetrize Matrix
+					if weighted
+						adj = 0.5 .* (adj + adj')
+					else
+						adj = max.(adj, adj')
+					end
+			end
+		
+		#	Compute Core Decomposition
+			if weighted
+				cores = _s_core_compute(adj, mode, atol)
+			else
+				cores = _k_core_compute(adj, mode)
+			end
+		
+		#	Extract Node Names
+			node_names = if idx_to_node isa DataFrame
+				haskey(propertynames(idx_to_node), :id) ? String.(idx_to_node.id) : String.(idx_to_node[:, 1])
+			else
+				String.(idx_to_node)
+			end
+		
+		#	Assemble Results
+			return DataFrame(
+				node = node_names,
+				core_number = cores
+			)
+	end
+	@doc raw"""
+	**Description**
+	Computes core decomposition of networks using k-core (unweighted) or s-core (weighted)
+	algorithms. The k-core identifies cohesive subgroups based on degree connectivity,
+	while s-core generalizes this to weighted networks using strength thresholds.
+
+	**Usage**
+	`core_decomposition(edges; mode="undirected", weighted=false, nodes=nothing, atol=1e-10)`
+
+	**Arguments**
+	- `edges::DataFrame`: Edge list with `:src`, `:dst`, optional `:weight`
+	- `mode::String`: Decomposition mode (default `"undirected"`)
+	  - `"undirected"`: Standard undirected decomposition
+	  - `"in"`: Based on in-degree/in-strength
+	  - `"out"`: Based on out-degree/out-strength
+	  - `"total"`: Based on total degree/strength
+	- `weighted::Bool`: Use s-core for weighted networks (default `false`)
+	- `nodes::Union{Nothing,DataFrame,Vector}`: Node universe (optional)
+	- `atol::Float64`: Tolerance for s-core floating-point comparisons (default `1e-10`)
+
+	**Details**
+	The k-core of order k is the maximal subgraph where every node has at least k
+	connections within the subgraph. The s-core generalizes this concept to weighted
+	networks, where nodes must have minimum strength s.
+
+	Self-loops are excluded in all computations. For undirected mode, the adjacency
+	matrix is symmetrized appropriately (max for unweighted, average for weighted).
+
+	**Value**
+	DataFrame containing:
+	- `node`: Node identifier
+	- `core_number`: Core assignment (k for k-core, discretized s for s-core)
+
+	**Examples**
+```julia
+	# K-core decomposition (unweighted)
+	k_cores = core_decomposition(edges)
+	
+	# S-core decomposition (weighted)
+	s_cores = core_decomposition(edges; weighted=true)
+	
+	# In-degree based k-core for directed graph
+	in_cores = core_decomposition(edges; mode="in")
+```
+
+	**References**
+	- K-core: Seidman SB (1983). Network structure and minimum degree. Social Networks 5:269-287.
+	- S-core: Eidsaa M, Almaas E (2013). s-core network decomposition: A generalization of 
+	  k-core analysis to weighted networks. Physical Review E 88:062819. 
+	  doi:10.1103/PhysRevE.88.062819
+
+	**See Also**
+	`in_degree`, `out_degree`, `total_degree`
+	""" core_decomposition
+
+
+#	CALCULATE CORE DECOMPOSITION MEASURES
+
+
+#	CONDUCT TESTS
 
 
 ###################
