@@ -1789,18 +1789,8 @@
 			)
 	end
 
-#	CHAMP Test Helper Function: Build DataFrame from undirected edge list (optionally weighted)
-	function _df_from_edges(edges::Vector{Tuple{Int,Int}}; weighted::Bool=false, w::Float64=1.0)
-		"""
-		Args:
-			edges::Vector{Tuple{Int,Int}}: undirected edges as (u,v) with 1 ≤ u < v ≤ N
-			weighted::Bool=false: include :weight column with constant w
-			w::Float64=1.0: edge weight if weighted
-		Returns:
-			DataFrame with columns :src, :dst [, :weight]
-		Notes:
-			Produces a simple undirected edgelist without self-loops or multiedges.
-		"""
+#	CHAMP Helper Function: Build undirected DF (optional constant weight)
+	function _df_undirected(edges::Vector{Tuple{Int,Int}}; weighted::Bool=false, w::Float64=1.0)
 		src = Int[]; dst = Int[]; wt = Float64[]
 		for (u,v) in edges
 			u == v && continue
@@ -1810,202 +1800,239 @@
 		return weighted ? DataFrame(; src=src, dst=dst, weight=wt) : DataFrame(; src=src, dst=dst)
 	end
 
-#	CHAMP Test Helper Function: Complete graph K9 (uniformly connected; one optimal community at γ≈1)
-	function build_complete_graph_9(; weighted::Bool=false, w::Float64=1.0)
-		"""
-		Returns:
-			DataFrame edgelist for K9, and ground truth membership (all ones)
-		"""
-		edges = Tuple{Int,Int}[]
-		for u in 1:9, v in (u+1):9
-			push!(edges, (u,v))
+#	CHAMP Helper Function: Build directed DF by mirroring (u,v) → (u,v) & (v,u) so structure matches the undirected fixtures.
+#	If weighted, both arcs get the same weight.
+	function _df_directed_from_undirected(edges::Vector{Tuple{Int,Int}}; weighted::Bool=false, w::Float64=1.0)
+		src = Int[]; dst = Int[]; wt = Float64[]
+		for (u,v) in edges
+			u == v && continue
+			# 	forward
+				push!(src, u); push!(dst, v); weighted && push!(wt, w)
+
+			#	reverse
+				push!(src, v); push!(dst, u); weighted && push!(wt, w)
 		end
-		df = _df_from_edges(edges; weighted=weighted, w=w)
-		gt = fill(1, 9)  # single community
-		return (edges=df, ground_truth=gt, name="K9")
+		return weighted ? DataFrame(; src=src, dst=dst, weight=wt) : DataFrame(; src=src, dst=dst)
 	end
 
-#	CHAMP Test Helper Function: Dumbbell graph (two cliques bridged by a single edge; optimal partition = 2 comms)
-	function build_dumbbell_graph_9(; weighted::Bool=false, w_in::Float64=1.0, w_bridge::Float64=1.0)
-		"""
-		Structure:
-			Left clique: 1–4
-			Right clique: 5–9
-			Bridge: (4,5)
-		Returns:
-			DataFrame edgelist, ground truth membership (two communities)
-		"""
-		#	Creating Empty Edgelist for Populating
-			edges = Tuple{Int,Int}[]
+# 	CHAMP Helper Function: K9, complete graph on 9 nodes
+	function build_complete_graph_9_edges()
+		es = Tuple{Int,Int}[]
+		for u in 1:9, v in (u+1):9
+			push!(es, (u,v))
+		end
+		return es
+	end
 
-		#	Left clique K4
+#	CHAMP Helper Function: Dumbbell: K4 + K5 joined by (4,5)
+	function build_dumbbell_graph_9_edges()
+		es = Tuple{Int,Int}[]
+		# 	left K4
 			for u in 1:4, v in (u+1):4
-				push!(edges, (u,v))
+				push!(es, (u,v))
 			end
 
-		#	Right clique K5
+		#	right K5
 			for u in 5:9, v in (u+1):9
-				push!(edges, (u,v))
+				push!(es, (u,v))
 			end
 
-		#	Bridge
-			push!(edges, (4,5))
+		#	bridge
+			push!(es, (4,5))
 
-		#	Adding Internal Edges
-			if weighted
-				#	Build DF with in-clique = w_in, bridge = w_bridge
-					df_in  = _df_from_edges([(u,v) for (u,v) in edges if !((u==4 && v==5))]; weighted=true,  w=w_in)
-					df_br  = _df_from_edges([(4,5)];                                 weighted=true,  w=w_bridge)
-					df = vcat(df_in, df_br)
-			else
-				#	Building Binary Community Edges
-					df = _df_from_edges(edges; weighted=false)
-			end
-
-		#	Return Dumbell Graph
-			gt = [1,1,1,1, 2,2,2,2,2]  # 1–4 vs 5–9
-			return (edges=df, ground_truth=gt, name="Dumbbell")
+		#	Reutrn Dumbell Graph
+			return es
 	end
 
-#	CHAMP Test Helper Function: Three cliques (3-3-3) weakly bridged in a triangle
-	function build_clique_triangle_9(; weighted::Bool=false, w_in::Float64=1.0, w_bridge::Float64=0.2)
-		"""
-		Structure:
-			Three fully connected cliques:
-				C₁ = {1,2,3}, C₂ = {4,5,6}, C₃ = {7,8,9}
-			Weak inter-clique bridges forming a triangle:
-				(3,4), (6,7), (9,1)
-		Args:
-			weighted::Bool=false: include :weight column
-			w_in::Float64=1.0:    intra-clique edge weight
-			w_bridge::Float64=0.2:inter-clique bridge weight (set small to favor 3 modules)
-		Returns:
-			NamedTuple: (edges::DataFrame, ground_truth::Vector{Int}, name::String)
-		Notes:
-			Heuristic ground truth is 3 communities of size 3: [1,1,1, 2,2,2, 3,3,3].
-			Increase γ or decrease w_bridge to make the 3-way split more pronounced.
-		"""
-		#	Define cliques
-			C1 = 1:3; C2 = 4:6; C3 = 7:9
-
-		#	Intra-clique edges (undirected, u < v)
-			edges_in = Tuple{Int,Int}[]
-			for C in (C1, C2, C3)
+#	CHAMP Helper Function: 3 cliques of 3 with weak triangle bridges: (3,4), (6,7), (9,1)
+	function build_clique_triangle_9_edges()
+		#	Creating Triangles
+			es = Tuple{Int,Int}[]
+			for C in (1:3, 4:6, 7:9)
 				for u in C, v in (u+1):last(C)
-					push!(edges_in, (u, v))
+					push!(es, (u,v))
 				end
 			end
 
-		#	Weak triangle bridges
-			edges_br = Tuple{Int,Int}[(3,4), (6,7), (9,1)]
+		#	Bridges
+			append!(es, [(3,4), (6,7), (9,1)])
+			return es
+	end
 
-		#	Build DataFrame (weighted or unweighted)
-			if weighted
-				df_in = _df_from_edges(edges_in; weighted=true, w=w_in)
-				df_br = _df_from_edges(edges_br; weighted=true, w=w_bridge)
+#	CHAMP Helper Function: Weighted assembly for CliqueTriangle with custom bridge weight
+	function _df_clique_triangle_9(; directed::Bool=false, weighted::Bool=false, w_in::Float64=1.0, w_bridge::Float64=0.2)
+		#	Split intra vs bridges to assign distinct weights
+			intra = Tuple{Int,Int}[]
+			for C in (1:3, 4:6, 7:9)
+				for u in C, v in (u+1):last(C)
+					push!(intra, (u,v))
+				end
+			end
+			bridges = [(3,4), (6,7), (9,1)]
+
+		#	Creating Directed & Undirected Graphs
+			if directed
+				df_in  = _df_directed_from_undirected(intra;   weighted=weighted, w=w_in)
+				df_br  = _df_directed_from_undirected(bridges; weighted=weighted, w=w_bridge)
 				df = vcat(df_in, df_br)
 			else
-				df = _df_from_edges(vcat(edges_in, edges_br); weighted=false)
+				df_in  = _df_undirected(intra;   weighted=weighted, w=w_in)
+				df_br  = _df_undirected(bridges; weighted=weighted, w=w_bridge)
+				df = vcat(df_in, df_br)
 			end
-
-		#	Ground truth: 3 cliques
 			gt = [1,1,1, 2,2,2, 3,3,3]
 
-		return (edges=df, ground_truth=gt, name="CliqueTriangle9")
+		#	Return Results
+			return (edges=df, ground_truth=gt, name="CliqueTriangle9")
 	end
 
-#	CHAMP Test Harness: Sanity Checks on Three Stylized Graphs
-	function run_champ_test_harness(; weighted::Bool=false,
-	                                 n_runs_per_gamma::Int=5,
-	                                 n_iterations_per_run::Int=10,
-	                                 resolution_range::Tuple{Float64,Float64}=(0.5,1.8),
-	                                 n_resolutions::Int=15,
-	                                 seed::Union{Int,Nothing}=42,
-	                                 verbose::Bool=true)
-		"""
-		Args:
-			weighted::Bool=false: pass weights through to detection
-			n_runs_per_gamma::Int=5: multi-start per γ
-			n_iterations_per_run::Int=10: Leiden iterations per run
-			resolution_range::Tuple=(0.5,1.8): default γ sweep
-			n_resolutions::Int=15: points in sweep
-			seed::Union{Int,Nothing}=42: base RNG seed
-			verbose::Bool=true: print results
-		Returns:
-			NamedTuple with results for each graph (K9, Dumbbell, CliqueTriangle9)
-		Notes:
-			• K9: expect n≈1 (at γ=1, Q≈0; CHAMP may choose γ<1 ⇒ higher Q)
-			• Dumbbell: expect n≈2, Q moderately high
-			• CliqueTriangle9: expect n≈3 with weak bridges (higher γ or weaker bridges helps)
-		"""
-		#	Build fixtures
-			K9            = build_complete_graph_9(; weighted=weighted)
-			Dumbbell      = build_dumbbell_graph_9(; weighted=weighted, w_in=1.0, w_bridge=1.0)
-			CliqueTriangle= build_clique_triangle_9(; weighted=weighted, w_in=1.0, w_bridge=0.2)
+#	Align membership vector back to canonical node IDs 1..N for ARI
+	function _align_membership_for_ari(res, edf::DataFrame)
+		N = maximum(vcat(Vector(edf.src), Vector(edf.dst)))
+		pos = Dict{Int,Int}()
+		for (i, id) in enumerate(res.node_names)
+			pos[parse(Int, string(id))] = i
+		end
+		aligned = Vector{Int}(undef, N)
+		for u in 1:N
+			aligned[u] = res.membership[pos[u]]
+		end
+		return aligned
+	end
 
-		#	Run CHAMP on each (supports per-graph sweep override)
-			function _run_one(name, edf, gt; rr=resolution_range, nres=n_resolutions)
-				#	Run CHAMP
-					res = champ_community_detection(
-						edf;
-						resolution           = nothing,
-						resolution_range     = rr,
-						n_resolutions        = nres,
-						weighted             = weighted,
-						agg_func             = nothing,
-						n_runs_per_gamma     = n_runs_per_gamma,
-						n_iterations_per_run = n_iterations_per_run,
-						seed                 = seed
-					)
+#	Pretty print one row
+	function _print_row(label, res, ari)
+		println(rpad(label, 22), " | γ*=", lpad(round(res.resolution_used, digits=4), 6),
+				"  C=", lpad(res.n_communities, 3),
+				"  Q=", lpad(round(res.modularity, digits=4), 8),
+				isnan(ari) ? "" : "  ARI=" * lpad(round(ari, digits=4), 6))
+	end
 
-				#	Align membership to canonical node order 1..N before ARI
-					N = maximum(vcat(Vector(edf.src), Vector(edf.dst)))
-					pos = Dict{Int,Int}()	#	node id → index in res vectors
-					for (i, id) in enumerate(res.node_names)
-						pos[Int(id)] = i
+#	Main test harness: runs 4 scenarios per graph (U/D × B/W)
+	function run_champ_test_harness_all_modes(;
+		n_runs_per_gamma::Int=5,
+		n_iterations_per_run::Int=10,
+		resolution_range::Tuple{Float64,Float64}=(0.5, 1.8),
+		n_resolutions::Int=15,
+		seed::Union{Int,Nothing}=42,
+		verbose::Bool=true
+	)
+		#	Build raw undirected edge sets once
+			edges_K9        = build_complete_graph_9_edges()
+			edges_Dumbbell  = build_dumbbell_graph_9_edges()
+			edges_Triangle  = build_clique_triangle_9_edges()
+
+		#	A helper to construct per-scenario DataFrames
+			make_df = function(which::Symbol; directed::Bool, weighted::Bool)
+				# 	Choose weights so that "weighted=true" is truly non-binary
+					w_K9         = weighted ? 2.0 : 1.0                    # make complete graph weighted
+					w_DB_in      = weighted ? 1.5 : 1.0                    # dumbbell cliques
+					w_DB_bridge  = weighted ? 0.5 : 1.0                    # dumbbell bridge (lighter than in-clique)
+					# CliqueTriangle handled below with its own builder (w_in=1.0, w_bridge=0.2 when weighted)
+
+					if which == :K9
+						df = directed ?
+							_df_directed_from_undirected(edges_K9;       weighted=weighted, w=w_K9) :
+							_df_undirected(edges_K9;                      weighted=weighted, w=w_K9)
+						gt = fill(1, 9)
+						name = "K9"
+
+					elseif which == :Dumbbell
+						if weighted
+							#	Build with distinct weights for in-clique vs bridge
+							#	Undirected
+								df_in = directed ?
+									_df_directed_from_undirected([(u,v) for (u,v) in edges_Dumbbell if !((u==4 && v==5))]; weighted=true, w=w_DB_in) :
+									_df_undirected([(u,v) for (u,v) in edges_Dumbbell if !((u==4 && v==5))];              weighted=true, w=w_DB_in)
+								df_br = directed ?
+									_df_directed_from_undirected([(4,5)]; weighted=true, w=w_DB_bridge) :
+									_df_undirected([(4,5)];              weighted=true, w=w_DB_bridge)
+								df = vcat(df_in, df_br)
+						else
+							#	Binary (unweighted) case
+								df = directed ?
+									_df_directed_from_undirected(edges_Dumbbell;  weighted=false) :
+									_df_undirected(edges_Dumbbell;                 weighted=false)
+						end
+						gt = [1,1,1,1, 2,2,2,2,2]
+						name = "Dumbbell"
+					else  # :Triangle
+						#	Use special builder to set weak bridge weights when weighted=true
+							if weighted
+								df_pack = _df_clique_triangle_9(; directed=directed, weighted=true, w_in=1.0, w_bridge=0.2)
+								return df_pack
+							else
+								df = directed ?
+									_df_directed_from_undirected(edges_Triangle; weighted=false) :
+									_df_undirected(edges_Triangle;               weighted=false)
+								gt = [1,1,1, 2,2,2, 3,3,3]
+								name = "CliqueTriangle9"
+							end
 					end
-					aligned = Vector{Int}(undef, N)
-					for u in 1:N
-						aligned[u] = res.membership[pos[u]]
-					end
 
-				#	Compute ARI using exported function (if GT provided)
-					ari = (isnothing(gt) || isempty(gt)) ? NaN : adjusted_rand_index(aligned, gt)
-
-				return (name=name, result=res, ari_vs_gt=ari)
+				#	Return Test Network
+					return (edges=df, ground_truth=gt, name=name)
 			end
 
-			rK = _run_one(K9.name,            K9.edges,            K9.ground_truth)                          #	default sweep
-			rD = _run_one(Dumbbell.name,      Dumbbell.edges,      Dumbbell.ground_truth)                    #	default sweep
-			rT = _run_one(CliqueTriangle.name, CliqueTriangle.edges, CliqueTriangle.ground_truth;             #	nudged higher-γ sweep
-			              rr=(0.9, 2.0), nres=max(n_resolutions, 21))
+		#	Scenario matrix
+			scenarios = [
+				(directed=false, weighted=false, label="Undirected / Binary"),
+				(directed=true,  weighted=false, label="Directed   / Binary"),
+				(directed=false, weighted=true,  label="Undirected / Weighted"),
+				(directed=true,  weighted=true,  label="Directed   / Weighted"),
+			]
 
-		#	Print summary
-			if verbose
-				println("=" ^ 60)
-				println("CHAMP Sanity Tests (n=9)  |  weighted=$(weighted)  runs/γ=$(n_runs_per_gamma)  iters/run=$(n_iterations_per_run)")
-				println("=" ^ 60)
+			results = Dict{String, Any}()
 
-				for r in (rK, rD, rT)
-					res = r.result
-					println("\n[", r.name, "]")
-					println("  γ*           : ", round(res.resolution_used, digits=4))
-					println("  communities  : ", res.n_communities)
-					println("  modularity Q : ", round(res.modularity, digits=4))
-					if !isnan(r.ari_vs_gt)
-						println("  ARI vs GT    : ", round(r.ari_vs_gt, digits=4))
+			for (directed, weighted, label) in scenarios
+				#	Declaring the Test
+					if verbose
+						println("\n", "="^68)
+						println("Scenario: ", label, "   (directed=$(directed), weighted=$(weighted))")
+						println("="^68)
 					end
-				end
 
-				println("\nHeuristics:")
-				println("  • K9             → expect n=1; at γ=1, Q≈0 (CHAMP may pick γ<1 ⇒ Q>0)")
-				println("  • Dumbbell       → expect n=2, Q moderate/high, ARI≈1.0 vs [1..4|5..9]")
-				println("  • CliqueTriangle → expect n=3 with weak bridges; raise γ or lower w_bridge if merged")
-				println("=" ^ 60)
+				#	Build graphs for this scenario
+					K9_pack        = make_df(:K9;        directed=directed, weighted=weighted)
+					Dumbbell_pack  = make_df(:Dumbbell;  directed=directed, weighted=weighted)
+					Triangle_pack  = (weighted ? _df_clique_triangle_9(; directed=directed, weighted=true, w_in=1.0, w_bridge=0.2)
+											: make_df(:Triangle; directed=directed, weighted=false))
+
+					for pack in (K9_pack, Dumbbell_pack, Triangle_pack)
+						#	Creating Data Ojbects
+							edf = pack.edges
+							gt  = pack.ground_truth
+							name = pack.name
+
+						#	Run CHAMP
+							res = champ_community_detection(
+								edf;
+								resolution           = nothing,
+								resolution_range     = resolution_range,
+								n_resolutions        = n_resolutions,
+								weighted             = weighted,
+								directed             = directed,           # <- pass through to current function
+								agg_func             = nothing,
+								n_runs_per_gamma     = n_runs_per_gamma,
+								n_iterations_per_run = n_iterations_per_run,
+								seed                 = seed,
+								show_progress        = false
+							)
+
+						#	Align for ARI
+							ari = isnothing(gt) ? NaN : adjusted_rand_index(_align_membership_for_ari(res, edf), gt)
+
+							results["$label::$name"] = (res=res, ari=ari)
+
+						#	Reporing Checking
+							if verbose
+								_print_row(name, res, ari)
+							end
+					end
 			end
 
-		#	Return Small Graph Solutions
-			return (K9=rK, Dumbbell=rD, CliqueTriangle=rT)
+		#	Return Results
+			return results
 	end
 
 #	Modularity Vitality Tests: Comparing m calculations
@@ -2345,8 +2372,8 @@
 	t_w = test_leiden_consistency(agent_agent_all_com.edges; resolution=1.0, n_tests=10, weighted=true, verbose=true)
 
 #	ORA Comparision Test: ARI of 0.95799
-	all_comm_communities_weighted = leiden_community_detection(agent_agent_all_com.edges; resolution=1.0, weighted=true)
-	community_index = DataFrame(node = all_comm_communities_weighted.node_names, community = all_comm_communities_weighted.membership)
+	all_comm_communities_weighted = leiden_community_detection(agent_agent_all_com.edges; nodes=nodes, resolution=1.0, directed = true, weighted=true)
+	community_index = DataFrame(node = all_comm_communities_weighted.node_names.id, community = all_comm_communities_weighted.membership)
 	ora_leiden = CSV.read("/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data/All_Comm_Lieden_Group_Assignments.csv", DataFrame, types=Dict(1 => String))
 	rename!(ora_leiden, ["node", "leiden_group"])
 	leftjoin!(community_index, 	ora_leiden, on=:node)
@@ -2355,11 +2382,16 @@
 	print(ora_ari)
 
 #	CHAMP Tests
-	run_champ_test_harness(; weighted=false)
-	run_champ_test_harness(; weighted=true)
+	nodes = agents[:,(1:2)]
+	rename!(nodes, ["id", "label"])
+	run_champ_test_harness_all_modes()
 
-	all_comm_CHAMP = champ_community_detection(agent_agent_all_com.edges; resolution = nothing, resolution_range     = (0.5,1.8),
+	all_comm_CHAMP = champ_community_detection(agent_agent_all_com.edges; resolution = nothing, resolution_range  = (0.5,1.8),
 						                       n_resolutions = 15, weighted = true, n_runs_per_gamma = 10, n_iterations_per_run = 10,
+							                   seed = 45)
+
+	all_comm_CHAMP = champ_community_detection(agent_agent_all_com.edges; nodes = nodes, resolution = nothing, resolution_range = (0.5,1.8),
+						                       n_resolutions = 15, weighted = true, directed = true, n_runs_per_gamma = 10, n_iterations_per_run = 10,
 							                   seed = 45)
 
 #	Modularity Vitality Tests: Python Tests
@@ -2387,11 +2419,10 @@
 	node_col = :node
 	community_col = :community
 	sentinel_ids =  ["828033366712688640", "24112747", "25930421", "18749026"]
-	sentindel_id = "828033366712688640"
+	sentinel_id = "828033366712688640"
 	γ = 1.0
 	directed = true
 	weighted = true
-	adj, node_to_idx, idx_to_node = _graph_to_sparse_matrix(edges; nodes=nodes, weighted=true)
 
 #	Helper: graph (nodes + edges) to sparse adjacency with fixed node universe
 	function _graph_to_sparse_matrix(edges::DataFrame;
@@ -2478,6 +2509,8 @@
 		#	Return adjacency and mappings
 			return (adj_matrix, node_to_idx, idx_to_node)
 	end
+
+	adj, node_to_idx, idx_to_node = _graph_to_sparse_matrix(edges; nodes=nodes, weighted=true)
 
 #	Helper Function for modularity_vitality: getSparseA(edges) → A
 	function getSparseA(edges::DataFrame;
@@ -2925,113 +2958,355 @@
 			return degrees, deg_mat
 	end
 
-#	Helper Function for modularity_vitality: newMods(edges, A, S, resolution; …) → q1s (Q after removing each node)
-	function newMods(nodes::DataFrame,
-					 edges::DataFrame,
-					 partition::DataFrame;
-					 test_flag::Bool = false,
-					 sentinel_id::AbstractString = "828033366712688640",
-					 resolution::Float64)
-
-		#	Creating Paritition/Node Elements for Indexing
-			index = [1:1:nrow(partition);]
-    		membership = partition.community .+ 1
-
-		#	Calculating m
+#	Helper Function for modularity_vitality: Calculate Modularity After Node Removal
+	function newMods(edges::DataFrame, partition::DataFrame; nodes::Union{Nothing,DataFrame}=nothing,
+	                 resolution::Float64=1.0, test_flag::Bool=false, sentinel_id::AbstractString="828033366712688640")
+		"""
+		Args:
+			edges::DataFrame: edge list with :src, :dst, :weight
+			partition::DataFrame: node community assignments
+			nodes::Union{Nothing,DataFrame}: node universe (optional)
+			resolution::Float64: resolution parameter γ (default = 1.0)
+			test_flag::Bool: enable diagnostic output (default = false)
+			sentinel_id::AbstractString: node ID for test diagnostics
+		Returns:
+			Vector{Float64}: Q1 scores (modularity after removing each node)
+		Notes:
+			Calculates modularity change from removing each node.
+			Handles star centers specially to avoid division by zero.
+			Based on network deformation approach for modularity vitality.
+		"""
+		#	Create Node Indexing and Membership
+			index = collect(1:nrow(partition))
+			if (partition.community[1] == 0)
+				#	Create Membership Vector & Convert to 1-based
+					membership = partition.community .+ 1
+			else
+				#	Create Membeship Vector
+					membership = partition.community 
+			end
+		
+		#	Calculate Total Edge Weight
 			m = sum(edges.weight)
-
-		#	Generating Self-Loop Corrected & Symmetrized Adjacency Matrix
-			A, node_index = getSparseA(edges; nodes = nodes)
-    		self_loops = sum(diag(A))
-    		group_indicator_mat = getGroupIndicator(A, node_index, partition;)
-    		node_deg_by_group = A * group_indicator_mat
-
-		# 	Calculate internal edges - correct fancy indexing
-		#	This extracts elements where row i comes from index[i] and column from membership[i]
+		
+		#	Build Adjacency Matrix and Node Index
+			if isnothing(nodes)
+				A, node_index = getSparseA(edges)
+				node_index = DataFrame(id = node_index)
+			else
+				ni = deepcopy(nodes)
+				A, node_index = getSparseA(edges; nodes = ni)
+			end
+			
+			self_loops = sum(diag(A))
+		
+		#	Build Group Indicator Matrix
+			group_indicator_mat = getGroupIndicator(A, node_index, partition)
+			node_deg_by_group = A * group_indicator_mat
+		
+		#	Calculate Internal Degrees for Each Node
 			internal_deg = node_deg_by_group[CartesianIndex.(index, membership)]
 			internal_edges = (sum(internal_deg) + self_loops) / 2
-
-		#	Calculating Network Total Degree & Within Group Total Degree Scores
+		
+		#	Calculate Degree Matrices
 			degrees, deg_mat = getDegMat(edges, group_indicator_mat, A)
 			node_deg_by_group += deg_mat
-
-		#	Isolating Group-Level Edges
-		   	group_degs = sum(deg_mat + Diagonal(diag(A)) * group_indicator_mat, dims=1)
-
-		#	Controlling for the Hubs of Star Networks
+		
+		#	Calculate Group-Level Degrees
+			group_degs = sum(deg_mat + Diagonal(diag(A)) * group_indicator_mat, dims=1)
+		
+		#	Handle Star Network Centers
 			starCenter = (degrees .== m)
-    		degrees[starCenter] .= 0  # temp replacement avoid division by 0
-
-		#	Calculating 
-			q1_links = (internal_edges .- internal_deg) ./ (m .- degrees)
-
-		# 	Expanding out (group_degs - node_deg_by_group)^2 is slightly faster:
-			expected_impact = sum(group_degs.^2) .- 2 * (node_deg_by_group * group_degs') .+ sum(node_deg_by_group.^2, dims=2)
-
-		#	Calculating Modularity After Removal Scores
-			q1_degrees = expected_impact ./ (4 * (m .- degrees).^2)
-			q1s = q1_links .- q1_degrees
-			q1s[starCenter] .= 0
+			degrees_safe = copy(degrees)
+			degrees_safe[starCenter] .= 1.0  # Avoid division by zero
+		
+		#	Calculate Q1 Link Component
+			q1_links = (internal_edges .- internal_deg) ./ (m .- degrees_safe)
+		
+		#	Calculate Expected Impact (Expanded Form)
+			expected_impact = sum(group_degs.^2) .- 
+			                 2 * (node_deg_by_group * group_degs') .+ 
+			                 sum(node_deg_by_group.^2, dims=2)
+		
+		#	Calculate Q1 Degree Component
+			q1_degrees = expected_impact ./ (4 * (m .- degrees_safe).^2)
+		
+		#	Combine Components for Final Q1 Scores
+			q1s = q1_links .- resolution .* q1_degrees  # Apply resolution parameter
+			q1s[starCenter] .= 0.0  # Star centers have zero impact
 			q1s = vec(q1s)
-
-		#	Optional: test walk-through for sentinel_id
+		
+		#	Optional Test Diagnostics
 			if test_flag
-				#	Resolve sentinel row index
-					node_to_idx = [1:1:nrow(node_index);]
-					node_to_idx = node_to_idx[node_index.node .== sentinel_id]
-					i_s = node_to_idx[1]
-					i_s === nothing && println("DEBUG newMods: sentinel '", sentinel_id, "' not found in node_to_idx")
-
-				#	Global/Q₀ and community context
-					Q0 = test_calculate_modularity(A, membership,1.0)
-					println("DEBUG newMods: mass (m) = ", m, " | Q₀ = ", Q0)
-
-					if i_s !== nothing
-						c_s = membership[i_s]
-						in_cs = findall(j -> m[j] == c_s, 1:n)
-						K_cs = sum(degrees[in_cs])
-						sum_internal_deg_cs = sum(node_deg_by_group[j, c_s] for j in in_cs)
-						sum_self_loops_cs   = sum(A[j, j] for j in in_cs)
-						E_cs = (sum_internal_deg_cs + sum_self_loops_cs) / 2.0
-
-						println("DEBUG newMods: sentinel=", sentinel_id,
-						        " (row ", i_s, ", comm ", c_s, ")")
-						println("DEBUG newMods:  k_i (total) = ", degrees[i_s],
-						        " | k_i^comm = ", node_deg_by_group[i_s, c_s])
-						println("DEBUG newMods:  internal_edges (Σ_c E_c) = ", internal_edges)
-						println("DEBUG newMods:  K_c(s) = ", K_cs, " | E_c(s) = ", E_cs)
-						println("DEBUG newMods:  group_degs[c_s] = ", group_degs[c_s])
-
-						println("DEBUG newMods:  internal_deg[i_s] = ", internal_deg[i_s])
-						println("DEBUG newMods:  q1_links[i_s] = ", q1_links[i_s])
-						println("DEBUG newMods:  q1_degrees[i_s] = ", q1_degrees[i_s])
-						println("DEBUG newMods:  q1s[i_s] (Q after removal) = ", q1s[i_s])
-						println("DEBUG newMods:  vitality[i_s] = Q₀ - q1s[i_s] = ", Q0 - q1s[i_s])
-					end
-
-				#	Cross-checks
-					E_sum = 0.0
-					for c in 1:C
-						in_c = findall(j -> m[j] == c, 1:n)
-						E_c = (sum(node_deg_by_group[j, c] for j in in_c) + sum(A[j, j] for j in in_c)) / 2.0
-						E_sum += E_c
-					end
-					println("DEBUG newMods: Σ_c E_c = ", E_sum, " (should equal internal_edges)")
-
-					if abs(E_sum - internal_edges) > 1e-9
-						println("WARN newMods: Σ_c E_c (", E_sum, ") ≠ internal_edges (", internal_edges, ")")
+				#	Find Sentinel Node Index
+					sentinel_indices = findall(x -> x == sentinel_id, node_index.node)
+					
+					if !isempty(sentinel_indices)
+						i_s = sentinel_indices[1]
+						
+						#	Calculate Global Modularity
+							ni = deepcopy(nodes)
+							clean_edges = _aggregate_multi_edges(edges; agg_func=sum)
+							adj_dir, _, _ = _graph_to_sparse_matrix(clean_edges; 
+							                                       nodes=ni, 
+							                                       weighted=true)
+							Q0 = calculate_modularity(adj_dir, membership; 
+							                        weighted=true, 
+							                        directed=true, 
+							                        γ=resolution)
+						
+						#	Extract Community Information
+							c_s = membership[i_s]
+							n = length(membership)
+							in_cs = findall(j -> membership[j] == c_s, 1:n)
+							K_cs = sum(degrees[in_cs])
+							sum_internal_deg_cs = sum(internal_deg[j] for j in in_cs if membership[j] == c_s)
+							sum_self_loops_cs = sum(A[j, j] for j in in_cs)
+							E_cs = (sum_internal_deg_cs + sum_self_loops_cs) / 2.0
+						
+						#	Print Diagnostics
+							println("\n=== DEBUG newMods ===")
+							println("Global: m = $m, Q₀ = $Q0")
+							println("Sentinel: $sentinel_id (row $i_s, community $c_s)")
+							println("  Degrees: total = $(degrees[i_s]), internal = $(internal_deg[i_s])")
+							println("  Community $c_s: K = $K_cs, E = $E_cs")
+							println("  Components: q1_links = $(q1_links[i_s]), q1_degrees = $(q1_degrees[i_s])")
+							println("  Result: q1s = $(q1s[i_s]), vitality = $(Q0 - q1s[i_s])")
+							println("====================\n")
+					else
+						println("DEBUG: Sentinel '$sentinel_id' not found in node index")
 					end
 			end
-
-
-		#	Return Adjusted Modularity values
+		
+		#	Return Modularity After Removal Scores
 			return q1s
 	end
 
-	q1s[(1:10)]
+	community_solution = champ_community_detection(edges; resolution = nothing, resolution_range = (0.5, 1.8),
+										           n_resolutions = 5, directed=true, weighted = true, n_runs_per_gamma = 15)
+	community_index = DataFrame(node=community_solution.node_names, community=community_solution.membership)
+	newMods(edges, community_index)
 
-#	COME BACK HERE!!!
-#	Need to retrieve my old modularity function.
+	newMods(edges, partition; nodes=nodes)
+		
+
+#	Modularity Vitality: Calculate Node Importance via Removal Impact
+	function modularity_vitality(edges::DataFrame;
+	                            nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}}=nothing,
+	                            resolution_sweep::Bool=false,
+	                            resolution::Float64=1.0,
+	                            directed::Bool=false,
+	                            weighted::Bool=false,
+	                            n_resolutions::Int=15,
+	                            n_runs_per_gamma::Int=5,
+	                            n_iterations_per_run::Int=10,
+	                            seed::Union{Int,Nothing}=nothing,
+	                            provided_membership::Union{Nothing,DataFrame,Vector{Int},Dict}=nothing)
+		"""
+		Args:
+			edges::DataFrame: edge list with :src, :dst, optional :weight
+			nodes::Union{Nothing,DataFrame,Vector}: node universe (optional)
+			resolution_sweep::Bool: use CHAMP sweep vs single Leiden (default = false)
+			resolution::Float64: γ for single Leiden (default = 1.0)
+			directed::Bool: treat as directed graph (default = false)
+			weighted::Bool: use edge weights (default = false)
+			n_resolutions::Int: γ values for CHAMP (default = 15)
+			n_runs_per_gamma::Int: Leiden runs per γ (default = 5)
+			n_iterations_per_run::Int: max iterations per run (default = 10)
+			seed::Union{Int,Nothing}: random seed
+			provided_membership::Union{Nothing,DataFrame,Vector,Dict}: user partition
+		Returns:
+			NamedTuple: (results_df, resolution_used, modularity, n_communities)
+		Notes:
+			Calculates vitality as Q0 - Q1 where Q1 is modularity after node removal.
+			Positive vitality = hub, negative = bridge.
+		"""
+		
+		#	Validation
+			@assert hasproperty(edges, :src) && hasproperty(edges, :dst) "edges must have :src and :dst"
+			if nrow(edges) == 0
+				df = DataFrame(node=String[], modularity_vitality=Float64[],
+				             modularity_vitality_hub=Float64[], modularity_vitality_bridge=Float64[], 
+				             community=Int[])
+				return (results_df=df, resolution_used=resolution, modularity=0.0, n_communities=0)
+			end
+		
+		#	Prepare Edges with Appropriate Weights
+			clean_edges = deepcopy(edges)
+			
+			if weighted
+				#	Weighted: Ensure Weight Column Exists
+					if !hasproperty(clean_edges, :weight)
+						clean_edges.weight = ones(Float64, nrow(clean_edges))
+					else
+						clean_edges.weight = Float64.(clean_edges.weight)
+					end
+					agg_func = sum
+			else
+				#	Unweighted: Force Binary Weights
+					clean_edges.weight = ones(Float64, nrow(clean_edges))
+					agg_func = maximum
+			end
+			
+			if (weighted = true)
+				clean_edges = _aggregate_multi_edges(clean_edges; agg_func=sum)
+			else
+					clean_edges = _aggregate_multi_edges(clean_edges; agg_func=maximum)
+			end
+			
+		#	Build Base Adjacency Matrix
+			adj_base, node_map, idx_to_node = _graph_to_sparse_matrix(clean_edges; 
+			                                                          nodes=nodes, 		
+			                                                          weighted=true)
+		
+		#	Preserve a Copy of the Node Index for Generating Community Solutions	
+			ni = deepcopy(idx_to_node)
+		
+		#	Extract Node IDs in Matrix Order
+			node_ids = if idx_to_node isa DataFrame
+				names_vec = hasproperty(idx_to_node, :id) ? String.(idx_to_node.id) : String.(idx_to_node[:, 1])
+			else
+				String.(idx_to_node)
+			end
+			n = length(node_ids)
+		
+		#	Prepare Adjacency for Q0 Based on Graph Type
+			if directed && weighted
+				#	Case 1: Directed Weighted
+					A_Q0 = adj_base  # No transformation
+					
+			elseif directed && !weighted
+				#	Case 2: Directed Binary
+					A_Q0 = map(x -> x > 0 ? 1.0 : 0.0, adj_base)
+					
+			elseif !directed && weighted
+				#	Case 3: Undirected Weighted
+					A_Q0 = 0.5 .* (adj_base + adj_base')
+					
+			else  # !directed && !weighted
+				#	Case 4: Undirected Binary
+					A_Q0 = max.(adj_base, adj_base')
+					A_Q0 = map(x -> x > 0 ? 1.0 : 0.0, A_Q0)
+			end
+		
+		#	Obtain Community Partition
+			resolution_used = resolution
+			if provided_membership === nothing
+				#	Detect Communities
+					if resolution_sweep
+						#	CHAMP Sweep
+							community_solution = champ_community_detection(
+								clean_edges;
+								nodes = ni,
+								resolution = nothing,
+								resolution_range = (0.5, 1.8),
+								n_resolutions = n_resolutions,
+								weighted = weighted,
+								directed = directed,
+								n_runs_per_gamma = n_runs_per_gamma,
+								n_iterations_per_run = n_iterations_per_run,
+								seed = seed,
+								show_progress = true
+							)
+							partition_df = DataFrame(node = community_solution.node_names, community=community_solution.membership)	
+					else
+						#	Single Resolution Leiden
+							community_solution = leiden_community_detection(
+								clean_edges;
+								nodes = ni,
+								resolution = resolution,
+								n_iterations = n_iterations_per_run,
+								n_runs = n_runs_per_gamma,
+								weighted = weighted,
+								directed = directed,
+								seed = seed
+							)
+							partition_df = community_solution.node_names
+							partition_df.community = community_solution.membership
+							select!(partition_df, [:id, :community])
+							rename!(partition_df, ["node", "community"])
+					end	
+			else
+				#	Process User-Provided Partition
+					if provided_membership isa DataFrame
+						#	Join on Node ID
+							pm = deepcopy(provided_membership)
+							rename!(pm, lowercase.(string.(propertynames(pm))))
+							@assert hasproperty(pm, :node) && hasproperty(pm, :community) "DataFrame needs :node and :community"
+							partition_df = pm
+					elseif provided_membership isa Vector
+							partition_df = deepcopy(ni)
+							partition_df.community = provided_membership
+							select!(partition_df, [:id, :community])
+							rename!(partition_df, ["node", "community"])	
+					elseif provided_membership isa Dict
+						#	Map by Node ID
+							communities = zeros(Int64, length(node_ids))
+							for i in 1:n
+								communities[i] = get(provided_membership, node_ids[i], 0)
+							end
+
+						#	Construct partition_df
+							partition_df = deepcopy(ni)
+							partition_df.community = communities
+							select!(partition_df, [:id, :community])
+							rename!(partition_df, ["node", "community"])
+					end
+			end
+		
+		#	Handle Isolates: Assign Unique Communities
+			if any(partition_df.community .== 0)
+				max_label = maximum(filter(!=(0), partition_df.community); init=0)
+				for i in 1:n
+					if partition_df.community[i] == 0
+						max_label += 1
+						partition_df.community[i] = max_label
+					end
+				end
+			end
+		
+		#	Calculate Q0: Baseline Modularity
+			membership_vec = partition_df.community
+			Q0 = calculate_modularity(A_Q0, membership; 
+			                        weighted=weighted, 
+			                        directed=directed, 
+			                        γ=resolution_used)
+		
+		#	Calculate Q1: Modularity After Each Node Removal
+			nodes_for_newmods = nodes isa DataFrame ? nodes : nothing
+			q1s = newMods(edges, partition_df; 
+			            nodes=nodes_for_newmods,
+			            resolution=resolution_used,
+			            test_flag=false)
+		
+		#	Calculate Vitality Scores
+			vitality = Q0 .- q1s
+			ϵ = 1e-12
+			hub_scores = @. vitality > ϵ ? vitality : 0.0
+			bridge_scores = @. vitality < -ϵ ? -vitality : 0.0
+		
+		#	Assemble Output DataFrame
+			out_df = DataFrame(
+				node = node_ids,
+				modularity_vitality = vitality,
+				modularity_vitality_hub = hub_scores,
+				modularity_vitality_bridge = bridge_scores,
+				community = membership_vec
+			)
+			
+		#	Sort by Absolute Vitality
+			out_df.abs_vitality = abs.(vitality)
+			sort!(out_df, :abs_vitality, rev=true)
+			select!(out_df, Not(:abs_vitality))
+		
+		#	Return Results
+			return (
+				results_df = out_df,
+				resolution_used = resolution_used,
+				modularity = Q0,
+				n_communities = length(unique(membership_vec))
+			)
+	end
 
 
 #	Compare Modularity Vitality to Python Scores

@@ -3609,297 +3609,344 @@ module Large_Graph_Similarity
 	Traag VA, Waltman L, van Eck NJ (2019) Scientific Reports 9(1):5233
 	""" leiden_community_detection
 
-#	Helper Function: CHAMP Partition Coefficients
+#	Helper Function for champ_community_detection: Calculate Partition Coefficients (igraph-aligned)
 	function _calculate_partition_coefficients(adj::SparseMatrixCSC, membership::Vector{Int})
 		"""
 		Args:
-			adj::SparseMatrixCSC: symmetric adjacency matrix
+			adj::SparseMatrixCSC: preprocessed adjacency matrix
 			membership::Vector{Int}: community assignments
 		Returns:
 			Tuple{Float64,Float64}: (A, P) coefficients
 		Notes:
-			A = internal edges (block-sum)
-			P = expected edges under configuration model
-			Optimized O(m + n) computation.
+			Matches igraph's undirected modularity convention.
+			For directed graphs, use _calculate_partition_coefficients_directed.
 		"""
-		
 		#	Validation
-			@assert issymmetric(adj) "CHAMP requires symmetric adjacency"
-			@assert size(adj,1) == length(membership) "Membership length mismatch"
+			@assert size(adj,1) == size(adj,2) "_calculate_partition_coefficients: adj must be square"
+			@assert length(membership) == size(adj,1) "_calculate_partition_coefficients: membership length mismatch"
 		
-		#	Calculate edge totals
-			two_m = sum(adj)
-			if two_m == 0.0
+		#	Remap Membership to Contiguous 1..C
+			labels = sort(unique(membership))
+			label_to_col = Dict{Int,Int}(lab => i for (i, lab) in enumerate(labels))
+			n = size(adj, 1)
+			C = length(labels)
+			mapped = Vector{Int}(undef, n)
+			@inbounds for i in 1:n
+				mapped[i] = label_to_col[membership[i]]
+			end
+		
+		#	Build Indicator Matrix S (n × C)
+			S = sparse(collect(1:n), mapped, ones(Float64, n), n, C)
+		
+		#	Calculate Effective Totals (igraph-style)
+			d = diag(adj)
+			two_m_eff = sum(adj) + sum(d)
+			if two_m_eff == 0.0
 				return (0.0, 0.0)
 			end
-			m = two_m / 2.0
-			degrees = vec(sum(adj, dims=2))
+			m_eff = two_m_eff / 2.0
+			k_eff = vec(sum(adj, dims=2)) .+ d
 		
-		#	A: Internal edges via sparse iteration
-			A_sum = 0.0
-			rows, cols, vals = findnz(adj)
-			
-			@inbounds for k in eachindex(vals)
-				i, j, w = rows[k], cols[k], vals[k]
-				if i == j
-					A_sum += w  # Self-loops counted once
-				elseif membership[i] == membership[j]
-					A_sum += w  # Off-diagonals counted for both (i,j) and (j,i)
-				end
+		#	Calculate A = E_eff (Internal Weight with Doubled Loops)
+			E_blocks = S' * adj * S
+			E_diag   = S' * spdiagm(0 => d) * S
+			E_eff    = sum(diag(E_blocks)) + sum(diag(E_diag))
+		
+		#	Calculate P = Expected Edges
+			K_eff = vec(S' * k_eff)
+			P = sum((K_eff .^ 2) ./ (2.0 * m_eff))
+		
+		#	Return Coefficients
+			return (E_eff, P)
+	end
+
+#	Helper Function for champ_community_detection: Calculate Directed Partition Coefficients
+	function _calculate_partition_coefficients_directed(adj::SparseMatrixCSC, membership::Vector{Int})
+		"""
+		Args:
+			adj::SparseMatrixCSC: directed adjacency matrix (not symmetrized)
+			membership::Vector{Int}: community assignments
+		Returns:
+			Tuple{Float64,Float64}: (A, P) coefficients for directed graphs
+		Notes:
+			Uses directed null model: K_out * K_in / m
+		"""
+		#	Validation
+			@assert size(adj,1) == size(adj,2) "_calculate_partition_coefficients_directed: adj must be square"
+			@assert length(membership) == size(adj,1) "_calculate_partition_coefficients_directed: membership length mismatch"
+		
+		#	Remap Membership to Contiguous 1..C
+			labels = sort(unique(membership))
+			label_to_col = Dict{Int,Int}(lab => i for (i, lab) in enumerate(labels))
+			n = size(adj, 1)
+			C = length(labels)
+			mapped = Vector{Int}(undef, n)
+			@inbounds for i in 1:n
+				mapped[i] = label_to_col[membership[i]]
 			end
 		
-		#	P: Expected edges via community degrees
-			P_sum = 0.0
-			for c in unique(membership)
-				nodes = findall(==(c), membership)
-				K_c = sum(degrees[nodes])
-				P_sum += (K_c * K_c) / (2.0 * m)
-			end
+		#	Build Indicator Matrix S (n × C)
+			S = sparse(collect(1:n), mapped, ones(Float64, n), n, C)
 		
-		return (A_sum, P_sum)
+		#	Calculate Total Weight and Degrees
+			m = sum(adj)
+			if m == 0.0
+				return (0.0, 0.0)
+			end
+			k_out = vec(sum(adj, dims=2))  # out-degrees
+			k_in = vec(sum(adj, dims=1))   # in-degrees
+		
+		#	Calculate A = Internal Edges
+			E_blocks = S' * adj * S
+			A = sum(diag(E_blocks))
+		
+		#	Calculate P = Expected Edges (Directed Null Model)
+			K_out = vec(S' * k_out)
+			K_in = vec(S' * k_in)
+			P = sum((K_out .* K_in) ./ m)
+		
+		#	Return Coefficients
+			return (A, P)
 	end
 
 #	CHAMP: Convex Hull of Admissible Modularity Partitions
 	function champ_community_detection(edges::DataFrame;
-	                                   resolution::Union{Float64,Nothing}=nothing,
-	                                   resolution_range::Tuple{Float64,Float64}=(0.5, 1.8),
-	                                   n_resolutions::Int=20,
-	                                   weighted::Bool=false,
-	                                   agg_func::Union{Function,Nothing}=nothing,
-	                                   n_runs_per_gamma::Int=5,
-	                                   n_iterations_per_run::Int=10,
-	                                   seed::Union{Int,Nothing}=nothing,
-	                                   show_progress::Bool=true)
+	                                  nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}}=nothing,
+	                                  resolution::Union{Float64,Nothing}=nothing,
+	                                  resolution_range::Tuple{Float64,Float64}=(0.5, 1.8),
+	                                  n_resolutions::Int=20,
+	                                  n_runs_per_gamma::Int=5,
+	                                  n_iterations_per_run::Int=10,
+	                                  weighted::Bool=false,
+	                                  directed::Bool=false,
+	                                  agg_func::Union{Function,Nothing}=nothing,
+	                                  seed::Union{Int,Nothing}=nothing,
+	                                  show_progress::Bool=true)
 		"""
 		Args:
-			edges::DataFrame: edge list with :src, :dst, optional :weight
-			resolution::Union{Float64,Nothing}: single γ or nothing for sweep
+			edges::DataFrame: :src, :dst, optional :weight
+			nodes::Union{Nothing,DataFrame,Vector}: node universe (optional)
+			resolution::Union{Float64,Nothing}: single γ or sweep if nothing
 			resolution_range::Tuple: γ range for sweep (default = (0.5, 1.8))
 			n_resolutions::Int: number of γ values in sweep (default = 20)
-			weighted::Bool: use edge weights (default = false)
-			agg_func::Union{Function,Nothing}: edge aggregation function
 			n_runs_per_gamma::Int: Leiden runs per γ (default = 5)
-			n_iterations_per_run::Int: iterations per Leiden run (default = 10)
-			seed::Union{Int,Nothing}: random seed
+			n_iterations_per_run::Int: max iterations per run (default = 10)
+			weighted::Bool: treat graph as weighted (default = false)
+			directed::Bool: treat graph as directed (default = false)
+			agg_func::Function: edge aggregation (default = sum if weighted)
+			seed::Union{Int,Nothing}: RNG seed
 			show_progress::Bool: display progress bars (default = true)
 		Returns:
 			NamedTuple: (membership, resolution_used, modularity, n_communities, node_names)
 		Notes:
-			Identifies optimal partition via CHAMP dominance analysis.
-			Linear coefficients (A,P) define modularity planes Q(γ) = (A - γP)/2m.
+			Applies same preprocessing as Leiden/modularity functions.
+			Coefficients (A,P) computed to match igraph conventions.
 		"""
-		
-		#	Validation
-			@assert hasproperty(edges, :src) && hasproperty(edges, :dst) "Missing required columns"
+		#	Validation and Seed
+			@assert hasproperty(edges, :src) && hasproperty(edges, :dst) "edges must have :src and :dst"
 			if nrow(edges) == 0
-				return (membership=Int[], resolution_used=0.0, modularity=0.0, 
+				return (membership=Int[], resolution_used=0.0, modularity=0.0,
 				       n_communities=0, node_names=String[])
 			end
 			if seed !== nothing
 				Random.seed!(seed)
 			end
 		
-		#	Set aggregation strategy
+		#	Set Aggregation Strategy
 			if isnothing(agg_func)
 				agg_func = (weighted && hasproperty(edges, :weight)) ? sum : maximum
 			end
 		
-		#	Define resolution grid
-			gammas = if resolution === nothing
-				collect(range(resolution_range[1], resolution_range[2]; length=n_resolutions))
-			else
-				[resolution]
+		#	Aggregate Multi-Edges
+			clean_edges = _aggregate_multi_edges(edges; agg_func=agg_func)
+		
+		#	Build Base Adjacency
+			use_weights = weighted && hasproperty(clean_edges, :weight)
+			adj, node_to_idx, idx_to_node = _graph_to_sparse_matrix(clean_edges; 
+			                                                        nodes=nodes, 
+			                                                        weighted=use_weights)
+		
+		#	Binarize if Unweighted
+			if !weighted
+				adj = map!(x -> x == 0.0 ? 0.0 : 1.0, copy(adj), adj)
 			end
 		
-		#	Build adjacency matrix once
-			clean_edges = _aggregate_multi_edges(edges; agg_func=agg_func)
-			use_weights = weighted && hasproperty(clean_edges, :weight)
-			adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=use_weights)
-			adj = max.(adj, adj')
-			node_names = [idx_to_node[i] for i in 1:size(adj,1)]
+		#	Symmetrize for Undirected
+			if !directed
+				if weighted
+					adj = 0.5 .* (adj + adj')
+				else
+					adj = max.(adj, adj')
+				end
+			end
 		
-		#	Storage for partitions
+		#	Extract Node Names (robust to DataFrame or Vector; coerces to String)
+			if idx_to_node isa DataFrame
+				#	Selecting ID Type/Column
+					df = idx_to_node
+					cols = names(df)
+					if :label in cols
+						node_names = string.(df.label)
+					elseif :id in cols
+						node_names = string.(df.id)
+					else
+						#	Fallback: take the first column and stringify it
+							firstcol = cols[1]
+							node_names = string.(df[!, firstcol])
+					end
+			else
+				#	idx_to_node is a vector of IDs (may be Int, String, etc.)
+					node_names = string.(idx_to_node)
+			end
+
+		#	Define Resolution Grid
+			gammas = (resolution === nothing) ?
+				collect(range(resolution_range[1], resolution_range[2]; length=n_resolutions)) :
+				[resolution]
+		
+		#	Storage for Partitions
 			all_partitions = Vector{NamedTuple}(undef, length(gammas))
-			all_coefficients = Vector{Vector{Float64}}(undef, length(gammas))
+			all_coeffs     = Vector{Tuple{Float64,Float64}}(undef, length(gammas))
 		
-		#	Phase 1: Resolution sweep
+		#	Phase 1: Resolution Sweep
 			if show_progress
 				try; ProgressMeter.ijulia_behavior(:append); catch; end
 				@showprogress "CHAMP γ sweep" for (ix, γ) in enumerate(gammas)
-					#	Run Leiden at this resolution
-						res = leiden_community_detection(
-							clean_edges;
-							resolution = γ,
-							n_iterations = n_iterations_per_run,
-							n_runs = n_runs_per_gamma,
-							weighted = use_weights,
-							seed = seed
-						)
+					#	Run Leiden at This Resolution
+						res = leiden_community_detection(clean_edges; nodes = nodes, resolution = γ,
+							                             n_iterations = n_iterations_per_run,
+														 n_runs = n_runs_per_gamma, weighted = weighted,
+													     directed = directed, seed = seed)
 					
-					#	Calculate CHAMP coefficients
-						A, P = _calculate_partition_coefficients(adj, res.membership)
+					#	Calculate Coefficients
+						if directed
+							Aeff, Peff = _calculate_partition_coefficients_directed(adj, res.membership)
+						else
+							Aeff, Peff = _calculate_partition_coefficients(adj, res.membership)
+						end
 					
-					#	Store results
+					#	Store Results
 						all_partitions[ix] = (
-							membership = res.membership,
-							gamma = γ,
-							modularity = res.modularity,
+							membership    = res.membership,
+							gamma         = γ,
+							modularity    = res.modularity,
 							n_communities = res.n_communities,
-							A = A,
-							P = P
 						)
-						all_coefficients[ix] = [A, P]
+						all_coeffs[ix] = (Aeff, Peff)
 				end
 			else
 				for (ix, γ) in enumerate(gammas)
-					res = leiden_community_detection(
-						clean_edges;
-						resolution = γ,
-						n_iterations = n_iterations_per_run,
-						n_runs = n_runs_per_gamma,
-						weighted = use_weights,
-						seed = seed
-					)
-					A, P = _calculate_partition_coefficients(adj, res.membership)
+					res = leiden_community_detection(clean_edges; nodes = nodes, resolution = γ,
+												     n_iterations = n_iterations_per_run, n_runs = n_runs_per_gamma,
+					    				             weighted = weighted, directed = directed, seed = seed)
+					
+					if directed
+						Aeff, Peff = _calculate_partition_coefficients_directed(adj, res.membership)
+					else
+						Aeff, Peff = _calculate_partition_coefficients(adj, res.membership)
+					end
+					
 					all_partitions[ix] = (
-						membership = res.membership,
-						gamma = γ,
-						modularity = res.modularity,
+						membership    = res.membership,
+						gamma         = γ,
+						modularity    = res.modularity,
 						n_communities = res.n_communities,
-						A = A,
-						P = P
 					)
-					all_coefficients[ix] = [A, P]
+					all_coeffs[ix] = (Aeff, Peff)
 				end
 			end
 		
-		#	Phase 2: Dominance analysis
-			best_partition = all_partitions[1]
+		#	Phase 2: Dominance Analysis
+			best_ix = 1
 			
 			if length(gammas) > 1
-				n_partitions = length(all_partitions)
-				dominant = trues(n_partitions)
+				nP = length(all_partitions)
+				dominant = trues(nP)
+				γmin, γmax = minimum(gammas), maximum(gammas)
 				
-				#	Check dominance relationships
-					if show_progress
-						@showprogress "CHAMP dominance scan" for i in 1:n_partitions
-							A_i, P_i = all_coefficients[i]
+				#	Check Dominance Relationships
+					for i in 1:nP
+						Ai, Pi = all_coeffs[i]
+						for j in 1:nP
+							i == j && continue
+							Aj, Pj = all_coeffs[j]
 							
-							for j in 1:n_partitions
-								i == j && continue
-								A_j, P_j = all_coefficients[j]
-								
-								#	Test dominance
-									if !isapprox(P_i, P_j; atol=1e-12)
-										#	Find crossing point
-											γ_cross = (A_j - A_i) / (P_i - P_j + 1e-12)
-											
-											if minimum(gammas) - 1e-6 < γ_cross < maximum(gammas) + 1e-6
-												#	Test at midpoint
-													γ_test = clamp((γ_cross + all_partitions[i].gamma)/2, 
-													              minimum(gammas), maximum(gammas))
-													              
-													if (A_j - γ_test*P_j) > (A_i - γ_test*P_i) + 1e-12
-														dominant[i] = false
-														break
-													end
-											elseif (A_j - all_partitions[i].gamma*P_j) > 
-											       (A_i - all_partitions[i].gamma*P_i) + 1e-12
-												dominant[i] = false
-												break
-											end
-									else
-										#	Same P: compare A directly
-											if A_j > A_i + 1e-12
-												dominant[i] = false
-												break
-											end
-									end
-							end
-						end
-					else
-						for i in 1:n_partitions
-							A_i, P_i = all_coefficients[i]
-							for j in 1:n_partitions
-								i == j && continue
-								A_j, P_j = all_coefficients[j]
-								
-								if !isapprox(P_i, P_j; atol=1e-12)
-									γ_cross = (A_j - A_i) / (P_i - P_j + 1e-12)
-									if minimum(gammas) - 1e-6 < γ_cross < maximum(gammas) + 1e-6
-										γ_test = clamp((γ_cross + all_partitions[i].gamma)/2,
-										              minimum(gammas), maximum(gammas))
-										if (A_j - γ_test*P_j) > (A_i - γ_test*P_i) + 1e-12
+							#	Test Dominance
+								if !isapprox(Pi, Pj; atol=1e-12)
+									γcross = (Aj - Ai) / (Pi - Pj + 1e-12)
+									if γmin - 1e-6 < γcross < γmax + 1e-6
+										γtest = clamp((γcross + all_partitions[i].gamma)/2, γmin, γmax)
+										if (Aj - γtest*Pj) > (Ai - γtest*Pi) + 1e-12
 											dominant[i] = false
 											break
 										end
-									elseif (A_j - all_partitions[i].gamma*P_j) > 
-									       (A_i - all_partitions[i].gamma*P_i) + 1e-12
+									elseif (Aj - all_partitions[i].gamma*Pj) > 
+									       (Ai - all_partitions[i].gamma*Pi) + 1e-12
 										dominant[i] = false
 										break
 									end
 								else
-									if A_j > A_i + 1e-12
-										dominant[i] = false
-										break
-									end
+									#	Same Slope: Compare Intercept
+										if Aj > Ai + 1e-12
+											dominant[i] = false
+											break
+										end
 								end
-							end
 						end
 					end
 				
-				#	Select best among dominant partitions
+				#	Select Best Among Dominant Partitions
 					if any(dominant)
-						best_idx = findfirst(dominant)
+						best_ix = findfirst(dominant)
 						best_score = -Inf
-						
-						for (idx, is_dominant) in enumerate(dominant)
-							is_dominant || continue
-							part = all_partitions[idx]
-							score = part.A - part.gamma * part.P
-							
+						for (ix, ok) in enumerate(dominant)
+							ok || continue
+							Ai, Pi = all_coeffs[ix]
+							score = Ai - all_partitions[ix].gamma * Pi
 							if score > best_score
 								best_score = score
-								best_idx = idx
+								best_ix = ix
 							end
 						end
-						
-						best_partition = all_partitions[best_idx]
 					else
-						#	Fallback: highest modularity
-							best_idx = argmax(getfield.(all_partitions, :modularity))
-							best_partition = all_partitions[best_idx]
+						#	Fallback: Highest Modularity
+							best_ix = argmax(getfield.(all_partitions, :modularity))
 					end
 			end
 		
-		#	Return optimal partition
+		#	Return Best Partition
+			best = all_partitions[best_ix]
 			return (
-				membership = best_partition.membership,
-				resolution_used = best_partition.gamma,
-				modularity = best_partition.modularity,
-				n_communities = best_partition.n_communities,
-				node_names = node_names
+				membership     = best.membership,
+				resolution_used= best.gamma,
+				modularity     = best.modularity,
+				n_communities  = best.n_communities,
+				node_names     = node_names
 			)
 	end
 	@doc raw"""
 	**Description**
 	Implements CHAMP (Convex Hull of Admissible Modularity Partitions) to identify 
-	optimal community structure across resolution parameters.
+	optimal community structure across resolution parameters. Supports both directed
+	and undirected graphs with optional edge weights.
 
 	**Usage**
-	`champ_community_detection(edges; resolution=nothing, resolution_range=(0.5,1.8), 
-	                          n_resolutions=20, weighted=false, n_runs_per_gamma=5, 
+	`champ_community_detection(edges; nodes=nothing, resolution=nothing, 
+	                          resolution_range=(0.5,1.8), n_resolutions=20, 
+	                          weighted=false, directed=false, n_runs_per_gamma=5, 
 	                          n_iterations_per_run=10, seed=nothing, show_progress=true)`
 
 	**Arguments**
 	- `edges::DataFrame`: Edge list with `:src`, `:dst`, optional `:weight`
+	- `nodes::Union{Nothing,DataFrame,Vector}`: Node universe (includes isolates if provided)
 	- `resolution::Float64|nothing`: Single γ or `nothing` for sweep
 	- `resolution_range::Tuple`: Range [min, max] for γ sweep (default `(0.5, 1.8)`)
 	- `n_resolutions::Int`: Number of γ values in sweep (default `20`)
-	- `weighted::Bool`: Use edge weights (default `false`)
-	- `agg_func::Function`: Edge aggregation (default `sum` if weighted)
 	- `n_runs_per_gamma::Int`: Leiden runs per γ (default `5`)
 	- `n_iterations_per_run::Int`: Iterations per run (default `10`)
+	- `weighted::Bool`: Use edge weights (default `false`)
+	- `directed::Bool`: Treat as directed graph (default `false`)
+	- `agg_func::Function`: Edge aggregation (default `sum` if weighted, else `maximum`)
 	- `seed::Int`: Random seed for reproducibility
 	- `show_progress::Bool`: Display progress bars (default `true`)
 
@@ -3908,7 +3955,9 @@ module Large_Graph_Similarity
 	optimization. The algorithm:
 	
 	1. **Sweep**: Run Leiden at multiple resolutions
-	2. **Coefficients**: Calculate (A,P) defining Q(γ) = (A - γP)/2m
+	2. **Coefficients**: Calculate (A,P) defining:
+	   - Undirected: Q(γ) = (A - γP)/(2m_eff) with igraph convention
+	   - Directed: Q(γ) = (A - γP)/m
 	3. **Dominance**: Find non-dominated partitions
 	4. **Selection**: Return partition with highest quality score
 	
@@ -3929,17 +3978,18 @@ module Large_Graph_Similarity
 	result = champ_community_detection(edges;
 	                                   resolution_range=(0.3, 2.0),
 	                                   n_resolutions=30,
-	                                   n_runs_per_gamma=10,
+	                                   weighted=true)
+	
+	# Directed graph analysis
+	result = champ_community_detection(edges;
+	                                   directed=true,
 	                                   weighted=true)
 	
 	# Single resolution
 	result = champ_community_detection(edges;
 	                                   resolution=1.0,
 	                                   n_runs_per_gamma=20)
-	
-	println("Optimal resolution: γ = $(result.resolution_used)")
-	println("Communities: $(result.n_communities)")
-	println("Modularity: Q = $(round(result.modularity, digits=4))")
+```
 
 	**References**
 	1. Weir WH et al. (2017) Algorithms 10(3):93. doi:10.3390/a10030093
@@ -4478,196 +4528,464 @@ module Large_Graph_Similarity
 			return degrees, deg_mat
 	end
 
-#	Modularity Vitality
+#	Helper Function for modularity_vitality: Calculate Modularity After Node Removal
+	function newMods(edges::DataFrame, partition::DataFrame; nodes::Union{Nothing,DataFrame}=nothing,
+	                 resolution::Float64=1.0, test_flag::Bool=false, sentinel_id::AbstractString="828033366712688640")
+		"""
+		Args:
+			edges::DataFrame: edge list with :src, :dst, :weight
+			partition::DataFrame: node community assignments
+			nodes::Union{Nothing,DataFrame}: node universe (optional)
+			resolution::Float64: resolution parameter γ (default = 1.0)
+			test_flag::Bool: enable diagnostic output (default = false)
+			sentinel_id::AbstractString: node ID for test diagnostics
+		Returns:
+			Vector{Float64}: Q1 scores (modularity after removing each node)
+		Notes:
+			Calculates modularity change from removing each node.
+			Handles star centers specially to avoid division by zero.
+			Based on network deformation approach for modularity vitality.
+		"""
+		#	Create Node Indexing and Membership
+			index = collect(1:nrow(partition))
+			if (partition.community[1] == 0)
+				#	Create Membership Vector & Convert to 1-based
+					membership = partition.community .+ 1
+			else
+				#	Create Membeship Vector
+					membership = partition.community 
+			end
+		
+		#	Calculate Total Edge Weight
+			m = sum(edges.weight)
+		
+		#	Build Adjacency Matrix and Node Index
+			if isnothing(nodes)
+				A, node_index = getSparseA(edges)
+				node_index = DataFrame(id = node_index)
+			else
+				ni = deepcopy(nodes)
+				A, node_index = getSparseA(edges; nodes = ni)
+			end
+			
+			self_loops = sum(diag(A))
+		
+		#	Build Group Indicator Matrix
+			group_indicator_mat = getGroupIndicator(A, node_index, partition)
+			node_deg_by_group = A * group_indicator_mat
+		
+		#	Calculate Internal Degrees for Each Node
+			internal_deg = node_deg_by_group[CartesianIndex.(index, membership)]
+			internal_edges = (sum(internal_deg) + self_loops) / 2
+		
+		#	Calculate Degree Matrices
+			degrees, deg_mat = getDegMat(edges, group_indicator_mat, A)
+			node_deg_by_group += deg_mat
+		
+		#	Calculate Group-Level Degrees
+			group_degs = sum(deg_mat + Diagonal(diag(A)) * group_indicator_mat, dims=1)
+		
+		#	Handle Star Network Centers
+			starCenter = (degrees .== m)
+			degrees_safe = copy(degrees)
+			degrees_safe[starCenter] .= 1.0  # Avoid division by zero
+		
+		#	Calculate Q1 Link Component
+			q1_links = (internal_edges .- internal_deg) ./ (m .- degrees_safe)
+		
+		#	Calculate Expected Impact (Expanded Form)
+			expected_impact = sum(group_degs.^2) .- 
+			                 2 * (node_deg_by_group * group_degs') .+ 
+			                 sum(node_deg_by_group.^2, dims=2)
+		
+		#	Calculate Q1 Degree Component
+			q1_degrees = expected_impact ./ (4 * (m .- degrees_safe).^2)
+		
+		#	Combine Components for Final Q1 Scores
+			q1s = q1_links .- resolution .* q1_degrees  # Apply resolution parameter
+			q1s[starCenter] .= 0.0  # Star centers have zero impact
+			q1s = vec(q1s)
+		
+		#	Optional Test Diagnostics
+			if test_flag
+				#	Find Sentinel Node Index
+					sentinel_indices = findall(x -> x == sentinel_id, node_index.node)
+					
+					if !isempty(sentinel_indices)
+						i_s = sentinel_indices[1]
+						
+						#	Calculate Global Modularity
+							ni = deepcopy(nodes)
+							clean_edges = _aggregate_multi_edges(edges; agg_func=sum)
+							adj_dir, _, _ = _graph_to_sparse_matrix(clean_edges; 
+							                                       nodes=ni, 
+							                                       weighted=true)
+							Q0 = calculate_modularity(adj_dir, membership; 
+							                        weighted=true, 
+							                        directed=true, 
+							                        γ=resolution)
+						
+						#	Extract Community Information
+							c_s = membership[i_s]
+							n = length(membership)
+							in_cs = findall(j -> membership[j] == c_s, 1:n)
+							K_cs = sum(degrees[in_cs])
+							sum_internal_deg_cs = sum(internal_deg[j] for j in in_cs if membership[j] == c_s)
+							sum_self_loops_cs = sum(A[j, j] for j in in_cs)
+							E_cs = (sum_internal_deg_cs + sum_self_loops_cs) / 2.0
+						
+						#	Print Diagnostics
+							println("\n=== DEBUG newMods ===")
+							println("Global: m = $m, Q₀ = $Q0")
+							println("Sentinel: $sentinel_id (row $i_s, community $c_s)")
+							println("  Degrees: total = $(degrees[i_s]), internal = $(internal_deg[i_s])")
+							println("  Community $c_s: K = $K_cs, E = $E_cs")
+							println("  Components: q1_links = $(q1_links[i_s]), q1_degrees = $(q1_degrees[i_s])")
+							println("  Result: q1s = $(q1s[i_s]), vitality = $(Q0 - q1s[i_s])")
+							println("====================\n")
+					else
+						println("DEBUG: Sentinel '$sentinel_id' not found in node index")
+					end
+			end
+		
+		#	Return Modularity After Removal Scores
+			return q1s
+	end
+
+#	Modularity Vitality: Calculate Node Importance via Removal Impact
 	function modularity_vitality(edges::DataFrame;
-                             resolution_sweep::Bool=false,
-                             resolution::Float64=1.0,
-                             weighted::Bool=false,
-                             n_resolutions::Int=15,
-                             n_runs_per_gamma::Int=5,
-                             seed::Union{Int,Nothing}=nothing,
-                             provided_membership::Union{Nothing,DataFrame,Vector{Int},Dict}=nothing)
+	                            nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}}=nothing,
+	                            resolution_sweep::Bool=false,
+	                            resolution::Float64=1.0,
+	                            directed::Bool=false,
+	                            weighted::Bool=false,
+	                            n_resolutions::Int=15,
+	                            n_runs_per_gamma::Int=5,
+	                            n_iterations_per_run::Int=10,
+	                            seed::Union{Int,Nothing}=nothing,
+	                            provided_membership::Union{Nothing,DataFrame,Vector{Int},Dict}=nothing)
 		"""
 		Args:
 			edges::DataFrame: edge list with :src, :dst, optional :weight
-			resolution_sweep::Bool: run CHAMP sweep (true) or fixed-γ Leiden (false)
-			resolution::Float64: single γ for Leiden when not sweeping (default = 1.0)
-			weighted::Bool: use edge weights during community detection (default = false)
-			n_resolutions::Int: number of γ values for CHAMP sweep (default = 15)
+			nodes::Union{Nothing,DataFrame,Vector}: node universe (optional)
+			resolution_sweep::Bool: use CHAMP sweep vs single Leiden (default = false)
+			resolution::Float64: γ for single Leiden (default = 1.0)
+			directed::Bool: treat as directed graph (default = false)
+			weighted::Bool: use edge weights (default = false)
+			n_resolutions::Int: γ values for CHAMP (default = 15)
 			n_runs_per_gamma::Int: Leiden runs per γ (default = 5)
-			seed::Union{Int,Nothing}: random seed for reproducibility
-			provided_membership::Union{Nothing,DataFrame,Vector{Int},Dict}: optional user partition
-				• DataFrame: must contain columns [:node, :community], left-joined on node id
-				• Vector{Int}: community labels aligned to canonical node order
-				• Dict(node⇒label): order-agnostic node-community mapping
+			n_iterations_per_run::Int: max iterations per run (default = 10)
+			seed::Union{Int,Nothing}: random seed
+			provided_membership::Union{Nothing,DataFrame,Vector,Dict}: user partition
 		Returns:
 			NamedTuple: (results_df, resolution_used, modularity, n_communities)
 		Notes:
-			Implements Matt Magelinski’s modularity vitality pipeline with strict order alignment:
-			1) Canonical node order is derived from edges (first-appearance order).
-			2) Community labels (detected or provided) are remapped to that order.
-			3) Baseline modularity q₀ is computed on getSparseA(edges), matching newMods().
-			4) Node-removal modularities q₁ = newMods(edges, membership).
-			5) Vitality v = q₀ − q₁:
-				• Hubs: v > 0 (removal decreases modularity)
-				• Bridges: v < 0 (removal increases modularity)
+			Calculates vitality as Q0 - Q1 where Q1 is modularity after node removal.
+			Positive vitality = hub, negative = bridge.
 		"""
+		
 		#	Validation
-			cols = propertynames(edges)
-			@assert (:src in cols) && (:dst in cols) "modularity_vitality: edges must have :src and :dst columns"
-
-		#	Canonical edge-based node order (must match newMods/getSparseA)
-			edge_order = unique(vcat(edges.src, edges.dst))
-			n = length(edge_order)
-			if n == 0
+			@assert hasproperty(edges, :src) && hasproperty(edges, :dst) "edges must have :src and :dst"
+			if nrow(edges) == 0
 				df = DataFrame(node=String[], modularity_vitality=Float64[],
-							modularity_vitality_hub=Float64[], modularity_vitality_bridge=Float64[], community=Int[])
+				             modularity_vitality_hub=Float64[], modularity_vitality_bridge=Float64[], 
+				             community=Int[])
 				return (results_df=df, resolution_used=resolution, modularity=0.0, n_communities=0)
 			end
-
-		#	Membership + q0
-			membership = Int[]
-			resolution_used = resolution
-			n_communities   = 0
-			q0 = 0.0
-
-			if provided_membership === nothing
-				#	Detect partition
-					if resolution_sweep
-						det = champ_community_detection(
-							edges;
-							resolution         = nothing,
-							resolution_range   = (0.5, 1.8),
-							n_resolutions      = n_resolutions,
-							weighted           = weighted,
-							n_runs_per_gamma   = n_runs_per_gamma,
-							seed               = seed,
-							show_progress      = true
-						)
-						dmap = Dict(det.node_names .=> det.membership)
-						@assert all(haskey.(Ref(dmap), edge_order)) "modularity_vitality: detector missing nodes for remap"
-						membership       = [Int(dmap[v]) for v in edge_order]
-						resolution_used  = det.resolution_used
-						n_communities    = maximum(membership)
+		
+		#	Prepare Edges with Appropriate Weights
+			clean_edges = deepcopy(edges)
+			
+			if weighted
+				#	Weighted: Ensure Weight Column Exists
+					if !hasproperty(clean_edges, :weight)
+						clean_edges.weight = ones(Float64, nrow(clean_edges))
 					else
-						det = leiden_community_detection(
-							edges;
-							resolution   = resolution,
-							n_iterations = 10,
-							n_runs       = n_runs_per_gamma,
-							weighted     = weighted,
-							seed         = seed
-						)
-						dmap = Dict(det.node_names .=> det.membership)
-						@assert all(haskey.(Ref(dmap), edge_order)) "modularity_vitality: detector missing nodes for remap"
-						membership       = [Int(dmap[v]) for v in edge_order]
-						resolution_used  = resolution
-						n_communities    = maximum(membership)
+						clean_edges.weight = Float64.(clean_edges.weight)
 					end
-
-				#	q₀ on Matt-faithful A
-					A0 = getSparseA(edges)
-					@assert issymmetric(A0) "getSparseA: adjacency must be symmetric"
-					@assert size(A0, 1) == length(membership) "q₀ check: A–membership mismatch"
-					q0 = calculate_modularity(A0, membership, resolution_used)
+					agg_func = sum
 			else
-				#	User-provided partition
-					if provided_membership isa DataFrame
-						colsyms = Symbol.(names(provided_membership))
-						@assert (:node in colsyms) && (:community in colsyms) "provided_membership must contain :node and :community"
-						node_df = DataFrame(node=edge_order)
-						mapped  = leftjoin(node_df, provided_membership, on=:node)
-						@assert !any(ismissing, mapped.community) "modularity_vitality: missing community labels after join"
-						membership = Int.(mapped.community)
-					elseif provided_membership isa Dict
-						@assert all(haskey.(Ref(provided_membership), edge_order)) "modularity_vitality: provided_membership Dict missing nodes"
-						membership = [Int(provided_membership[v]) for v in edge_order]
-					else
-						@assert length(provided_membership) == n "provided_membership length must equal node count"
-						membership = Int.(provided_membership)
-					end
-					resolution_used = resolution
-					n_communities   = maximum(membership)
-
-					A0 = getSparseA(edges)
-					@assert issymmetric(A0) "getSparseA: adjacency must be symmetric"
-					q0 = calculate_modularity(A0, membership, resolution_used)
+				#	Unweighted: Force Binary Weights
+					clean_edges.weight = ones(Float64, nrow(clean_edges))
+					agg_func = maximum
 			end
-
-		#	Sanity
-			@assert length(membership) == n "modularity_vitality: membership length mismatch"
-			@assert all(membership .>= 1) "modularity_vitality: community labels must be positive"
-
-		#	Per-node Q(G\i)
-			q1s = newMods(edges, membership)
-
-		#	Vitality & hub/bridge
-			v = q0 .- q1s
+			
+			if weighted
+				clean_edges = _aggregate_multi_edges(clean_edges; agg_func=sum)
+			else
+				clean_edges = _aggregate_multi_edges(clean_edges; agg_func=maximum)
+			end
+			
+		#	Build Base Adjacency Matrix
+			adj_base, node_map, idx_to_node = _graph_to_sparse_matrix(clean_edges; 
+			                                                          nodes=nodes, 		
+			                                                          weighted=true)
+		
+		#	Preserve a Copy of the Node Index for Generating Community Solutions	
+			ni = deepcopy(idx_to_node)
+		
+		#	Extract Node IDs in Matrix Order
+			node_ids = if idx_to_node isa DataFrame
+				hasproperty(idx_to_node, :id) ? String.(idx_to_node.id) : String.(idx_to_node[:, 1])
+			else
+				String.(idx_to_node)
+			end
+			n = length(node_ids)
+		
+		#	Prepare Adjacency for Q0 Based on Graph Type
+			if directed && weighted
+				#	Case 1: Directed Weighted
+					A_Q0 = adj_base  # No transformation
+					
+			elseif directed && !weighted
+				#	Case 2: Directed Binary
+					A_Q0 = map(x -> x > 0 ? 1.0 : 0.0, adj_base)
+					
+			elseif !directed && weighted
+				#	Case 3: Undirected Weighted
+					A_Q0 = 0.5 .* (adj_base + adj_base')
+					
+			else  # !directed && !weighted
+				#	Case 4: Undirected Binary
+					A_Q0 = max.(adj_base, adj_base')
+					A_Q0 = map(x -> x > 0 ? 1.0 : 0.0, A_Q0)
+			end
+		
+		#	Obtain Community Partition
+			resolution_used = resolution
+			if provided_membership === nothing
+				#	Detect Communities
+					if resolution_sweep
+						#	CHAMP Sweep
+							community_solution = champ_community_detection(
+								clean_edges;
+								nodes = ni,
+								resolution = nothing,
+								resolution_range = (0.5, 1.8),
+								n_resolutions = n_resolutions,
+								weighted = weighted,
+								directed = directed,
+								n_runs_per_gamma = n_runs_per_gamma,
+								n_iterations_per_run = n_iterations_per_run,
+								seed = seed,
+								show_progress = true
+							)
+							resolution_used = community_solution.resolution_used
+							
+						#	Create Partition DataFrame
+							if community_solution.node_names isa DataFrame
+								partition_df = DataFrame(
+									node = String.(community_solution.node_names.id), 
+									community = community_solution.membership
+								)
+							else
+								partition_df = DataFrame(
+									node = String.(community_solution.node_names), 
+									community = community_solution.membership
+								)
+							end
+					else
+						#	Single Resolution Leiden
+							community_solution = leiden_community_detection(
+								clean_edges;
+								nodes = ni,
+								resolution = resolution,
+								n_iterations = n_iterations_per_run,
+								n_runs = n_runs_per_gamma,
+								weighted = weighted,
+								directed = directed,
+								seed = seed
+							)
+							resolution_used = resolution
+							
+						#	Create Partition DataFrame
+							if community_solution.node_names isa DataFrame
+								partition_df = DataFrame(
+									node = String.(community_solution.node_names.id), 
+									community = community_solution.membership
+								)
+							else
+								partition_df = DataFrame(
+									node = String.(community_solution.node_names), 
+									community = community_solution.membership
+								)
+							end
+					end	
+			else
+				#	Process User-Provided Partition
+					if provided_membership isa DataFrame
+						#	Use Provided DataFrame
+							pm = deepcopy(provided_membership)
+							rename!(pm, lowercase.(string.(propertynames(pm))))
+							@assert hasproperty(pm, :node) && hasproperty(pm, :community) "DataFrame needs :node and :community"
+							partition_df = DataFrame(
+								node = String.(pm.node),
+								community = Int.(pm.community)
+							)
+							
+					elseif provided_membership isa Vector
+						#	Vector Aligned to Matrix Order
+							@assert length(provided_membership) == n "Vector length must match node count"
+							partition_df = DataFrame(
+								node = node_ids,
+								community = Int.(provided_membership)
+							)
+							
+					elseif provided_membership isa Dict
+						#	Map by Node ID
+							communities = zeros(Int64, n)
+							for i in 1:n
+								communities[i] = get(provided_membership, node_ids[i], 0)
+							end
+							partition_df = DataFrame(
+								node = node_ids,
+								community = communities
+							)
+					end
+			end
+		
+		#	Align Partition to Matrix Order
+			if partition_df.node != node_ids
+				#	Create Mapping and Reorder
+					part_map = Dict(partition_df.node .=> partition_df.community)
+					membership_vec = [get(part_map, nid, 0) for nid in node_ids]
+					
+				#	Rebuild Partition in Correct Order
+					partition_df = DataFrame(node = node_ids, community = membership_vec)
+					
+				#	Handle Missing Nodes (Assign Singleton Communities)
+					if any(membership_vec .== 0)
+						max_comm = maximum(filter(!=(0), membership_vec); init=0)
+						for i in eachindex(membership_vec)
+							if membership_vec[i] == 0
+								max_comm += 1
+								membership_vec[i] = max_comm
+								partition_df.community[i] = max_comm
+							end
+						end
+					end
+			else
+				membership_vec = partition_df.community
+			end
+		
+		#	Calculate Q0: Baseline Modularity
+			Q0 = calculate_modularity(A_Q0, membership_vec; 
+			                        weighted=weighted, 
+			                        directed=directed, 
+			                        γ=resolution_used)
+		
+		#	Calculate Q1: Modularity After Each Node Removal
+			nodes_for_newmods = nodes isa DataFrame ? nodes : nothing
+			q1s = newMods(edges, partition_df; 
+			            nodes=nodes_for_newmods,
+			            resolution=resolution_used,
+			            test_flag=false)
+		
+		#	Calculate Vitality Scores
+			vitality = Q0 .- q1s
 			ϵ = 1e-12
-			hub_scores    = map(x -> x > ϵ  ? x  : 0.0, v)
-			bridge_scores = map(x -> x < -ϵ ? -x : 0.0, v)
-
-		#	Results (include raw modularity_vitality as 2nd column for Matt parity)
-			df = DataFrame(
-				node                       = edge_order,
-				modularity_vitality        = v,
-				modularity_vitality_hub    = hub_scores,
+			hub_scores    = ifelse.(vitality .>  ϵ,  vitality, 0.0)
+			bridge_scores = ifelse.(vitality .< -ϵ, -vitality, 0.0)
+		
+		#	Assemble Output DataFrame
+			out_df = DataFrame(
+				node = node_ids,
+				modularity_vitality = vitality,
+				modularity_vitality_hub = hub_scores,
 				modularity_vitality_bridge = bridge_scores,
-				community                  = membership
+				community = membership_vec
 			)
-			df.total_vitality = abs.(v)
-			sort!(df, :total_vitality, rev=true)
-			select!(df, Not(:total_vitality))
-
-		return (
-			results_df      = df,
-			resolution_used = resolution_used,
-			modularity      = q0,
-			n_communities   = n_communities
-		)
+			
+		#	Sort by Absolute Vitality
+			out_df.abs_vitality = abs.(vitality)
+			sort!(out_df, :abs_vitality, rev=true)
+			select!(out_df, Not(:abs_vitality))
+		
+		#	Return Results
+			return (
+				results_df = out_df,
+				resolution_used = resolution_used,
+				modularity = Q0,
+				n_communities = length(unique(membership_vec))
+			)
 	end
 	@doc raw"""
-	**Description**  
-	Identifies hub and bridge nodes using modularity vitality, following Matt Magelinski’s
+	**Description**
+	Identifies hub and bridge nodes using modularity vitality, following Matt Magelinski's
 	reference implementation. The function detects communities (Leiden or CHAMP) unless a
-	partition is provided, then computes per-node modularity vitality via `newMods(edges, membership)`.
+	partition is provided, then computes per-node modularity vitality via network deformation.
 
-	**Usage**  
-	`modularity_vitality(edges; resolution_sweep=false, resolution=1.0, weighted=false,
-						n_resolutions=15, n_runs_per_gamma=5, seed=nothing,
-						provided_membership=nothing)`
+	**Usage**
+	`modularity_vitality(edges; nodes=nothing, resolution_sweep=false, resolution=1.0, 
+	                    directed=false, weighted=false, n_resolutions=15, 
+	                    n_runs_per_gamma=5, n_iterations_per_run=10, seed=nothing, 
+	                    provided_membership=nothing)`
 
 	**Arguments**
 	- `edges::DataFrame`: Edge list with `:src`, `:dst`, optional `:weight`
+	- `nodes::Union{Nothing,DataFrame,Vector}`: Node universe (includes isolates if provided)
 	- `resolution_sweep::Bool`: Use CHAMP sweep (true) or fixed-γ Leiden (false)
 	- `resolution::Float64`: Resolution γ for Leiden when not sweeping (default `1.0`)
+	- `directed::Bool`: Treat as directed graph (default `false`)
 	- `weighted::Bool`: Use edge weights during detection (default `false`)
 	- `n_resolutions::Int`: Number of γ values for CHAMP sweep (default `15`)
 	- `n_runs_per_gamma::Int`: Leiden runs per γ (default `5`)
+	- `n_iterations_per_run::Int`: Max iterations per run (default `10`)
 	- `seed::Int`: Random seed for reproducibility
 	- `provided_membership::Union{Nothing,DataFrame,Vector{Int},Dict}`:
-	Optional community mapping.  
-	*If DataFrame, must contain columns `[:node, :community]` and is left-joined on node id to preserve order.*
+	  Optional community mapping:
+	  - DataFrame: Must contain columns `[:node, :community]`
+	  - Vector: Community labels aligned to node order
+	  - Dict: Node ID to community mapping
 
-	**Details**  
-	- If communities are detected, the detector’s modularity (`part.modularity`) is used as `q0`.  
-	- If a membership is provided, `q0` is computed as `calculate_modularity(getSparseA(edges), membership, γ)`.  
-	- Per-node removal modularities `q1s` are computed by `newMods(edges, membership)`.  
-	- Vitality is `v = q0 - q1s`.  
-	- **Hubs**: `v > 0` (removal decreases modularity)  
-	- **Bridges**: `v < 0` (removal increases modularity)
+	**Details**
+	Modularity vitality quantifies each node's contribution to community structure:
+	- **Q0**: Baseline modularity with all nodes present
+	- **Q1**: Modularity after removing each node (via `newMods`)
+	- **Vitality**: `v = Q0 - Q1` for each node
+	- **Hubs**: `v > 0` (removal decreases modularity, node connects its community)
+	- **Bridges**: `v < 0` (removal increases modularity, node connects communities)
 
-	**Value**  
-	NamedTuple with:
-	- `results_df::DataFrame`: `[node, modularity_vitality_hub, modularity_vitality_bridge, community]`
-	- `resolution_used::Float64`
-	- `modularity::Float64` (baseline `q0`)
-	- `n_communities::Int`
+	Supports four graph types:
+	- Directed weighted: Full edge weights and directions preserved
+	- Directed binary: Edges binarized, directions preserved
+	- Undirected weighted: Symmetrized via averaging
+	- Undirected binary: Symmetrized via max, then binarized
 
-	**References**  
-	Magelinski T, Bartulovic M, Carley KM (2021). Measuring node contribution to community structure with modularity vitality. IEEE TNSE 8(1):707–723.  
+	**Value**
+	NamedTuple containing:
+	- `results_df::DataFrame`: Columns `[node, modularity_vitality, modularity_vitality_hub, 
+	   modularity_vitality_bridge, community]`, sorted by absolute vitality
+	- `resolution_used::Float64`: Final resolution parameter
+	- `modularity::Float64`: Baseline modularity (Q0)
+	- `n_communities::Int`: Number of detected communities
+
+	**Examples**
+```julia
+	# Basic usage with automatic community detection
+	result = modularity_vitality(edges)
+	
+	# CHAMP sweep for optimal resolution
+	result = modularity_vitality(edges; 
+	                            resolution_sweep=true,
+	                            weighted=true,
+	                            directed=true)
+	
+	# User-provided partition
+	membership = DataFrame(node=node_ids, community=labels)
+	result = modularity_vitality(edges; 
+	                            provided_membership=membership,
+	                            weighted=true)
+```
+
+	**References**
+	Magelinski T, Bartulovic M, Carley KM (2021). Measuring node contribution to community 
+	structure with modularity vitality. IEEE Transactions on Network Science and Engineering 
+	8(1):707–723. doi:10.1109/TNSE.2021.3049068
+	
 	GitHub: github.com/tmagelinski/modularity_vitality
 	""" modularity_vitality
+
 
 #   CORE DECOMPOSITION (Considering Using ORA K-Core Decomposition Here)
 
