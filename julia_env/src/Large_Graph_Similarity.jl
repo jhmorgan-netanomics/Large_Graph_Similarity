@@ -4997,85 +4997,72 @@ module Large_Graph_Similarity
 			u::Int: node being removed
 			k::Int: current k threshold
 			degrees::Vector{Int}: degree vector (modified in-place)
-			active::BitVector: active mask
+			active::BitVector: active node mask
 			queue::Vector{Int}: removal queue (modified in-place)
 			mode::String: determines which neighbors affected
 		Returns:
 			Nothing (modifies in-place)
 		Notes:
+			CSC basics:
+				- Column u of `adj` lists i with adj[i,u] ≠ 0  (edges i → u)
+				- “Row u” can be iterated by making a CSC of the transpose and scanning its column u
 			Mode semantics:
-			- "in": u's out-neighbors lose in-degree
-			- "out": u's in-neighbors lose out-degree
-			- "total": both directions affected
-			- "undirected": all neighbors affected
+				- "in": u's out-neighbors lose in-degree     (iterate row u)
+				- "out": u's in-neighbors lose out-degree    (iterate column u)
+				- "total": both directions affected
+				- "undirected": neighbors once (assumes adj already symmetrized)
 		"""
-		
-		#	Process Based on Mode
-			rows = rowvals(adj)
-			
+
+		#	Handles for column-iteration on `adj`
+			rows  = rowvals(adj)
+
+		#	Materialize a CSC for the transpose so row-iteration is column-iteration
+			adjT  = SparseMatrixCSC(transpose(adj))  # <- key change
+			rowsT = rowvals(adjT)
+
+		#	Local helper: decrement and enqueue if threshold crossed
+			@inline function bump!(v::Int)
+				if active[v]
+					degrees[v] -= 1
+					if degrees[v] <= k
+						push!(queue, v)
+					end
+				end
+			end
+
+		#	Dispatch
 			if mode == "in"
-				#	Iterate Out-neighbors (Row u)
-					for idx in nzrange(adj, u)
-						j = rows[idx]
-						if active[j]
-							degrees[j] -= 1
-							if degrees[j] <= k
-								push!(queue, j)
-							end
-						end
+				#	u → j  (iterate "row u" via column u of adjT)
+					@inbounds for idx in nzrange(adjT, u)
+						j = rowsT[idx]
+						bump!(j)
 					end
-					
+
 			elseif mode == "out"
-				#	Iterate In-neighbors (Column u)
-					n = size(adj, 1)
-					for i in 1:n
-						if active[i] && adj[i, u] > 0
-							degrees[i] -= 1
-							if degrees[i] <= k
-								push!(queue, i)
-							end
-						end
+				#	i → u  (iterate column u of adj)
+					@inbounds for idx in nzrange(adj, u)
+						i = rows[idx]
+						bump!(i)
 					end
-					
+
 			elseif mode == "total"
-				#	Both Out and In Neighbors
-					for idx in nzrange(adj, u)
-						j = rows[idx]
-						if active[j]
-							degrees[j] -= 1
-							if degrees[j] <= k
-								push!(queue, j)
-							end
-						end
+				#	u → j
+					@inbounds for idx in nzrange(adjT, u)
+						j = rowsT[idx]
+						bump!(j)
 					end
-					n = size(adj, 1)
-					for i in 1:n
-						if active[i] && adj[i, u] > 0
-							degrees[i] -= 1
-							if degrees[i] <= k
-								push!(queue, i)
-							end
-						end
+				#	i → u
+					@inbounds for idx in nzrange(adj, u)
+						i = rows[idx]
+						bump!(i)
 					end
-					
-			else  # undirected
-				#	All Connected Nodes
-					for idx in nzrange(adj, u)
-						j = rows[idx]
-						if active[j]
-							degrees[j] -= 1
-							if degrees[j] <= k
-								push!(queue, j)
-							end
-						end
-					end
-					n = size(adj, 1)
-					for i in 1:n
-						if active[i] && i != u && adj[i, u] > 0
-							degrees[i] -= 1
-							if degrees[i] <= k
-								push!(queue, i)
-							end
+
+			else  # "undirected"
+				#	Symmetrized adjacency: hit each neighbor once by scanning one side
+					@inbounds for idx in nzrange(adj, u)
+						v = rows[idx]
+						if v != u
+							bump!(v)
 						end
 					end
 			end
