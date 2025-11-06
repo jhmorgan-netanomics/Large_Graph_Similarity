@@ -22,6 +22,7 @@
 	using SparseArrays
 	using Statistics
 	using StatsBase
+	using Test
     using Large_Graph_Similarity
 
 ######################
@@ -2373,10 +2374,10 @@
 	println("Spearman Rank Correlation: ", round(ρ, digits=6))
 
 #	Construct Comparison Set for Modularity Tests: ORA Tests
-	res_1_modularity = modularity_vitality(agent_agent_all_com.edges; nodes=nodes, directed=true, weighted=true, resolution_sweep=false, 
+	res_1_modularity = modularity_vitality(agent_agent_all_com.edges; nodes=nodes, directed=false, weighted=true, resolution_sweep=false, 
 					                       resolution=1.0)
 
-#	Compare Modularity Vitality Scores to ORA Hub & Bridge Scores: Hub ρ (0.97) and Bridge ρ (0.72)
+#	Compare Modularity Vitality Scores to ORA Hub & Bridge Scores: Hub ρ (0.991577) and Bridge ρ (0.99501599) :-)
 	ora_moduarlity_scores = CSV.read("/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data/All_Comm_Modularity_Vitality_Scores.csv", 
 					                 DataFrame, types=Dict(1 => String))
 	rename!(ora_moduarlity_scores, ["node", "Modularity_Vitality_Bridge_All_Comm", "Modularity_Vitality_Hub_All_Comm", "community"])
@@ -2389,48 +2390,112 @@
 	hub_ρ = corspearman(Float64.(combined_scores.Modularity_Vitality_Hub_All_Comm), Float64.(combined_scores.modularity_vitality_hub))
 	bridge_ρ = corspearman(Float64.(combined_scores.Modularity_Vitality_Bridge_All_Comm), Float64.(combined_scores.modularity_vitality_bridge))
 
-#	Python Partition Comparision: Hub 0.89 and Bridge 0.27
-	combined_scores = leftjoin!(ora_moduarlity_scores[:,(1:3)], fixed_modularity.results_df[:,[1,3,4]], on=:node)
-	combined_scores = combined_scores[:,[1,3,4,2,5]]
-	combined_scores.modularity_vitality_hub = convert.(Float64, combined_scores.modularity_vitality_hub)
-	combined_scores.modularity_vitality_bridge = convert.(Float64, combined_scores.modularity_vitality_bridge)
-
-	hub_ρ = corspearman(Float64.(combined_scores.Modularity_Vitality_Hub_All_Comm), Float64.(combined_scores.modularity_vitality_hub))
-	bridge_ρ = corspearman(Float64.(combined_scores.Modularity_Vitality_Bridge_All_Comm), Float64.(combined_scores.modularity_vitality_bridge))
-
-# 	Hub ranks
-	combined_scores.hub_rank_vitality = tiedrank(-combined_scores.modularity_vitality_hub)
-	combined_scores.hub_rank_allcomm  = tiedrank(-combined_scores.Modularity_Vitality_Hub_All_Comm)
-
-# 	Bridge ranks (if needed)
-	combined_scores.bridge_rank_vitality = tiedrank(-combined_scores.modularity_vitality_bridge)
-	combined_scores.bridge_rank_allcomm  = tiedrank(-combined_scores.Modularity_Vitality_Bridge_All_Comm)
-
-
-#	Compare Python and ORA Hub and Bridge Scores
-	python_ora = leftjoin!(python_results[:,[1,3,4]], ora_moduarlity_scores[:,(1:3)], on=:node)
-	python_ora = python_ora[:,[1,5,2,4,3]]
-	python_ora.Modularity_Vitality_Hub_All_Comm = convert.(Float64, python_ora.Modularity_Vitality_Hub_All_Comm)
-	python_ora.Modularity_Vitality_Bridge_All_Comm = convert.(Float64, python_ora.Modularity_Vitality_Bridge_All_Comm)
-
-	hub_ρ = corspearman(Float64.(python_ora.Modularity_Vitality_Hub_All_Comm), Float64.(python_ora.raw_hub))
-	bridge_ρ = corspearman(Float64.(python_ora.Modularity_Vitality_Bridge_All_Comm), Float64.(python_ora.raw_bridge))
-
-#	Writing-Out Result to Share with Jeff
-	directory = "/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data"
-	CSV.write(string(directory,"/","Python_ORA_Modularity_Vitality_Comparison.csv"), python_ora)
-	CSV.write(string(directory,"/","Julia_Python_Modularity_Vitalities.csv"), vitality_comparison)
-
-#	Once I hear back from Jeff about Bridge scores, revise this analysis.
-	
 ##########################
 #   CORE DECOMPOSITION   #
 ##########################
 
 #	FUNCTION TESTS (TEMPORARY)
 
+#	Helper: graph (nodes + edges) to sparse adjacency with fixed node universe
+	function _graph_to_sparse_matrix(edges::DataFrame;
+									nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}}=nothing,
+									weighted::Bool=true)
+		"""
+		Args:
+			edges::DataFrame
+				Required columns: :src, :dst
+				Optional column:  :weight
+				src/dst are node IDs (treated as String; supports long IDs)
+		
+			nodes::Union{Nothing,DataFrame,Vector{<:AbstractString}}
+				Nothing  → infer nodes from edges (isolates excluded)
+				DataFrame: columns :id and :label (both string vectors). Uses :id as the ID universe.
+				Vector   : string vector of node IDs forming the ID universe (includes isolates, if any)
+		
+			weighted::Bool
+				If true and edges has :weight, use it; otherwise use ones.
+				If false, ignore any :weight column and use ones.
+		
+		Returns:
+			Tuple{SparseMatrixCSC{Float64,Int64}, Dict{Any,Int}, Vector{Any}}
+				(adj_matrix, node_to_idx, idx_to_node)
+		
+		Notes:
+			- When `nodes` is provided, the returned matrix is sized to that universe
+			(so isolates are included). All edge endpoints must exist in `nodes`.
+			- When `nodes` is not provided, falls back to `_edgelist_to_sparse_matrix`
+			which infers the node set from edge endpoints only.
+		"""
+
+		#	Basic validation for edge columns
+			@assert hasproperty(edges, :src) && hasproperty(edges, :dst) "_graph_to_sparse_matrix: edges must have :src and :dst"
+
+		#	Fallback: no nodes supplied → just delegate to the existing helper
+			if nodes === nothing
+				return _edgelist_to_sparse_matrix(edges; weighted=weighted)
+			end
+
+		#	Build the fixed node universe (idx_to_node) and mapping (node_to_idx)
+			ids = String[]
+			if nodes isa DataFrame
+				#	Nodes as a DataFrame of IDs and Labels (Screen Names)
+					ndf = nodes::DataFrame
+					@assert hasproperty(ndf, :id) && hasproperty(ndf, :label) "_graph_to_sparse_matrix: nodes DataFrame must have :id and :label"
+					ids = String.(ndf.id)
+			else
+				#	Vector of node IDs
+					ids = String.(nodes::AbstractVector{<:AbstractString})
+			end
+
+		#	Specifyign Node Specific Return Objects
+			n = length(ids)
+			node_to_idx = Dict{Any,Int}(id => i for (i, id) in enumerate(ids))
+			if(typeof(nodes) == DataFrame)
+				idx_to_node = nodes
+			else
+				idx_to_node = Vector{Any}(ids)  # keep Any to match requested return type
+			end
+
+		#	Map edge endpoints to indices (validate all endpoints are known)
+			src_ids = String.(edges.src)
+			dst_ids = String.(edges.dst)
+
+			unknown_src = Set{String}(s for s in src_ids if !haskey(node_to_idx, s))
+			unknown_dst = Set{String}(d for d in dst_ids if !haskey(node_to_idx, d))
+			if !isempty(unknown_src) || !isempty(unknown_dst)
+				missing_ids = union(unknown_src, unknown_dst)
+				examples = join(collect(Iterators.take(missing_ids, 5)), ", ")
+				throw(ArgumentError("_graph_to_sparse_matrix: edges reference IDs not present in supplied nodes (examples: $examples)"))
+			end
+
+			src_idx = [node_to_idx[s] for s in src_ids]
+			dst_idx = [node_to_idx[d] for d in dst_ids]
+
+		#	Determine edge weights per spec
+			use_weights = weighted && hasproperty(edges, :weight)
+			weights = use_weights ? Float64.(edges.weight) : ones(Float64, nrow(edges))
+
+		#	Construct sparse adjacency (no symmetrization here; caller decides)
+			adj_matrix = sparse(src_idx, dst_idx, weights, n, n)
+
+		#	Return adjacency and mappings
+			return (adj_matrix, node_to_idx, idx_to_node)
+	end
+
+#	Test Objects: Directed/Binary
+	edges = deepcopy(agent_agent_all_com.edges)
+	clean_edges = _aggregate_multi_edges(edges; agg_func=maximum)
+    adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=false)
+
+#	Remove Self-loops
+	n = size(adj, 1)
+	for i in 1:n
+		adj[i, i] = 0.0
+	end
+	dropzeros!(adj)
+
 #	Helper Function for core_decomposition: Compute Initial K-core Degrees
-	function _compute_k_core_degrees(adj::SparseMatrixCSC, mode::String)
+	function _compute_k_core_degrees(edges::DataFrame, mode::String)
 		"""
 		Args:
 			adj::SparseMatrixCSC: adjacency matrix (self-loops already removed)
@@ -2441,32 +2506,40 @@
 			For directed graphs with mode="undirected", uses total degree.
 		"""
 		
-		#	Extract Degrees Based on Mode
-			n = size(adj, 1)
-			
+		#	Calculate Degrees for Each Mode
 			if mode == "undirected" || mode == "total"
 				#	Total Degree (In + Out)
-					degrees = vec(sum(adj, dims=1)) .+ vec(sum(adj, dims=2))
-					return round.(Int, degrees)
-					
+					degrees = total_degree(edges, weighted=false, drop_self_loops=true)
+					degrees.total_degree = convert.(Int64, degrees.total_degree)
+					return degrees.total_degree
 			elseif mode == "in"
 				#	In-Degree Only
-					degrees = vec(sum(adj, dims=1))
-					return round.(Int, degrees)
-					
+					degrees = in_degree(edges, weighted=false)
+					degrees.in_degree = convert.(Int64, degrees.in_degree)
+					return degrees.in_degree 	
 			elseif mode == "out"
 				#	Out-Degree Only
-					degrees = vec(sum(adj, dims=2))
-					return round.(Int, degrees)
-					
+					degrees = out_degree(edges, weighted=false)
+					degrees.out_degree = convert.(Int64, degrees.out_degree)
+					return degrees.out_degree		
 			else
 				throw(ArgumentError("Unsupported mode: $mode"))
 			end
 	end
 
+	all_comm_total = _compute_k_core_degrees(edges, "total")
+	all_comm_in = _compute_k_core_degrees(edges, "in")
+	all_comm_out = _compute_k_core_degrees(edges, "out")
+	DataFrame(node=idx_to_node,total_degree=all_comm_total, in_degree=all_comm_in, out_degree=all_comm_out)
+
 #	Helper Function for core_decomposition: Update K-core Assignments
-	function _update_k_cores!(k::Int, degrees::Vector{Int}, 
-	                         cores::Vector{Int}, active::BitVector)
+	k = 2
+	degrees = all_comm_total
+	n = size(adj, 1)
+	active = trues(n)
+	cores = zeros(Int, n)
+	function _update_k_cores!(k::Int, degrees::Vector{Int},
+                          cores::Vector{Int}, active::BitVector)
 		"""
 		Args:
 			k::Int: current k value
@@ -2479,28 +2552,44 @@
 			Sets cores[i] = k for active nodes with degree ≥ k.
 			Returns indices with degree exactly k as frontier.
 		"""
-		
-		#	Initialize Tracking Variables
-			frontier = Int[]
+
+		#	Pass 1: Count sizes (to preallocate exactly)
 			core_size = 0
-		
-		#	Update Core Assignments
-			@inbounds for i in eachindex(degrees)
-				if active[i] && degrees[i] >= k
-					cores[i] = k
-					core_size += 1
-					
-					#	Add to Frontier if Degree Exactly k
-						if degrees[i] == k
-							push!(frontier, i)
-						end
+			frontier_count = 0
+			@inbounds @simd for i in eachindex(degrees)
+				if active[i]
+					di = degrees[i]
+					if di >= k
+						core_size += 1
+						frontier_count += (di == k)
+					end
 				end
 			end
-		
+
+		#	Allocate frontier with exact length
+			frontier = Vector{Int}(undef, frontier_count)
+
+		#	Pass 2: Do writes (cores + fill pre-sized frontier)
+			writepos = 0
+			@inbounds @simd for i in eachindex(degrees)
+				if active[i]
+					di = degrees[i]
+					if di >= k
+						cores[i] = k
+						if di == k
+							writepos += 1
+							frontier[writepos] = i
+						end
+					end
+				end
+			end
+
 		#	Return Results
 			return (frontier = frontier, core_size = core_size)
 	end
 
+	_update_k_cores!(k, degrees, cores, active)
+	
 #	Helper Function for core_decomposition: Update Neighbor Degrees
 	function _update_k_neighbor_degrees!(adj::SparseMatrixCSC, u::Int, k::Int,
 	                                     degrees::Vector{Int}, active::BitVector,
@@ -2619,7 +2708,7 @@
 	end
 
 #	Helper Function for core_decomposition: Main K-core Algorithm
-	function _k_core_compute(adj::SparseMatrixCSC, mode::String)
+	function _k_core_compute(adj::SparseMatrixCSC, edges::DataFrame, mode::String)
 		"""
 		Args:
 			adj::SparseMatrixCSC: adjacency matrix (no self-loops)
@@ -2636,7 +2725,7 @@
 			cores = zeros(Int, n)
 		
 		#	Compute Initial Degrees
-			degrees = _compute_k_core_degrees(adj, mode)
+			degrees = _compute_k_core_degrees(edges, mode)
 		
 		#	Main Peeling Loop
 			k = 0
@@ -2660,276 +2749,428 @@
 			return cores
 	end
 
-#	Helper Function for core_decomposition: Compute S-core Strengths
-	function _compute_s_core_strengths(adj::SparseMatrixCSC, mode::String)
+	_k_core_compute(adj, edges, "total")
+	_k_core_compute(adj, edges, "out")
+	_k_core_compute(adj, edges, "in")
+	DataFrame(node = idx_to_node, total_core=_k_core_compute(adj, edges, "total"),
+              out_core = _k_core_compute(adj, edges, "out"), in_core=_k_core_compute(adj, edges, "in"))
+
+#	Helper Function for core_decomposition: Check for Negative Weights
+	function _has_negative_weights(W::SparseMatrixCSC)
 		"""
 		Args:
-			adj::SparseMatrixCSC: weighted adjacency matrix
+			W::SparseMatrixCSC: weighted adjacency matrix
+		Returns:
+			Bool: true if any stored weight is negative
+		Notes:
+			Checks only stored entries (implicit zeros are nonnegative).
+		"""
+		@inbounds for v in W.nzval
+			if v < 0
+				return true
+			end
+		end
+		return false
+	end
+
+#	Helper Function for core_decomposition: Split into Positive/Negative Layers
+	function _split_signed_layers(W::SparseMatrixCSC)
+		"""
+		Args:
+			W::SparseMatrixCSC: weighted adjacency matrix (may contain negatives)
+		Returns:
+			NamedTuple: (pos::SparseMatrixCSC, neg::SparseMatrixCSC)
+		Notes:
+			pos[i,j] = max(W[i,j], 0); neg[i,j] = max(-W[i,j], 0)
+			Both layers are nonnegative and share sparsity pattern subset of W.
+		"""
+		nz = nnz(W)
+		I = Vector{Int}(undef, nz)
+		J = Vector{Int}(undef, nz)
+		VP = Vector{Float64}(undef, nz)
+		VN = Vector{Float64}(undef, nz)
+
+		k = 0
+		rv = rowvals(W)
+		@inbounds for j in 1:size(W,2)
+			for p in nzrange(W, j)
+				i = rv[p]
+				w = W.nzval[p]
+				k += 1
+				I[k] = i
+				J[k] = j
+				VP[k] = (w > 0) ? w : 0.0
+				VN[k] = (w < 0) ? -w : 0.0
+			end
+		end
+		pos = sparse(I, J, VP, size(W,1), size(W,2))
+		neg = sparse(I, J, VN, size(W,1), size(W,2))
+		dropzeros!(pos); dropzeros!(neg)
+		return (pos = pos, neg = neg)
+	end
+
+#	Helper Function for core_decomposition: Compute S-core Strengths (nonnegative)
+	function _compute_s_core_strengths(W::SparseMatrixCSC, mode::String)
+		"""
+		Args:
+			W::SparseMatrixCSC: nonnegative weighted adjacency matrix
 			mode::String: "undirected", "in", "out", or "total"
 		Returns:
 			Vector{Float64}: strength (weighted degree) for each node
 		Notes:
-			For undirected mode, assumes matrix already symmetrized.
+			For "total"/"undirected" on directed W, returns in+out.
 		"""
-		
-		#	Extract Strengths Based on Mode
-			if mode == "undirected" || mode == "total"
-				#	Total Strength
-					return vec(sum(adj, dims=1)) .+ vec(sum(adj, dims=2))
-					
-			elseif mode == "in"
-				#	In-Strength
-					return vec(sum(adj, dims=1))
-					
-			elseif mode == "out"
-				#	Out-Strength
-					return vec(sum(adj, dims=2))
-					
-			else
-				throw(ArgumentError("Unsupported mode: $mode"))
-			end
+		if mode == "undirected" || mode == "total"
+			return vec(sum(W, dims=1)) .+ vec(sum(W, dims=2))
+		elseif mode == "in"
+			return vec(sum(W, dims=1))
+		elseif mode == "out"
+			return vec(sum(W, dims=2))
+		else
+			throw(ArgumentError("Unsupported mode: $mode"))
+		end
 	end
 
-#	Helper Function for core_decomposition: S-core Out-strength
+#	Helper Function for core_decomposition: S-core Out-strength (nonnegative)
 	function _s_core_out(W::SparseMatrixCSC, str_initial::Vector{Float64}, atol::Float64)
 		"""
 		Args:
-			W::SparseMatrixCSC: weighted adjacency matrix
-			str_initial::Vector{Float64}: initial out-strengths
+			W::SparseMatrixCSC: nonnegative weighted adjacency matrix
+			str_initial::Vector{Float64}: initial out-strengths (row sums)
 			atol::Float64: tolerance for comparisons
 		Returns:
-			Vector{Int}: s-core assignments
+			Vector{Int}: s-core tier assignments (1 = first shell for zero/near-zero)
 		Notes:
-			Implements s-core based on out-strength thresholds.
+			Peels by minimum out-strength; updates via nonzeros of the removed row.
+			Sets all nodes with str ≤ atol to tier 1 up front, then starts peeling at tier 2.
+			Skips self-loops if present. Uses preallocation for the removal frontier.
 		"""
-		
-		#	Initialize Variables
+		#	Initialize
 			n = length(str_initial)
+			@assert size(W, 1) == n "W size and strength vector length mismatch"
 			str_tmp = copy(str_initial)
-			tokeep = str_tmp .> atol
-			s_core = zeros(Int, n)
-			ct = 1
-			prevstart = 1
-		
-		#	Find First Active Node
-			s_thr = 0.0
-			anynonzero = false
-			for i in 1:n
+			s_core  = zeros(Int, n)
+			tokeep  = trues(n)
+
+		#	Assign tier 1 to zero/near-zero strengths, deactivate them
+			@inbounds for i in 1:n
+				if str_tmp[i] <= atol
+					s_core[i] = 1
+					tokeep[i] = false
+				end
+			end
+
+		#	Check if any active nodes remain
+			found_active = false
+			@inbounds for i in 1:n
 				if tokeep[i]
-					anynonzero = true
-					s_thr = str_tmp[i]
-					prevstart = i + 1
+					found_active = true
 					break
 				end
 			end
-		
-		#	Main Peeling Loop
-			while anynonzero
-				#	Find Minimum Strength Threshold
-					for i in prevstart:n
-						if tokeep[i] && str_tmp[i] < s_thr
-							s_thr = str_tmp[i]
-						end
-					end
-				
-				#	Mark Nodes at Threshold
-					nodes_to_remove = Int[]
-					for i in 1:n
-						if tokeep[i] && isapprox(str_tmp[i], s_thr, atol=atol)
-							s_core[i] = ct
-							tokeep[i] = false
-							push!(nodes_to_remove, i)
-						end
-					end
-				
-				#	Update Strengths of Remaining Nodes
-					for i in nodes_to_remove
-						for j in 1:n
-							if tokeep[j]
-								str_tmp[j] -= W[i, j]
+			!found_active && return s_core
+
+		#	Start peeling at tier 2
+			ct = 2
+
+		#	Main peel loop
+			while found_active
+				#	Find current minimum out-strength among active nodes
+					s_thr = Inf
+					@inbounds for i in 1:n
+						if tokeep[i]
+							vi = str_tmp[i]
+							if vi < s_thr
+								s_thr = vi
 							end
 						end
 					end
-				
-				#	Increment Core Level
+
+				#	Pass 1: count how many are at the threshold (to preallocate)
+					remove_count = 0
+					@inbounds for i in 1:n
+						if tokeep[i] && isapprox(str_tmp[i], s_thr, atol=atol)
+							remove_count += 1
+						end
+					end
+
+				#	If numerical drift makes remove_count zero (unlikely), promote the single argmin
+					if remove_count == 0
+						#	find strict argmin and take that one
+						argmin_i = 0
+						minv = Inf
+						@inbounds for i in 1:n
+							if tokeep[i] && str_tmp[i] < minv
+								minv = str_tmp[i]; argmin_i = i
+							end
+						end
+						if argmin_i == 0
+							break
+						end
+						remove_count = 1
+						nodes_to_remove = Vector{Int}(undef, 1)
+						nodes_to_remove[1] = argmin_i
+						s_core[argmin_i] = ct
+						tokeep[argmin_i] = false
+					else
+						nodes_to_remove = Vector{Int}(undef, remove_count)
+						#	Pass 2: fill removal list and assign tier
+						wpos = 0
+						@inbounds for i in 1:n
+							if tokeep[i] && isapprox(str_tmp[i], s_thr, atol=atol)
+								wpos += 1
+								nodes_to_remove[wpos] = i
+								s_core[i] = ct
+								tokeep[i] = false
+							end
+						end
+					end
+
+				#	Update remaining nodes' out-strengths via sparse row iteration
+					@inbounds for i in nodes_to_remove
+						rowi = W[i, :]              # ::SparseVector
+						idxs = rowi.nzind
+						vals = rowi.nzval
+						for t in eachindex(idxs)
+							j = idxs[t]
+							if j != i && tokeep[j]
+								str_tmp[j] -= vals[t]
+								#	Optional tiny clamp to avoid negative noise:
+								# if str_tmp[j] < 0 && -str_tmp[j] <= atol; str_tmp[j] = 0.0; end
+							end
+						end
+					end
+
+				#	Next tier or exit if none remain
 					ct += 1
-				
-				#	Find Next Active Node
-					anynonzero = false
-					for i in 1:n
+					found_active = false
+					@inbounds for i in 1:n
 						if tokeep[i]
-							anynonzero = true
-							s_thr = str_tmp[i]
-							prevstart = i + 1
+							found_active = true
 							break
 						end
 					end
 			end
-		
-		#	Return S-core Assignments
+
+		#	Return tier assignments
 			return s_core
 	end
 
-#	Helper Function for core_decomposition: S-core In-strength
+#	Helper Function for core_decomposition: S-core In-strength (nonnegative)
 	function _s_core_in(W::SparseMatrixCSC, str_initial::Vector{Float64}, atol::Float64)
 		"""
 		Args:
-			W::SparseMatrixCSC: weighted adjacency matrix
-			str_initial::Vector{Float64}: initial in-strengths
+			W::SparseMatrixCSC: nonnegative weighted adjacency matrix
+			str_initial::Vector{Float64}: initial in-strengths (column sums)
 			atol::Float64: tolerance for comparisons
 		Returns:
-			Vector{Int}: s-core assignments
+			Vector{Int}: s-core tier assignments (1 = first shell for zero/near-zero)
 		Notes:
-			Implements s-core based on in-strength thresholds.
+			Peels by minimum in-strength. When removing node i, we must reduce the
+			in-strength of its *targets* (nodes t with edges i→t), so we iterate the
+			nonzeros of row i and subtract those weights from str_in(t).
+			Zero/near-zero nodes are assigned tier 1 up front; peeling begins at tier 2.
 		"""
-		
-		#	Initialize Variables
+		#	Initialize
 			n = length(str_initial)
+			@assert size(W, 2) == n "W size and strength vector length mismatch (columns vs n)"
 			str_tmp = copy(str_initial)
-			tokeep = str_tmp .> atol
-			s_core = zeros(Int, n)
-			ct = 1
-			prevstart = 1
-		
-		#	Find First Active Node
-			s_thr = 0.0
-			anynonzero = false
-			for i in 1:n
+			s_core  = zeros(Int, n)
+			tokeep  = trues(n)
+
+		#	Assign tier 1 to zero/near-zero in-strengths, deactivate them
+			@inbounds for i in 1:n
+				if str_tmp[i] <= atol
+					s_core[i] = 1
+					tokeep[i] = false
+				end
+			end
+
+		#	Check if any active nodes remain
+			found_active = false
+			@inbounds for i in 1:n
 				if tokeep[i]
-					anynonzero = true
-					s_thr = str_tmp[i]
-					prevstart = i + 1
+					found_active = true
 					break
 				end
 			end
-		
-		#	Main Peeling Loop
-			while anynonzero
-				#	Find Minimum Strength Threshold
-					for i in prevstart:n
-						if tokeep[i] && str_tmp[i] < s_thr
-							s_thr = str_tmp[i]
-						end
-					end
-				
-				#	Mark Nodes at Threshold
-					nodes_to_remove = Int[]
-					for i in 1:n
-						if tokeep[i] && isapprox(str_tmp[i], s_thr, atol=atol)
-							s_core[i] = ct
-							tokeep[i] = false
-							push!(nodes_to_remove, i)
-						end
-					end
-				
-				#	Update Strengths of Remaining Nodes
-					for i in nodes_to_remove
-						for j in 1:n
-							if tokeep[j]
-								str_tmp[j] -= W[j, i]
+			!found_active && return s_core
+
+		#	Start peeling at tier 2
+			ct = 2
+
+		#	Main peel loop
+			while found_active
+				#	Find current minimum in-strength among active nodes
+					s_thr = Inf
+					@inbounds for i in 1:n
+						if tokeep[i]
+							vi = str_tmp[i]
+							if vi < s_thr
+								s_thr = vi
 							end
 						end
 					end
-				
-				#	Increment Core Level
+
+				#	Pass 1: count removals at threshold (preallocate)
+					remove_count = 0
+					@inbounds for i in 1:n
+						if tokeep[i] && isapprox(str_tmp[i], s_thr, atol=atol)
+							remove_count += 1
+						end
+					end
+
+				#	Build removal list and assign tier
+					if remove_count == 0
+						#	Fallback: remove strict argmin
+							argmin_i = 0
+							minv = Inf
+							@inbounds for i in 1:n
+								if tokeep[i] && str_tmp[i] < minv
+									minv = str_tmp[i]; argmin_i = i
+								end
+							end
+							if argmin_i == 0
+								break
+							end
+							nodes_to_remove = Vector{Int}(undef, 1)
+							nodes_to_remove[1] = argmin_i
+							s_core[argmin_i] = ct
+							tokeep[argmin_i] = false
+					else
+						nodes_to_remove = Vector{Int}(undef, remove_count)
+						wpos = 0
+						@inbounds for i in 1:n
+							if tokeep[i] && isapprox(str_tmp[i], s_thr, atol=atol)
+								wpos += 1
+								nodes_to_remove[wpos] = i
+								s_core[i] = ct
+								tokeep[i] = false
+							end
+						end
+					end
+
+				#	Update remaining nodes' *in-strengths*:
+				#	For each removed node i, iterate its *row* (i → t) and subtract from str_in(t).
+					@inbounds for i in nodes_to_remove
+						rowi = W[i, :]              # ::SparseVector (out-neighbors of i)
+						idxs = rowi.nzind
+						vals = rowi.nzval
+						for t in eachindex(idxs)
+							j = idxs[t]
+							if j != i && tokeep[j]
+								str_tmp[j] -= vals[t]
+								#	Optional clamp for tiny negatives:
+								# if str_tmp[j] < 0 && -str_tmp[j] <= atol; str_tmp[j] = 0.0; end
+							end
+						end
+					end
+
+				#	Next tier or exit
 					ct += 1
-				
-				#	Find Next Active Node
-					anynonzero = false
-					for i in 1:n
+					found_active = false
+					@inbounds for i in 1:n
 						if tokeep[i]
-							anynonzero = true
-							s_thr = str_tmp[i]
-							prevstart = i + 1
+							found_active = true
 							break
 						end
 					end
 			end
-		
-		#	Return S-core Assignments
+
+		#	Return tiers
 			return s_core
 	end
 
-#	Helper Function for core_decomposition: S-core Total-strength
+#	Helper Function for core_decomposition: S-core Total-strength (nonnegative)
 	function _s_core_total(W::SparseMatrixCSC, atol::Float64)
 		"""
 		Args:
-			W::SparseMatrixCSC: weighted adjacency matrix
+			W::SparseMatrixCSC: nonnegative weighted adjacency matrix
 			atol::Float64: tolerance for comparisons
 		Returns:
-			Vector{Int}: s-core assignments
+			Vector{Int}: s-core tiers based on incident strength (W + W')
 		Notes:
-			Symmetrizes W as W + W' then computes s-core.
+			Symmetrizes via W + W' and peels by out-strength on the symmetric matrix.
 		"""
-		
-		#	Symmetrize Matrix
-			W_sym = W + W'
-		
-		#	Compute Initial Strengths
-			str_initial = vec(sum(W_sym, dims=1))
-		
-		#	Run S-core Algorithm
-			return _s_core_out(W_sym, str_initial, atol)
+		W_sym = W + W'
+		str_initial = vec(sum(W_sym, dims=1))
+		return _s_core_out(W_sym, str_initial, atol)
 	end
 
-#	Helper Function for core_decomposition: S-core Undirected
+#	Helper Function for core_decomposition: S-core Undirected (nonnegative)
 	function _s_core_undirected(W::SparseMatrixCSC, atol::Float64)
 		"""
 		Args:
-			W::SparseMatrixCSC: weighted adjacency matrix (already symmetrized)
+			W::SparseMatrixCSC: symmetric nonnegative adjacency
 			atol::Float64: tolerance for comparisons
 		Returns:
-			Vector{Int}: s-core assignments
+			Vector{Int}: s-core tiers based on incident strength
 		Notes:
-			For undirected graphs, assumes W is already symmetric.
+			Assumes W is symmetric; uses column sums for initial strengths.
 		"""
-		
-		#	Compute Initial Strengths
-			str_initial = vec(sum(W, dims=1))
-		
-		#	Run S-core Algorithm
-			return _s_core_out(W, str_initial, atol)
+		str_initial = vec(sum(W, dims=1))
+		return _s_core_out(W, str_initial, atol)
 	end
 
-#	Helper Function for core_decomposition: Main S-core Algorithm
-	function _s_core_compute(adj::SparseMatrixCSC, mode::String, atol::Float64)
+#	Main Signed S-core: Positive/Negative Layers
+	function _s_core_compute_signed(adj::SparseMatrixCSC, mode::String, atol::Float64)
 		"""
 		Args:
-			adj::SparseMatrixCSC: weighted adjacency matrix
+			adj::SparseMatrixCSC: weighted adjacency (may include negative weights)
 			mode::String: "undirected", "in", "out", or "total"
 			atol::Float64: tolerance for floating-point comparisons
 		Returns:
-			Vector{Int}: s-core number for each node
+			NamedTuple: (pos::Vector{Int}, neg::Vector{Int})
 		Notes:
-			Generalization of k-core to weighted networks.
+			If no negative weights are present, 'neg' is all zeros and 'pos' matches
+			the nonnegative s-core result. For signed inputs, computes cores on
+			positive (W_pos) and negative (W_neg) layers separately (magnitudes).
 		"""
-		
-		#	Dispatch Based on Mode
+
+		#	Split or route as nonnegative
+			if _has_negative_weights(adj)
+				layers = _split_signed_layers(adj)
+				W_pos, W_neg = layers.pos, layers.neg
+			else
+				W_pos = adj
+				W_neg = spzeros(size(adj,1), size(adj,2))
+			end
+
+		#	Dispatch per mode on each nonnegative layer
 			if mode == "undirected"
-				return _s_core_undirected(adj, atol)
-				
+				pos = _s_core_undirected(W_pos, atol)
+				neg = _s_core_undirected(W_neg, atol)
+
 			elseif mode == "in"
-				str_initial = vec(sum(adj, dims=1))
-				return _s_core_in(adj, str_initial, atol)
-				
+				str_in_pos = vec(sum(W_pos, dims=1))
+				str_in_neg = vec(sum(W_neg, dims=1))
+				pos = _s_core_in(W_pos, str_in_pos, atol)
+				neg = _s_core_in(W_neg, str_in_neg, atol)
+
 			elseif mode == "out"
-				str_initial = vec(sum(adj, dims=2))
-				return _s_core_out(adj, str_initial, atol)
-				
+				str_out_pos = vec(sum(W_pos, dims=2))
+				str_out_neg = vec(sum(W_neg, dims=2))
+				pos = _s_core_out(W_pos, str_out_pos, atol)
+				neg = _s_core_out(W_neg, str_out_neg, atol)
+
 			elseif mode == "total"
-				return _s_core_total(adj, atol)
-				
+				pos = _s_core_total(W_pos, atol)
+				neg = _s_core_total(W_neg, atol)
+
 			else
 				throw(ArgumentError("Unsupported mode: $mode"))
 			end
+
+		#	Return Postive & Negative s-core Layers
+			return (pos = pos, neg = neg)
 	end
 
-#	Core Decomposition: K-core (unweighted) and S-core (weighted)
+#	Core Decomposition: K-core (unweighted) and Sign Aware S-core (weighted)
 	function core_decomposition(edges::DataFrame;
-	                          mode::String="undirected",
-	                          weighted::Bool=false,
-	                          nodes::Union{Nothing,DataFrame,Vector{<:AbstractString}}=nothing,
-	                          atol::Float64=1e-10)
+	                           mode::String="undirected",
+	                           weighted::Bool=false,
+	                           nodes::Union{Nothing,DataFrame,Vector{<:AbstractString}}=nothing,
+	                           atol::Float64=1e-10)
 		"""
 		Args:
 			edges::DataFrame: edge list with :src, :dst, optional :weight
@@ -2938,11 +3179,14 @@
 			nodes::Union{Nothing,DataFrame,Vector}: node universe (optional)
 			atol::Float64: tolerance for s-core comparisons (default = 1e-10)
 		Returns:
-			DataFrame: columns [node, core_number]
+			DataFrame:
+				- unweighted (k-core): [node, core_number]
+				- weighted, unsigned: [node, core_number]
+				- weighted, signed: [node, core_number_pos, core_number_neg]
 		Notes:
 			Self-loops excluded in all modes.
-			For weighted=false: standard k-core decomposition.
-			For weighted=true: s-core decomposition (Eidsaa & Almaas 2013).
+			Weighted unsigned dispatches to _s_core_out/_s_core_in/_s_core_total/_s_core_undirected.
+			Weighted signed dispatches to _s_core_compute_signed.
 		"""
 		
 		#	Validation
@@ -2965,26 +3209,55 @@
 		
 		#	Remove Self-loops
 			n = size(adj, 1)
-			for i in 1:n
-				adj[i, i] = 0.0
+			@inbounds for i in 1:n
+				if adj[i, i] != 0.0
+					adj[i, i] = 0.0
+				end
 			end
 			dropzeros!(adj)
 		
-		#	Handle Undirected Mode
+		#	Handle Undirected Mode (symmetrize on entry for "undirected")
 			if mode == "undirected"
-				#	Symmetrize Matrix
-					if weighted
-						adj = 0.5 .* (adj + adj')
-					else
-						adj = max.(adj, adj')
-					end
+				if weighted
+					adj = 0.5 .* (adj + adj')
+				else
+					adj = max.(adj, adj')
+				end
+				dropzeros!(adj)
+			end
+		
+		#	Signedness Detection (only relevant when weighted=true)
+			is_signed = false
+			if weighted
+				_, _, V = findnz(adj)
+				any_pos = any(>(0.0), V)
+				any_neg = any(<(0.0), V)
+				is_signed = any_pos && any_neg
 			end
 		
 		#	Compute Core Decomposition
 			if weighted
-				cores = _s_core_compute(adj, mode, atol)
+				if is_signed
+					#	Signed S-core
+					res_signed = _s_core_compute_signed(adj, mode, atol)
+					cores_pos = res_signed.pos
+					cores_neg = res_signed.neg
+				else
+					#	Unsigned S-core (dispatch by mode)
+					if mode == "out"
+						str0 = vec(sum(adj, dims=2))
+						cores = _s_core_out(adj, str0, atol)
+					elseif mode == "in"
+						str0 = vec(sum(adj, dims=1))
+						cores = _s_core_in(adj, str0, atol)
+					elseif mode == "total"
+						cores = _s_core_total(adj, atol)
+					else  # "undirected"
+						cores = _s_core_undirected(adj, atol)
+					end
+				end
 			else
-				cores = _k_core_compute(adj, mode)
+				cores = _k_core_compute(adj, edges, mode)
 			end
 		
 		#	Extract Node Names
@@ -2995,10 +3268,18 @@
 			end
 		
 		#	Assemble Results
-			return DataFrame(
-				node = node_names,
-				core_number = cores
-			)
+			if weighted && is_signed
+				return DataFrame(
+					node = node_names,
+					core_number_pos = cores_pos,
+					core_number_neg = cores_neg
+				)
+			else
+				return DataFrame(
+					node = node_names,
+					core_number = cores
+				)
+			end
 	end
 	@doc raw"""
 	**Description**
@@ -3055,11 +3336,198 @@
 	`in_degree`, `out_degree`, `total_degree`
 	""" core_decomposition
 
-
 #	CALCULATE CORE DECOMPOSITION MEASURES
 
+#	Total (unweighted / k-core)
+	res_total_unweighted = core_decomposition(agent_agent_all_com.edges; mode="total", weighted=false)
+
+#	Out (unweighted / k-core)
+	res_out_unweighted = core_decomposition(agent_agent_all_com.edges; mode="out", weighted=false)
+
+#	In (unweighted / k-core)
+	res_in_unweighted = core_decomposition(agent_agent_all_com.edges; mode="in", weighted=false)
+
+#	Total (weighted / s-core; auto-signed if mixed weights, else unsigned)
+	res_total_weighted = core_decomposition(agent_agent_all_com.edges; mode="total", weighted=true, atol=1e-12)
+
+#	In (weighted / s-core)
+	res_in_weighted = core_decomposition(agent_agent_all_com.edges; mode="in", weighted=true, atol=1e-12)
+
+#	Out (weighted / s-core)
+	res_out_weighted = core_decomposition(agent_agent_all_com.edges; mode="out", weighted=true, atol=1e-12)
 
 #	CONDUCT TESTS
+
+#	Simple K-Core Test
+	function test_kcore_decomposition()
+		"""
+		Tests k-core decomposition on a 9-node graph with known structure.
+		Graph design:
+		- Nodes 1-5: Complete subgraph K5 (4-core)
+		- Nodes 6-7: Connected to nodes 1,2,3 (3-core)
+		- Node 8: Connected to nodes 1,2 (2-core)
+		- Node 9: Connected to node 1 (1-core)
+		"""
+		
+		#	Build Test Graph Edges
+			println("\n=== K-CORE TEST HARNESS ===\n")
+			println("Graph Structure:")
+			println("- Nodes 1-5: Complete graph K5 (all pairs connected)")
+			println("- Node 6: Connected to nodes 1,2,3")
+			println("- Node 7: Connected to nodes 1,2,3")
+			println("- Node 8: Connected to nodes 1,2")
+			println("- Node 9: Connected to node 1")
+			println("")
+			
+			edges = DataFrame()
+			
+			#	K5 Complete Subgraph (nodes 1-5)
+				for i in 1:5
+					for j in (i+1):5
+						push!(edges, (src=string(i), dst=string(j)))
+					end
+				end
+			
+			#	Node 6 connections
+				push!(edges, (src="6", dst="1"))
+				push!(edges, (src="6", dst="2"))
+				push!(edges, (src="6", dst="3"))
+			
+			#	Node 7 connections
+				push!(edges, (src="7", dst="1"))
+				push!(edges, (src="7", dst="2"))
+				push!(edges, (src="7", dst="3"))
+			
+			#	Node 8 connections
+				push!(edges, (src="8", dst="1"))
+				push!(edges, (src="8", dst="2"))
+			
+			#	Node 9 connection
+				push!(edges, (src="9", dst="1"))
+		
+		#	Analytical K-core Assignments
+			analytical = Dict(
+				"1" => 4,  # In K5, degree 4 in 4-core
+				"2" => 4,  # In K5, degree 4 in 4-core
+				"3" => 4,  # In K5, degree 4 in 4-core
+				"4" => 4,  # In K5, degree 4 in 4-core
+				"5" => 4,  # In K5, degree 4 in 4-core
+				"6" => 3,  # Degree 3 after 1-core and 2-core removed
+				"7" => 3,  # Degree 3 after 1-core and 2-core removed
+				"8" => 2,  # Degree 2 after 1-core removed
+				"9" => 1   # Degree 1, removed first
+			)
+		
+		#	Print Degree Information
+			println("Node Degrees (in full graph):")
+			degree_df = total_degree(edges; weighted=false, drop_self_loops=true)
+			for row in eachrow(degree_df)
+				println("  Node $(row.node): degree = $(Int(row.total_degree))")
+			end
+			println("")
+		
+		#	Run K-core Decomposition
+			result = core_decomposition(edges; mode="undirected", weighted=false)
+			sort!(result, :node)
+		
+		#	Compare Results
+			println("K-core Assignments:")
+			println("Node | Analytical | Computed | Match")
+			println("-----|------------|----------|------")
+			
+			all_match = true
+			for row in eachrow(result)
+				analytical_val = analytical[row.node]        # e.g., Dict{String,Int}
+				computed_val   = row.core_number             # Int
+				is_match       = (analytical_val == computed_val)
+				mark           = is_match ? "✓" : "✗"
+				if !is_match
+					all_match = false
+				end
+				println("  ",
+						rpad(row.node, 12), " | ",
+						rpad(string(analytical_val), 7), " | ",
+						rpad(string(computed_val),   6), " | ",
+						mark)
+			end
+			
+			println("")
+			if all_match
+				println("✅ All k-core assignments match analytical solution!")
+			else
+				println("❌ Some k-core assignments do not match!")
+			end
+		
+		#	Verify Core Properties
+			println("\nVerifying k-core properties:")
+			
+			#	Build adjacency for verification
+				adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(edges; weighted=false)
+				adj = max.(adj, adj')  # Symmetrize
+				n = size(adj, 1)
+				
+				#	Remove self-loops
+				for i in 1:n
+					adj[i, i] = 0.0
+				end
+				dropzeros!(adj)
+			
+			#	Check each k value
+				for k in 1:4
+					println("\nChecking $k-core:")
+					
+					#	Find nodes in k-core or higher
+					k_core_nodes = String[]
+					for row in eachrow(result)
+						if row.core_number >= k
+							push!(k_core_nodes, row.node)
+						end
+					end
+					
+					if isempty(k_core_nodes)
+						println("  No nodes in $k-core")
+						continue
+					end
+					
+					#	Get indices
+					k_indices = [node_to_idx[node] for node in k_core_nodes]
+					
+					#	Check minimum degree within k-core subgraph
+					min_deg = Inf
+					for i in k_indices
+						deg = 0
+						for j in k_indices
+							if i != j && adj[i, j] > 0
+								deg += 1
+							end
+						end
+						min_deg = min(min_deg, deg)
+					end
+					
+					println("  Nodes: $(join(sort(k_core_nodes), ", "))")
+					println("  Minimum degree in subgraph: $(Int(min_deg))")
+					println("  Expected minimum: $k")
+					
+					if min_deg >= k
+						println("  ✓ Property satisfied")
+					else
+						println("  ✗ Property violated!")
+					end
+			end
+		
+		#	Return for Further Analysis
+			return (
+				edges = edges,
+				analytical = analytical,
+				computed = result,
+				adjacency = adj
+			)
+	end
+
+# 	Run Simple K-Core Test
+	test_result = test_kcore_decomposition()
+
+#	COME BACK HERE!!! 
 
 
 ###################
