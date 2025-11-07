@@ -458,3 +458,27 @@ suppressPackageStartupMessages({
                               scoredec_out =  all_comm_out_score, scoredec_in = all_comm_in_score)
   directory <- c("D:/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data")
   readr::write_csv(s_core_scores, file=paste0(directory,"/","Balikatan_AllComm_SCore_Scores.csv"))
+  
+#############################
+#   2-HOP REACH: IN & OUT   #
+#############################
+  
+# Calculating 2-Hop In-Reach
+  in_hop_reach = igraph::neighborhood(all_comm, order=2, mode=c("in"))
+  in_reach_2 <- unlist(lapply(in_hop_reach, function(x) length(x)))
+  
+# Calculating 2-Hop Out-Reach  
+  out_hop_reach = igraph::neighborhood(all_comm, order=2, mode=c("out"))
+  out_reach_2 <- unlist(lapply(out_hop_reach, function(x) length(x)))
+  
+# Calculating 2-Hop Undirected Reach
+  all_hop_reach = igraph::neighborhood(all_comm, order=2, mode=c("all"))
+  all_reach_2 <- unlist(lapply(all_hop_reach, function(x) length(x)))
+  
+# Constructing Comparison Dataset
+  reach_index <- data.frame(node = V(all_comm)$label, in_reach_2 = in_reach_2, out_reach_2 = out_reach_2,
+                            undirected_reach_2 = all_reach_2)
+  
+# Exporting for Comparison Tests
+  directory <- c("D:/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data")
+  readr::write_csv(reach_index, file=paste0(directory,"/","Balikatan_AllComm_2Reach_Counts.csv"))

@@ -2783,5 +2783,231 @@
 
 #	CONDUCT TESTS
 
+
+#	Helper: BM Triad Census (directed, simple 0/1, loopless)
+	function _triad_census_bm_directed(adj::SparseMatrixCSC{Float64,Int})
+		"""
+		Args:
+			adj::SparseMatrixCSC{Float64,Int}: directed simple graph (0/1); self-loops must be zero
+		Returns:
+			NamedTuple: (counts::Vector{Int}, labels::Vector{String})
+		Notes:
+			- Implements Batagelj–Mrvar (2001) via RSiena’s dyad-driven approach.
+			- Triad classes follow Davis–Leinhardt order:
+			  ["003","012","102","021D","021U","021C","111D","111U","030T","030C","201","120D","120U","120C","210","300"].
+			- Assumes: no multi-edges (binary), no self-loops; adj[i,i]==0.
+		"""
+
+		#	Dimensions & quick guards
+			n = size(adj, 1)
+			@assert size(adj, 2) == n "adj must be square"
+			n == 0 && return (counts = zeros(Int, 16), labels = _dl_labels())
+
+		#	Ensure binary semantics (defensive; cheap on nonzeros)
+			vals = nonzeros(adj)
+			@inbounds for t in eachindex(vals)
+				vals[t] = vals[t] > 0 ? 1.0 : 0.0
+			end
+
+		#	Precompute transpose (for quick dyad tests)
+			adjT = SparseMatrixCSC(transpose(adj))
+
+		#	Local edge tests (0/1)
+			@inline has_ij(i::Int, j::Int) = adj[i, j] != 0.0
+			@inline has_ji(i::Int, j::Int) = adjT[i, j] != 0.0  # == adj[j, i]
+
+		#	Code per dyad (RSiena-style) to 1..4:
+		#	1: empty, 2: forward (i->j), 3: backward (j->i), 4: reciprocal
+			@inline function dyad_code(i::Int, j::Int)
+				a = has_ij(i, j)
+				b = has_ji(i, j)           # == adj[j,i]
+				return a ? (b ? 4 : 2) : (b ? 3 : 1)
+			end
+
+		#	Neighbors for each node (non-empty dyads, any direction)
+			neighbors = Vector{Vector{Int}}(undef, n)
+			@inbounds for i in 1:n
+				# union of out- and in-neighbors
+					outs = findnz(adj[i, :])[1]
+					ins  = findnz(adj[:, i])[1]
+					# remove self (defensive)
+					outs = filter(j -> j != i, outs)
+					ins  = filter(j -> j != i, ins)
+					if isempty(outs)
+						neighbors[i] = unique(ins)
+					elseif isempty(ins)
+						neighbors[i] = unique(outs)
+					else
+						neighbors[i] = unique(vcat(outs, ins))
+					end
+			end
+
+		#	Neighbors with higher index (non-empty dyads i<j)
+			neighborsHigher = Vector{Vector{Int}}(undef, n)
+			@inbounds for i in 1:n
+				if isempty(neighbors[i])
+					neighborsHigher[i] = Int[]
+				else
+					neighborsHigher[i] = [ j for j in neighbors[i] if j > i ]
+				end
+			end
+
+		#	Triad class labels & counts
+			labels = _dl_labels()
+			tc     = zeros(Int, 16)
+
+		#	Lookup table (4 x 4 x 4) mapping (i->j, j->k, i->k) codes to triad class index
+			lookup = _dl_lookup()
+
+		#	Main loops over non-empty dyads (i < j)
+			if any(!isempty, neighborsHigher)
+				@inbounds for i in 1:n
+					for j in neighborsHigher[i]
+						#	nodes linked to i OR j (any direction), excluding i,j
+							third = _bm_union_neighbors_excluding(neighbors[i], neighbors[j], i, j)
+
+						#	store triads with just one tie (i,j) + isolated k
+							triadTypeIdx = (dyad_code(i, j) == 4) ? 3 : 2   # 3 => "102" (mutual), 2 => "012" (single arc)
+							tc[triadTypeIdx] += n - length(third) - 2
+
+						#	enumerate non-empty third nodes
+							for k in third
+								#	only store triads once (RSiena condition)
+									if j < k || (i < k && k < j && !_bm_is_neighbor(neighbors[i], k))
+										t1 = dyad_code(i, j)
+										t2 = dyad_code(j, k)
+										t3 = dyad_code(i, k)
+										klass = lookup[t1, t2, t3]
+										tc[klass] += 1
+									end
+							end
+					end
+				end
+			end
+
+		#	Assign empty triads (003) by residual
+			total_triads = (n * (n - 1) * (n - 2)) ÷ 6   # C(n,3)
+			tc[1] = total_triads - sum(tc[2:end])
+
+		#	Return
+			return (counts = tc, labels = labels)
+	end
+
+
+#	Helper: Davis–Leinhardt triad labels (fixed order used by RSiena)
+	function _dl_labels()
+		"""
+		Args:
+			None
+		Returns:
+			Vector{String}: ["003","012","102","021D","021U","021C","111D","111U","030T","030C","201","120D","120U","120C","210","300"]
+		Notes:
+			- This order matches RSiena's 'tc' vector in sienaGOF TriadCensus.
+		"""
+		return ["003","012","102","021D","021U","021C","111D","111U","030T","030C","201","120D","120U","120C","210","300"]
+	end
+
+
+#	Helper: Build the 4×4×4 lookup table (RSiena mapping)
+	function _dl_lookup()
+		"""
+		Args:
+			None
+		Returns:
+			Array{Int,3}: lookup[t1,t2,t3] → triad class index (1..16)
+		Notes:
+			- t1,t2,t3 ∈ {1: empty, 2: forward, 3: backward, 4: reciprocal}.
+			- Mapping mirrors the RSiena R code (Sindhuja/RSiena summary).
+		"""
+		L = fill(0, (4,4,4))
+
+		#	i->j, j->k, i->k   (copying RSiena's assignments)
+			L[1,1,1] = 1
+			L[2,1,1] = L[1,2,1] = L[1,1,2] = L[3,1,1] = L[1,3,1] = L[1,1,3] = 2
+			L[4,1,1] = L[1,4,1] = L[1,1,4] = 3
+			L[2,1,2] = L[3,2,1] = L[1,3,3] = 4
+			L[2,3,1] = L[3,1,3] = L[1,2,2] = 5
+			L[2,2,1] = L[3,3,1] = L[2,1,3] = L[3,1,2] = L[1,2,3] = L[1,3,2] = 6
+			L[4,3,1] = L[4,1,3] = L[2,4,1] = L[1,4,2] = L[3,1,4] = L[1,2,4] = 7
+			L[4,2,1] = L[4,1,2] = L[3,4,1] = L[1,4,3] = L[2,1,4] = L[1,3,4] = 8
+			L[2,2,2] = L[2,3,3] = L[2,3,2] = L[3,3,3] = L[3,2,2] = L[3,2,3] = 9
+			L[2,2,3] = L[3,3,2] = 10
+			L[4,4,1] = L[4,1,4] = L[1,4,4] = 11
+			L[2,4,2] = L[3,2,4] = L[4,3,3] = 12
+			L[2,3,4] = L[3,4,3] = L[4,2,2] = 13
+			L[2,2,4] = L[3,3,4] = L[2,4,3] = L[3,4,2] = L[4,2,3] = L[4,3,2] = 14
+			L[2,4,4] = L[4,2,4] = L[4,4,2] = L[3,4,4] = L[4,3,4] = L[4,4,3] = 15
+			L[4,4,4] = 16
+
+		#	Return
+			return L
+	end
+
+
+#	Helper: Union of neighbor lists excluding two nodes (sorted-unique)
+	function _bm_union_neighbors_excluding(a::Vector{Int}, b::Vector{Int}, i::Int, j::Int)
+		"""
+		Args:
+			a::Vector{Int}: neighbors of i (any direction)
+			b::Vector{Int}: neighbors of j (any direction)
+			i::Int, j::Int: indices to exclude
+		Returns:
+			Vector{Int}: sorted unique union minus {i,j}
+		Notes:
+			- Uses sort + unique for determinism; input sizes are neighborhood-scale.
+		"""
+		if isempty(a)
+			u = copy(b)
+		elseif isempty(b)
+			u = copy(a)
+		else
+			u = vcat(a, b)
+		end
+		if !isempty(u)
+			sort!(u)
+			u = unique(u)
+			# remove i,j if present
+			(pos = searchsortedfirst(u, i)) <= length(u) && (pos <= length(u) && u[pos] == i) && deleteat!(u, pos)
+			(pos = searchsortedfirst(u, j)) <= length(u) && (pos <= length(u) && u[pos] == j) && deleteat!(u, pos)
+		end
+		return u
+	end
+
+
+#	Helper: Is 'k' in 'nbrs'? (binary search on sorted vector)
+	function _bm_is_neighbor(nbrs::Vector{Int}, k::Int)
+		"""
+		Args:
+			nbrs::Vector{Int}: sorted neighbors
+			k::Int: node id
+		Returns:
+			Bool: true if k ∈ nbrs
+		Notes:
+			- Expects nbrs sorted (we sort in the union helper).
+		"""
+		if isempty(nbrs)
+			return false
+		end
+		idx = searchsortedfirst(nbrs, k)
+		return (idx <= length(nbrs)) && (nbrs[idx] == k)
+	end
+
+
+
+
+
+#	Triad Census Comparative tests
+	triad_types = ["003"; "012";  "102"; "021D"; "021U"; "021C"; "111D"; "111U";
+				   "030T"; "030C"; "201"; "120D"; "120U"; "120C"; "210"; "300"]
+
+	observed_counts = readlines("/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data/traid_census_observed.vec")
+	observed_counts = parse.(Float64, observed_counts[(2:length(observed_counts))])
+	
+	expected_counts = readlines("/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data/triad_census_expected.vec")
+	expected_counts = parse.(Float64, expected_counts[(2:length(expected_counts))])
+
+	pajek_triad_census = DataFrame(type = triad_types, observed_count = observed_counts, expected_count = expected_counts)
+
+
 #	Reciprocity Tests
 	test_reciprocity_methods()
