@@ -6108,7 +6108,7 @@ module Large_Graph_Similarity
 		   leiden_community_detection,
 		   champ_community_detection,
 		   modularity_vitality,
-		  
+		   core_decomposition,
 		   reciprocity
 		   
 end # module julia_env

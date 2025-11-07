@@ -2562,23 +2562,29 @@
 
 #	CALCULATE CORE DECOMPOSITION MEASURES
 
-#	Total (unweighted / k-core)
+#	Undirected (Binarized & Symmtrized)
+	res_undirected_unweighted = core_decomposition(agent_agent_all_com.edges; mode="undirected", weighted=false)
+
+#	Total (Binarized but Not Symmtrized)
 	res_total_unweighted = core_decomposition(agent_agent_all_com.edges; mode="total", weighted=false)
 
-#	Out (unweighted / k-core)
+#	Out (Binarized/ k-core)
 	res_out_unweighted = core_decomposition(agent_agent_all_com.edges; mode="out", weighted=false)
 
-#	In (unweighted / k-core)
+#	In (Binarized/ k-core)
 	res_in_unweighted = core_decomposition(agent_agent_all_com.edges; mode="in", weighted=false)
 
+#	Undirected (Symmtrized and Auto-Signed if Mixed Weights)
+	res_total_weighted = core_decomposition(agent_agent_all_com.edges; mode="undirected", weighted=true, atol=1e-12)
+
 #	Total (weighted / s-core; auto-signed if mixed weights, else unsigned)
-	res_total_weighted = core_decomposition(agent_agent_all_com.edges; mode="total", weighted=true, atol=1e-12)
+	res_total_weighted = core_decomposition(agent_agent_all_com.edges; mode="total", weighted=true)
 
 #	In (weighted / s-core)
-	res_in_weighted = core_decomposition(agent_agent_all_com.edges; mode="in", weighted=true, atol=1e-12)
+	res_in_weighted = core_decomposition(agent_agent_all_com.edges; mode="in", weighted=true)
 
 #	Out (weighted / s-core)
-	res_out_weighted = core_decomposition(agent_agent_all_com.edges; mode="out", weighted=true, atol=1e-12)
+	res_out_weighted = core_decomposition(agent_agent_all_com.edges; mode="out", weighted=true)
 
 #	CONDUCT TESTS
 
@@ -2586,6 +2592,91 @@
 	test_result = test_kcore_decomposition()
 
 #	K-Core Comparative Checks
+	nodes = agents[:,(1:2)]
+	rename!(nodes, ["id", "label"])
+
+	igraph_results = CSV.read("/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data/Balikatan_AllComm_KCore_Scores.csv", 
+							  DataFrame, types=Dict(1 => String))
+
+	k_core_in = core_decomposition(agent_agent_all_com.edges; weighted=false, nodes=nodes, mode="in")
+	rename!(k_core_in, ["node", "k_core_in"])
+
+	k_core_out = core_decomposition(agent_agent_all_com.edges; weighted=false, nodes=nodes, mode="out")
+	rename!(k_core_out, ["node", "k_core_out"])
+
+	k_core_all = core_decomposition(agent_agent_all_com.edges; weighted=false, nodes=nodes, mode="total")
+	rename!(k_core_all, ["node", "k_core_all"])
+
+	k_core_undirected = core_decomposition(agent_agent_all_com.edges; weighted=false, nodes=nodes, mode="undirected")
+	rename!(k_core_undirected, ["node", "k_core_undirected"])
+
+	k_core_scores = leftjoin(k_core_all, k_core_out, on=:node)
+	k_core_scores = leftjoin(k_core_scores, k_core_in, on=:node)
+	k_core_scores = leftjoin(k_core_scores, k_core_undirected, on=:node)
+	leftjoin!(k_core_scores, igraph_results, on=:node)
+	k_core_variables = names(k_core_scores)[2:7]
+	for i in eachindex(k_core_variables)
+		k_core_scores[!,k_core_variables[i]] = convert.(Int64, k_core_scores[:,k_core_variables[i]])
+	end
+
+	k_core_all_delta = 	k_core_scores.k_core_all .- k_core_scores.igraph_all
+	k_core_out_delta = k_core_scores.k_core_out .- k_core_scores.igraph_out
+	k_core_in_delta = k_core_scores.k_core_in .- k_core_scores.igraph_in
+	print(string("All Delta: ",sum(k_core_all_delta),","), string(" Out Delta: ", sum(k_core_out_delta),","), string(" In Delta: ", sum(k_core_in_delta)))
+
+#   igraph
+#	1) Keeps multiplicity (each parallel edge counts toward degree).
+#	2) Counts self-loops (twice in undirected, once per direction in directed).
+#	3) ALL = undirected, not in+out.
+
+#	Following ORA implementation, we:
+#	1) Collapse multi-edges to simple 0/1 (binarize).
+#	2) Drop self-loops before computing degrees.
+#	3) Provide a distinct total mode (in+out), which igraph does not have (its ALL is undirected).
+
+#	ORA Undirected K-Core Validation: Perfect Match
+	ora_k_core_results = CSV.read("/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data/Balikatan_AllComm_ORA_KCore_Scores.csv", 
+							  DataFrame, types=Dict(1 => String))
+	rename!(ora_k_core_results, ["node", "ora_k_core_undirected"])
+
+	ora_k_core_comparison = leftjoin(k_core_undirected, ora_k_core_results, on=:node)
+	ora_k_core_undirected_delta = ora_k_core_comparison.k_core_undirected .- ora_k_core_comparison.ora_k_core_undirected
+	print(string("Undirected Delta: ", sum(ora_k_core_undirected_delta)))
+
+#	S-Core Comparative Checks: Perfect Match with scoredec
+	scoredec_results = CSV.read("/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data/Balikatan_AllComm_SCore_Scores.csv",
+								DataFrame, types=Dict(1 => String))
+
+	s_core_in = core_decomposition(agent_agent_all_com.edges; weighted=true, nodes=nodes, mode="in")
+	rename!(s_core_in, ["node", "s_core_in"])
+
+	s_core_out = core_decomposition(agent_agent_all_com.edges; weighted=true, nodes=nodes, mode="out")
+	rename!(s_core_out, ["node", "s_core_out"])
+
+	s_core_all = core_decomposition(agent_agent_all_com.edges; weighted=true, nodes=nodes, mode="total")
+	rename!(s_core_all, ["node", "s_core_all"])
+
+	s_core_scores = leftjoin(s_core_all, s_core_out, on=:node)
+	s_core_scores = leftjoin(s_core_scores, s_core_in, on=:node)
+	leftjoin!(s_core_scores, scoredec_results, on=:node)
+	s_core_variables = names(s_core_scores)[2:7]
+	for i in eachindex(s_core_variables)
+		s_core_scores[!,s_core_variables[i]] = convert.(Int64, s_core_scores[:,s_core_variables[i]])
+	end
+	
+	s_core_all_delta = 	s_core_scores.s_core_all .- s_core_scores.scoredec_total
+	s_core_out_delta = s_core_scores.s_core_out .- s_core_scores.scoredec_out
+	s_core_in_delta = s_core_scores.s_core_in .- s_core_scores.scoredec_in
+	print(string("All Delta: ",sum(s_core_all_delta),","), string(" Out Delta: ", sum(s_core_out_delta),","), string(" In Delta: ", sum(s_core_in_delta)))
+
+###################
+#   LOCAL REACH   #
+###################
+
+#	CALCULATE LOCAL REACH MEASURES
+
+
+#	CONDUCT TESTS
 
 #	Helper: graph (nodes + edges) to sparse adjacency with fixed node universe
 	function _graph_to_sparse_matrix(edges::DataFrame;
@@ -2672,591 +2763,6 @@
 		#	Return adjacency and mappings
 			return (adj_matrix, node_to_idx, idx_to_node)
 	end
-
-#	Helper: K-core neighbor degree updates (simple 1-per-edge decrement; binary)
-	function _update_k_neighbor_degrees!(adj::SparseMatrixCSC, u::Int, k::Int,
-										degrees::Vector{Int}, active::BitVector,
-										queue::Vector{Int}, mode::String)
-		"""
-		Args:
-			adj::SparseMatrixCSC: adjacency matrix
-			u::Int: node being removed
-			k::Int: current k threshold
-			degrees::Vector{Int}: degree vector (modified in-place)
-			active::BitVector: active node mask
-			queue::Vector{Int}: removal queue/stack (modified in-place)
-			mode::String: neighbor semantics ("in" | "out" | "total" | "undirected")
-		Returns:
-			Nothing (modifies in-place)
-		Notes:
-			- Iterates neighbors and decrements by 1 when active.
-			- Enqueues neighbor when degree drops to ≤ k.
-			- Row-iteration implemented via CSC of the transpose.
-		"""
-
-		#	Handles (columns of `adj`)
-			rows  = rowvals(adj)
-
-		#	Transpose once for row-iteration as column-iteration
-			adjT  = SparseMatrixCSC(transpose(adj))
-			rowsT = rowvals(adjT)
-
-		#	Local decrement + enqueue on threshold
-			@inline function bump!(v::Int)
-				if active[v]
-					degrees[v] -= 1
-					if degrees[v] <= k
-						push!(queue, v)
-					end
-				end
-			end
-
-		#	Dispatch by mode
-			if mode == "in"
-				#	u → j : iterate "row u" via column u of adjT
-					@inbounds for idx in nzrange(adjT, u)
-						j = rowsT[idx]
-						bump!(j)
-					end
-
-			elseif mode == "out"
-				#	i → u : iterate column u of adj
-					@inbounds for idx in nzrange(adj, u)
-						i = rows[idx]
-						bump!(i)
-					end
-
-			elseif mode == "total"
-				#	u → j (row of u)
-					@inbounds for idx in nzrange(adjT, u)
-						j = rowsT[idx]
-						bump!(j)
-					end
-				#	i → u (column of u)
-					@inbounds for idx in nzrange(adj, u)
-						i = rows[idx]
-						bump!(i)
-					end
-
-			else  # "undirected"
-				#	Symmetrized adjacency: touch each neighbor once
-					@inbounds for idx in nzrange(adj, u)
-						v = rows[idx]
-						if v != u
-							bump!(v)
-						end
-					end
-			end
-	end
-
-#	Helper: Update K-core sets → frontier (degree < k) and active core size
-	function _update_k_cores!(k::Int, degrees::Vector{Int},
-							cores::Vector{Int}, active::BitVector)
-		"""
-		Args:
-			k::Int: current k value
-			degrees::Vector{Int}: current degrees
-			cores::Vector{Int}: core assignments (modified elsewhere on removal)
-			active::BitVector: active node mask
-		Returns:
-			NamedTuple: (frontier::Vector{Int}, core_size::Int)
-		Notes:
-			- Returns indices with degree **< k** as the frontier to peel.
-			- Does not assign cores here; only counts and selects.
-			- Two-pass exact allocation for the frontier vector.
-		"""
-
-		#	Pass 1: count active + frontier size
-			core_size = 0
-			frontier_count = 0
-			@inbounds @simd for i in eachindex(degrees)
-				if active[i]
-					core_size += 1
-					frontier_count += (degrees[i] < k)
-				end
-			end
-
-		#	Allocate frontier
-			frontier = Vector{Int}(undef, frontier_count)
-
-		#	Pass 2: fill frontier
-			writepos = 0
-			@inbounds for i in eachindex(degrees)
-				if active[i] && degrees[i] < k
-					writepos += 1
-					frontier[writepos] = i
-				end
-			end
-
-		#	Return
-			return (frontier = frontier, core_size = core_size)
-	end
-
-#	Helper: K-core neighbor updates (weighted-aware decrement by stored value)
-	function _update_k_neighbor_degrees!(adj::SparseMatrixCSC, u::Int, k::Int,
-										degrees::Vector{Int}, active::BitVector,
-										queue::Vector{Int}, mode::String)
-		"""
-		Args:
-			adj::SparseMatrixCSC: adjacency matrix
-			u::Int: node being removed
-			k::Int: current k threshold
-			degrees::Vector{Int}: degree vector (modified in-place)
-			active::BitVector: active node mask
-			queue::Vector{Int}: removal queue/stack (modified in-place)
-			mode::String: neighbor semantics ("in" | "out" | "total" | "undirected")
-		Returns:
-			Nothing (modifies in-place)
-		Notes:
-			- Decrements by rounded stored weight.
-			- Maintains same enqueue rule (≤ k).
-			- Keeps original behavior you shared (second definition).
-		"""
-
-		#	Column-iteration handles
-			rows = rowvals(adj)
-			vals = nonzeros(adj)
-
-		#	Transpose as CSC to iterate "rows" as a column
-			adjT  = SparseMatrixCSC(transpose(adj))
-			rowsT = rowvals(adjT)
-			valsT = nonzeros(adjT)
-
-		#	Local decrement + enqueue using weight
-			@inline function bump!(v::Int, w::Float64)
-				if active[v]
-					degrees[v] -= round(Int, w)
-					if degrees[v] <= k
-						push!(queue, v)
-					end
-				end
-			end
-
-		#	Dispatch by mode
-			if mode == "in"
-				#	u → j : iterate "row u" via column u of adjT, subtract W[j,u]
-					@inbounds for idx in nzrange(adjT, u)
-						j = rowsT[idx]
-						if j != u
-							bump!(j, valsT[idx])
-						end
-					end
-
-			elseif mode == "out"
-				#	i → u : iterate column u of adj, subtract W[i,u]
-					@inbounds for idx in nzrange(adj, u)
-						i = rows[idx]
-						if i != u
-							bump!(i, vals[idx])
-						end
-					end
-
-			elseif mode == "total"
-				#	u → j (outgoing of u)
-					@inbounds for idx in nzrange(adjT, u)
-						j = rowsT[idx]
-						if j != u
-							bump!(j, valsT[idx])
-						end
-					end
-				#	i → u (incoming to u)
-					@inbounds for idx in nzrange(adj, u)
-						i = rows[idx]
-						if i != u
-							bump!(i, vals[idx])
-						end
-					end
-
-			else  # "undirected"
-				#	Symmetrized adjacency: single pass
-					@inbounds for idx in nzrange(adj, u)
-						v = rows[idx]
-						if v != u
-							bump!(v, vals[idx])
-						end
-					end
-			end
-	end
-
-#	Helper: Remove nodes via cascade (assign k-1 at removal; LIFO)
-	function _remove_k_nodes!(adj::SparseMatrixCSC, frontier::Vector{Int}, k::Int,
-							degrees::Vector{Int}, active::BitVector, cores::Vector{Int}, mode::String)
-		"""
-		Args:
-			adj::SparseMatrixCSC: adjacency matrix
-			frontier::Vector{Int}: initial nodes to remove (degree < k)
-			k::Int: current k threshold
-			degrees::Vector{Int}: degree vector (modified in-place)
-			active::BitVector: active mask (modified in-place)
-			cores::Vector{Int}: core assignments (modified in-place)
-			mode::String: decomposition mode
-		Returns:
-			Nothing (modifies in-place)
-		Notes:
-			- Sets cores[u] = k - 1 when u is peeled at threshold k.
-			- Uses LIFO (stack) cascade until no node ≤ k remains in the stack.
-		"""
-
-		#	Initialize stack from frontier
-			queue = copy(frontier)
-
-		#	Process until empty
-			while !isempty(queue)
-				#	Pop next
-					u = pop!(queue)
-
-				#	Skip if already inactive
-					if !active[u]
-						continue
-					end
-
-				#	Assign & deactivate
-					cores[u] = k - 1
-					active[u] = false
-
-				#	Update neighbors per mode
-					_update_k_neighbor_degrees!(adj, u, k, degrees, active, queue, mode)
-			end
-	end
-
-#	Helper: K-core main (peel nodes with degree ≤ k per threshold)
-	function _k_core_compute(adj::SparseMatrixCSC, mode::String)
-		"""
-		Args:
-			adj::SparseMatrixCSC: adjacency (no self-loops; includes isolates)
-			mode::String: "undirected" | "in" | "out" | "total"
-		Returns:
-			Vector{Int}: core number for each node
-		Notes:
-			- Iterates k from 0..n; per k:
-				* collect nodes with degree ≤ k
-				* assign cores[u] = k on removal
-				* decrement neighbors; enqueue if drop to ≤ k
-		"""
-
-		#	Setup
-			n = size(adj, 1)
-			active = trues(n)
-			cores  = zeros(Int, n)
-
-		#	Initial degrees by mode
-			degrees = _compute_k_core_degrees(adj, mode)
-
-		#	k-ascending loop
-			for k in 0:n
-				while true
-					#	Collect nodes at threshold
-						to_remove = Int[]
-						@inbounds for i in 1:n
-							if active[i] && degrees[i] <= k
-								push!(to_remove, i)
-							end
-						end
-						isempty(to_remove) && break
-
-					#	Remove collected
-						for u in to_remove
-							if !active[u]; continue; end
-							active[u] = false
-							cores[u]  = k
-							_update_k_neighbor_degrees!(adj, u, k, degrees, active, to_remove, mode)
-						end
-				end
-				!any(active) && break
-			end
-
-		#	Return
-			return cores
-	end
-
-#	Helper: Compute degree/strength per mode (supports weighted path)
-	function _compute_k_core_degrees(adj::SparseMatrixCSC, mode::String)
-		"""
-		Args:
-			adj::SparseMatrixCSC: adjacency (self-loops already removed; includes isolates)
-			mode::String: "undirected" | "in" | "out" | "total"
-		Returns:
-			Vector{Int}: degree/strength vector (rounded to Int)
-		Notes:
-			- For unweighted simple graphs (0/1), this equals degree counts.
-			- For weighted paths, sums incident weights (excludes i==j).
-		"""
-
-		#	Dimensions & handles
-			n = size(adj, 1)
-			@assert size(adj, 2) == n "adj must be square"
-
-			rows = rowvals(adj)
-			vals = nonzeros(adj)
-
-		#	Transpose for row-iteration as column
-			adjT  = SparseMatrixCSC(transpose(adj))
-			rowsT = rowvals(adjT)
-			valsT = nonzeros(adjT)
-
-			deg = zeros(Float64, n)
-
-		#	Mode dispatch
-			if mode == "in"
-				@inbounds for j in 1:n
-					s = 0.0
-					for idx in nzrange(adj, j)
-						i = rows[idx]
-						if i != j
-							s += vals[idx]
-						end
-					end
-					deg[j] = s
-				end
-
-			elseif mode == "out"
-				@inbounds for j in 1:n
-					s = 0.0
-					for idx in nzrange(adjT, j)
-						i = rowsT[idx]
-						if i != j
-							s += valsT[idx]
-						end
-					end
-					deg[j] = s
-				end
-
-			elseif mode == "undirected"
-				@inbounds for j in 1:n
-					s = 0.0
-					for idx in nzrange(adj, j)
-						i = rows[idx]
-						if i != j
-							s += vals[idx]
-						end
-					end
-					deg[j] = s
-				end
-
-			elseif mode == "total"
-				@inbounds for j in 1:n
-					cin = 0.0
-					for idx in nzrange(adj, j)
-						i = rows[idx]
-						if i != j
-							cin += vals[idx]
-						end
-					end
-					cout = 0.0
-					for idx in nzrange(adjT, j)
-						i = rowsT[idx]
-						if i != j
-							cout += valsT[idx]
-						end
-					end
-					deg[j] = cin + cout
-				end
-
-			else
-				throw(ArgumentError("Unsupported mode: $mode"))
-			end
-
-		#	Return (rounded Int for k thresholds)
-			return round.(Int, deg)
-	end
-
-#	Core Decomposition: K-core (unweighted) and S-core (weighted)
-	function core_decomposition(edges::DataFrame; mode::String = "undirected",
-								weighted::Bool = false,
-								nodes::Union{Nothing,DataFrame,Vector{<:AbstractString}} = nothing,
-								atol::Float64 = 1e-10)
-
-		#	Validation
-			@assert hasproperty(edges, :src) && hasproperty(edges, :dst) "edges must have :src and :dst"
-			@assert mode in ["undirected", "in", "out", "total"] "Invalid mode: $mode"
-
-		#	Handle Empty Graph
-			if nrow(edges) == 0
-				return DataFrame(node=String[], core_number=Int[])
-			end
-
-		#	Aggregate Multi-edges
-			agg_func   = weighted ? sum : maximum   
-			clean_edges = _aggregate_multi_edges(edges; agg_func = agg_func)
-
-		#	Build Adjacency Matrix over the *full* node set
-			if isnothing(nodes)
-				adj, node_to_idx, idx_to_node = _graph_to_sparse_matrix(clean_edges; weighted = weighted)
-			elseif nodes isa DataFrame
-				colnames = Symbol.(names(nodes))
-				@assert (:id in colnames) && (:label in colnames) "nodes DataFrame must have :id and :label"
-				nodes_df = copy(nodes)
-				nodes_df.id    = String.(nodes_df.id)
-				nodes_df.label = String.(nodes_df.label)
-				adj, node_to_idx, idx_to_node = _graph_to_sparse_matrix(clean_edges; nodes = nodes_df, weighted = weighted)
-			else
-				ids_vec = String.(nodes)
-				adj, node_to_idx, idx_to_node = _graph_to_sparse_matrix(clean_edges; nodes = ids_vec, weighted = weighted)
-			end
-
-		#	Self-loops:
-		#	- Keep for weighted (s-core), to mirror R/iGraph.
-		#	- Remove only for unweighted (k-core).
-			if !weighted
-				n = size(adj, 1)
-				@inbounds for i in 1:n
-					adj[i, i] = 0.0
-				end
-				dropzeros!(adj)
-			end
-
-		#	Symmetrize for Undirected Mode
-			if mode == "undirected"
-				if weighted
-					adj = adj + adj'
-				else
-					adj = max.(adj, adj')
-				end
-				dropzeros!(adj)
-			end
-
-		#	Detect Signed Network
-			is_signed = false
-			if weighted && nnz(adj) > 0
-				is_signed = _has_negative_weights(adj)
-			end
-
-		#	Compute Core Decomposition
-			if weighted
-				if is_signed
-					#	Signed S-core (unchanged)
-						res_signed = _s_core_compute_signed(adj, mode, atol)
-						cores_pos  = res_signed.pos
-						cores_neg  = res_signed.neg
-				else
-					#	Unsigned S-core
-						if mode == "out"
-							str0  = vec(sum(adj, dims = 2))
-							views = _s_core_out_views(adj, str0, atol)
-							cores = views.round_id
-
-						elseif mode == "in"
-							#	Run OUT-views on the *sparse* transpose to mirror R/C++ score_in exactly
-								Wt   = sparse(transpose(adj))       # materialize as SparseMatrixCSC
-								str0 = vec(sum(Wt, dims = 2))       # row sums of Wᵀ == column sums of W
-								views = _s_core_out_views(Wt, str0, atol)
-								cores = views.round_id
-						elseif mode == "total"
-							views = _s_core_total_views(adj; atol = atol)
-							cores = views.round_id
-
-						else  # undirected
-							views = _s_core_undirected_views(adj, atol)
-							cores = views.round_id
-						end
-				end
-			else
-				#	K-core
-					cores = _k_core_compute(adj, mode)
-			end
-
-		#	Extract Node Names
-			node_names = if idx_to_node isa DataFrame
-				hasproperty(idx_to_node, :id) ? String.(idx_to_node.id) : String.(idx_to_node[:, 1])
-			else
-				String.(idx_to_node)
-			end
-
-		#	Assemble Results
-			if weighted && is_signed
-				return DataFrame(
-					node = node_names,
-					core_number_pos = cores_pos,
-					core_number_neg = cores_neg
-				)
-			else
-				return DataFrame(
-					node = node_names,
-					core_number = cores
-				)
-			end
-	end
-
-	nodes = agents[:,(1:2)]
-	rename!(nodes, ["id", "label"])
-
-	igraph_results = CSV.read("/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data/Balikatan_AllComm_KCore_Scores.csv", 
-							  DataFrame, types=Dict(1 => String))
-
-	k_core_in = core_decomposition(agent_agent_all_com.edges; weighted=false, nodes=nodes, mode="in")
-	rename!(k_core_in, ["node", "k_core_in"])
-
-	k_core_out = core_decomposition(agent_agent_all_com.edges; weighted=false, nodes=nodes, mode="out")
-	rename!(k_core_out, ["node", "k_core_out"])
-
-	k_core_all = core_decomposition(agent_agent_all_com.edges; weighted=false, nodes=nodes, mode="total")
-	rename!(k_core_all, ["node", "k_core_all"])
-
-	k_core_scores = leftjoin(k_core_all, k_core_out, on=:node)
-	k_core_scores = leftjoin(k_core_scores, k_core_in, on=:node)
-	leftjoin!(k_core_scores, igraph_results, on=:node)
-	k_core_variables = names(k_core_scores)[2:7]
-	for i in eachindex(k_core_variables)
-		k_core_scores[!,k_core_variables[i]] = convert.(Int64, k_core_scores[:,k_core_variables[i]])
-	end
-
-	k_core_all_delta = 	k_core_scores.k_core_all .- k_core_scores.igraph_all
-	k_core_out_delta = k_core_scores.k_core_out .- k_core_scores.igraph_out
-	k_core_in_delta = k_core_scores.k_core_in .- k_core_scores.igraph_in
-	print(string("All Delta: ",sum(k_core_all_delta),","), string(" Out Delta: ", sum(k_core_out_delta),","), string(" In Delta: ", sum(k_core_in_delta)))
-
-#   igraph
-#	Keeps multiplicity (each parallel edge counts toward degree).
-#	Counts self-loops (twice in undirected, once per direction in directed).
-#	ALL = undirected, not in+out.
-
-#	We/ORA
-#	Collapse multi-edges to simple 0/1 (binarize).
-#	Drop self-loops before computing degrees.
-#	Provide a distinct total mode (in+out), which igraph does not have (its ALL is undirected).
-
-#	ORA: Total K-Core Validation
-	ora_k_core_results = CSV.read("/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data/Balikatan_AllComm_ORA_KCore_Scores.csv", 
-							  DataFrame, types=Dict(1 => String))
-	rename!(ora_k_core_results, ["node", "ora_k_core_all"])
-
-	ora_k_core_comparison = leftjoin(k_core_all, ora_k_core_results, on=:node)
-	ora_k_core_all_delta = ora_k_core_comparison.k_core_all .- ora_k_core_comparison.ora_k_core_all
-	print(string("All Delta: ", sum(ora_k_core_all_delta)))
-	number_differences = length(ora_k_core_all_delta) - sum(iszero.(ora_k_core_all_delta))
-
-#	COME BACK HERE: We Differ with ORA 20 times. Need to Check these Cases.
-
-#	S-Core Comparative Checks: Perfect Match with scoredec
-	scoredec_results = CSV.read("/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data/Balikatan_AllComm_SCore_Scores.csv",
-								DataFrame, types=Dict(1 => String))
-
-	s_core_in = core_decomposition(agent_agent_all_com.edges; weighted=true, nodes=nodes, mode="in")
-	rename!(s_core_in, ["node", "s_core_in"])
-
-	s_core_out = core_decomposition(agent_agent_all_com.edges; weighted=true, nodes=nodes, mode="out")
-	rename!(s_core_out, ["node", "s_core_out"])
-
-	s_core_all = core_decomposition(agent_agent_all_com.edges; weighted=true, nodes=nodes, mode="total")
-	rename!(s_core_all, ["node", "s_core_all"])
-
-	s_core_scores = leftjoin(s_core_all, s_core_out, on=:node)
-	s_core_scores = leftjoin(s_core_scores, s_core_in, on=:node)
-	leftjoin!(s_core_scores, scoredec_results, on=:node)
-	s_core_variables = names(s_core_scores)[2:7]
-	for i in eachindex(s_core_variables)
-		s_core_scores[!,s_core_variables[i]] = convert.(Int64, s_core_scores[:,s_core_variables[i]])
-	end
-	
-	s_core_all_delta = 	s_core_scores.s_core_all .- s_core_scores.scoredec_total
-	s_core_out_delta = s_core_scores.s_core_out .- s_core_scores.scoredec_out
-	s_core_in_delta = s_core_scores.s_core_in .- s_core_scores.scoredec_in
-	print(string("All Delta: ",sum(s_core_all_delta),","), string(" Out Delta: ", sum(s_core_out_delta),","), string(" In Delta: ", sum(s_core_in_delta)))
-
-###################
-#   LOCAL REACH   #
-###################
-
 
 
 ############################
