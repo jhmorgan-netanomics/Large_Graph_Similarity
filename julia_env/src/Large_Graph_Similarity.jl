@@ -5831,6 +5831,8 @@ module Large_Graph_Similarity
 
 #   LOCAL REACH
 
+#	Group-Level Degree: Total, In-Degree, Out-Degree, Between & Weighted Versions
+
 #   2-Hop In-Reach (How Many Can Reach this Node in 2 Steps)
 
 #   2-Hop Out-Reach (How Many Nodes Can this Node Reach in 2 Steps)
@@ -5838,6 +5840,8 @@ module Large_Graph_Similarity
 #   GRAPH-LEVEL FEATURES
 
 #   Sample Triads
+#	Batagelj, V., & Mrvar, A. (2001). A subquadratic triad census algorithm for large sparse networks with small maximum degree. Social networks, 23(3), 237-243.
+#	Layered B–M with log-spaced τ
 
 #   SCC Size Distribution (Largest & Second Largest)
 
@@ -6053,11 +6057,25 @@ module Large_Graph_Similarity
 	- Carley KM (2002). Summary of Key Network Measures. CMU/CASOS.
 	""" reciprocity
 
+#	Size
+
+#	Number of Arcs/Edges
+
+#	Number of Self-Loops
+
+#	Number of Components
+#	Isolates
+#	Dyads
+#	Triads
+#	Groups >= 4
+
 #   Density
 
 #   Degree Assortativity
 
-#   Note: Modularity is Reported When Modularity Vitality Statistics Are Calculated
+#   Note: Modularity is Reported When Group Degree Measures Are Calculated
+
+#	E/I Index
 
 ############################
 #   FEATURE CONSTRUCTORS   #
