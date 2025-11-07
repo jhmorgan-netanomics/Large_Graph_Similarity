@@ -41,6 +41,7 @@ suppressPackageStartupMessages({
   library(DirectedClustering)
   library(centiserve)
   library(Matrix)
+  library(scoredec)
 })
   
 #################
@@ -390,8 +391,6 @@ suppressPackageStartupMessages({
 #   CALCULATING SALSA HUB & AUTHORITY CENTRALITIES   #
 ######################################################
   
-# COME BACK HERE TOMORROW!!!!
-
 # Basic Test Function (Barabási–Albert) 
   set.seed(42)
   g <- sample_pa(10, directed = TRUE)   # same as your example
@@ -418,6 +417,44 @@ suppressPackageStartupMessages({
   scores_cs_a  <- l1norm(centiserve::salsa(g, score = "authority"))
   scores_pm_a  <- l1norm(salsa_power(g, score = "authority", weights = NULL))
   print_metrics("Authority (centiserve vs power, L1)", score_metrics(scores_cs_a, scores_pm_a))
-
   
+####################
+#   K-CORE TESTS   #
+####################
 
+# Total K-Core
+  core_all <- igraph::coreness(all_comm, mode = "all")  # undirected/“total”
+  core_all <- as.integer(core_all)
+  
+# Out K-Core 
+  core_out <- coreness(all_comm, mode = "out")
+  core_out <- as.integer(core_out)
+  
+# In K-Core
+  core_in  <- coreness(all_comm, mode = "in")
+  core_in <- as.integer(core_in)
+
+# Combine Results & Export for Comparative Analysis
+  k_core_scores <- data.frame(node=V(all_comm)$label, igraph_all = core_all, igraph_out = core_out,
+                              igraph_in =  core_in)
+  directory <- c("D:/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data")
+  readr::write_csv(k_core_scores, file=paste0(directory,"/","Balikatan_AllComm_KCore_Scores.csv"))
+
+####################
+#   S-CORE TESTS   #
+####################
+  
+# Total S-Core
+  all_comm_all_score <- scoredec::s_coreness(all_comm, mode="all")
+  
+# Out S-Core
+  all_comm_out_score <- scoredec::s_coreness(all_comm, mode="out")
+  
+# In S-Core
+  all_comm_in_score <- scoredec::s_coreness(all_comm, mode="in")
+  
+# Combine Results & Export for Comparative Analysis
+  s_core_scores <- data.frame(node = V(all_comm)$label, scoredec_total = all_comm_all_score, 
+                              scoredec_out =  all_comm_out_score, scoredec_in = all_comm_in_score)
+  directory <- c("D:/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data")
+  readr::write_csv(s_core_scores, file=paste0(directory,"/","Balikatan_AllComm_SCore_Scores.csv"))
