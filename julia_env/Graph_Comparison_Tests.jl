@@ -2898,6 +2898,9 @@
 #   LOCAL REACH   #
 ###################
 
+#	2-hop in-reach (how many can reach this node in 2 steps)
+#	2-hop out-reach (how many this node can reach in 2 steps)
+
 #	CALCULATE LOCAL REACH MEASURES
 
 
@@ -2909,17 +2912,10 @@
 #   GRAPH-LEVEL FEATURES   #
 ############################
 
+#  	Strongly Connected Components (SCC) Size Distribution (Largest & Second Largest)
+#   Bow-Ties Fractions (In, Out, SCC)
 
-#######################
-#   GLOBAL MEASURES   #
-#######################
-
-#	CALCULATE GLOBAL MEASURES
-
-#   Global Reciprocity (Fraction of Reciprocated Edges): 0.004
-	ora_reciprocity = reciprocity(agent_agent_all_com.edges, weighted=true, mode=:dyad_based, weighted_method=:ora_mutual)
-	squartini_reciprocity = reciprocity(agent_agent_all_com.edges, weighted=true, mode=:dyad_based, weighted_method=:squartini)
-	arc_reciprocity = reciprocity(agent_agent_all_com.edges, weighted=true, mode=:arc_based)
+#	CALCULATE GRAPH LEVEL FEATURES
 
 #	Calcuate Unweighted Triad Cenuses
 	triads_dir = triad_census(agent_agent_all_com.edges; weighted=false, graph_type=:directed)
@@ -2956,9 +2952,23 @@
 	triad_delta = pajek_triad_census.observed_count .- pajek_triad_census.count 
 	print(string("Total Triad Delta: ", sum(triad_delta )))
 
+#	Weighted Triad Census Tests Listed in the Diagnostic Test Section
+
+#######################
+#   GLOBAL MEASURES   #
+#######################
+
+#	CALCULATE GLOBAL MEASURES
+
+#   Global Reciprocity (Fraction of Reciprocated Edges): 0.004
+	ora_reciprocity = reciprocity(agent_agent_all_com.edges, weighted=true, mode=:dyad_based, weighted_method=:ora_mutual)
+	squartini_reciprocity = reciprocity(agent_agent_all_com.edges, weighted=true, mode=:dyad_based, weighted_method=:squartini)
+	arc_reciprocity = reciprocity(agent_agent_all_com.edges, weighted=true, mode=:arc_based)
+
+#	CONDUCT TESTS
+
 #	Reciprocity Tests
 	test_reciprocity_methods()
-
 
 
 ########################
