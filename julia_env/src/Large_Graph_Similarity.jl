@@ -6180,6 +6180,7 @@ module Large_Graph_Similarity
 	""" hop_reach_k
 
 #	Group-Level Degree: Total, In-Degree, Out-Degree, Between & Weighted Versions
+#	E/I Index
 
 #   GRAPH-LEVEL FEATURES
 
@@ -7145,9 +7146,471 @@ module Large_Graph_Similarity
 	`_triad_census_bm_from_edges`, `_triad_census_layered`
 	""" triad_census
 
-#  	Strongly Connected Components (SCC) Size Distribution (Largest & Second Largest)
+#	Helper: Weakly connected components (undirected view)
+	function _weak_components(adj::SparseMatrixCSC{<:Real,Int})
+		"""
+		Args:
+			adj::SparseMatrixCSC{<:Real,Int}: adjacency matrix (directed or undirected, any numeric weights)
+		Returns:
+			NamedTuple: (membership::Vector{Int}, sizes::Vector{Int})
+		Notes:
+			- Components are weakly connected: directions ignored.
+			- Self-loops do not create connectivity beyond the node itself.
+		"""
+		
+		#	Basic checks
+			n = size(adj, 1)
+			@assert size(adj, 2) == n "adj must be square"
 
-#   Bow-Ties Fractions (In, Out, SCC)
+		#	Build undirected neighbor lists (binary, drop self-loops)
+			rows = rowvals(adj)
+			neighbors = [Int[] for _ in 1:n]
+
+			@inbounds for j in 1:n
+				for idx in nzrange(adj, j)
+					i = rows[idx]          # edge i → j
+					i == j && continue     # ignore self-loops
+					push!(neighbors[i], j)
+					push!(neighbors[j], i)
+				end
+			end
+
+		#	BFS/DFS over undirected neighbors
+			membership = zeros(Int, n)
+			sizes      = Int[]
+			visited    = falses(n)
+			comp_id    = 0
+			stack      = Int[]
+
+			@inbounds for v in 1:n
+				if visited[v]
+					continue
+				end
+				comp_id += 1
+				comp_size = 0
+				empty!(stack)
+				push!(stack, v)
+				visited[v] = true
+
+				while !isempty(stack)
+					u = pop!(stack)
+					membership[u] = comp_id
+					comp_size += 1
+					for w in neighbors[u]
+						if !visited[w]
+							visited[w] = true
+							push!(stack, w)
+						end
+					end
+				end
+
+				push!(sizes, comp_size)
+			end
+
+		#	Return weak components
+			return (membership = membership, sizes = sizes)
+	end
+
+#	Helper: Directed neighbor lists (out & in, loopless)
+	function _directed_neighbors(adj::SparseMatrixCSC{<:Real,Int})
+		"""
+		Args:
+			adj::SparseMatrixCSC{<:Real,Int}: adjacency matrix (interpreted as directed, any numeric weights)
+		Returns:
+			NamedTuple: (out_neighbors::Vector{Vector{Int}}, in_neighbors::Vector{Vector{Int}})
+		Notes:
+			- Self-loops are ignored; they do not create connectivity beyond the node itself.
+		"""
+		
+		#	Basic checks
+			n = size(adj, 1)
+			@assert size(adj, 2) == n "adj must be square"
+
+		#	Allocate neighbor lists
+			rows = rowvals(adj)
+			out_neighbors = [Int[] for _ in 1:n]
+			in_neighbors  = [Int[] for _ in 1:n]
+
+		#	Populate neighbors
+			@inbounds for j in 1:n        # column j = destination
+				for idx in nzrange(adj, j)
+					i = rows[idx]        # row i = source
+					i == j && continue   # drop self-loops
+					push!(out_neighbors[i], j)
+					push!(in_neighbors[j],  i)
+				end
+			end
+
+		#	Return neighbors
+			return (out_neighbors = out_neighbors, in_neighbors = in_neighbors)
+	end
+
+#	Helper: Strongly connected components (directed)
+	function _strong_components(adj::SparseMatrixCSC{<:Real,Int})
+		"""
+		Args:
+			adj::SparseMatrixCSC{<:Real,Int}: adjacency matrix (interpreted as directed)
+		Returns:
+			NamedTuple: (membership::Vector{Int}, sizes::Vector{Int})
+		Notes:
+			- Kosaraju two-pass algorithm on adjacency + transpose.
+			- Self-loops do not affect SCC structure.
+		"""
+		
+		#	Basic checks
+			n = size(adj, 1)
+			@assert size(adj, 2) == n "adj must be square"
+
+		#	Directed neighbors (loopless)
+			neigh = _directed_neighbors(adj)
+			out_neighbors = neigh.out_neighbors
+			in_neighbors  = neigh.in_neighbors
+
+		#	First pass: DFS order on original graph
+			visited = falses(n)
+			order   = Int[]
+			stack   = Vector{Tuple{Int,Bool}}()
+
+			@inbounds for v in 1:n
+				if visited[v]
+					continue
+				end
+				push!(stack, (v, false))
+				while !isempty(stack)
+					(u, expanded) = pop!(stack)
+					if !expanded
+						if visited[u]
+							continue
+						end
+						visited[u] = true
+						push!(stack, (u, true))
+						for w in out_neighbors[u]
+							if !visited[w]
+								push!(stack, (w, false))
+							end
+						end
+					else
+						push!(order, u)
+					end
+				end
+			end
+
+		#	Second pass: DFS on transpose graph in reverse finish order
+			membership = zeros(Int, n)
+			sizes      = Int[]
+			fill!(visited, false)
+			comp_id = 0
+			stack_v = Int[]
+
+			@inbounds for v in Iterators.reverse(order)
+				if visited[v]
+					continue
+				end
+				comp_id += 1
+				comp_size = 0
+				empty!(stack_v)
+				push!(stack_v, v)
+				visited[v] = true
+
+				while !isempty(stack_v)
+					u = pop!(stack_v)
+					membership[u] = comp_id
+					comp_size += 1
+					for w in in_neighbors[u]
+						if !visited[w]
+							visited[w] = true
+							push!(stack_v, w)
+						end
+					end
+				end
+
+				push!(sizes, comp_size)
+			end
+
+		#	Return strong components
+			return (membership = membership, sizes = sizes)
+	end
+
+#	Component statistics (weak & strong, plus bow-tie fractions)
+	function component_statistics(edges::DataFrame;
+								nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}}=nothing,
+								graph_type::Symbol = :directed)
+		"""
+		Args:
+			edges::DataFrame: Edge list with :src, :dst (weights ignored)
+			nodes::Union{Nothing,DataFrame,Vector}: Optional node universe (includes isolates)
+			graph_type::Symbol: :directed (default) or :undirected
+		Returns:
+			NamedTuple: Component statistics with 18 fields (see documentation)
+		Notes:
+			- Computes weak and strong components for binary graph
+			- For directed graphs, includes bow-tie structure analysis
+			- For undirected graphs, SCC stats set to 0, bow-tie fractions to 0
+		"""
+
+		#	Validation
+			@assert hasproperty(edges, :src) && hasproperty(edges, :dst) "edges must have :src and :dst"
+			@assert graph_type in (:directed, :undirected) "graph_type must be :directed or :undirected"
+
+		#	Build binary adjacency over requested node universe
+			adj, _, _ = isnothing(nodes) ?
+				_graph_to_sparse_matrix(edges; weighted=false) :
+				_graph_to_sparse_matrix(edges; nodes=nodes, weighted=false)
+
+			n = size(adj, 1)
+			num_edges = nrow(edges)
+
+		#	Weak components (always)
+			wres   = _weak_components(adj)
+			wsizes = wres.sizes
+
+			num_wcc      = length(wsizes)
+			num_isolates = count(==(1), wsizes)
+			num_dyads    = count(==(2), wsizes)
+			num_triads   = count(==(3), wsizes)
+
+		#	Groups: components with size ≥ 4
+			num_groups = count(>=(4), wsizes)
+
+			if num_groups > 0
+				group_sizes = filter(>=(4), wsizes)
+				min_group_size = minimum(group_sizes)
+				max_group_size = maximum(group_sizes)
+			else
+				min_group_size = 0
+				max_group_size = 0
+			end
+
+		#	Strong components + bow-tie (for directed graphs)
+			if graph_type == :directed
+				#	SCCs
+					sres   = _strong_components(adj)
+					ssizes = sres.sizes
+					num_scc = length(ssizes)
+
+					if isempty(ssizes)
+						largest_scc        = 0
+						second_largest_scc = 0
+					else
+						s_sorted = sort(ssizes; rev=true)
+						largest_scc        = s_sorted[1]
+						second_largest_scc = length(s_sorted) ≥ 2 ? s_sorted[2] : 0
+					end
+
+				#	Bow-tie regions relative to giant SCC
+					if n == 0 || isempty(ssizes)
+						bt_scc_size  = 0
+						bt_in_size   = 0
+						bt_out_size  = 0
+					else
+						#	Find id of largest SCC
+							scc_sizes_by_id = Dict{Int,Int}()
+							@inbounds for (i, cid) in enumerate(sres.membership)
+								scc_sizes_by_id[cid] = get(scc_sizes_by_id, cid, 0) + 1
+							end
+							giant_id, _ = findmax(collect(values(scc_sizes_by_id)))
+							
+						#	findmax gives (value, index in values-vector); we need key for that value.
+						#	simpler: recompute explicitly
+							giant_id = 1
+							best_sz  = -1
+							for (cid, sz) in scc_sizes_by_id
+								if sz > best_sz
+									best_sz  = sz
+									giant_id = cid
+								end
+							end
+
+						#	Membership flags
+							in_scc = falses(n)
+							@inbounds for v in 1:n
+								in_scc[v] = (sres.membership[v] == giant_id)
+							end
+
+						#	Directed neighbors for reachability
+							neigh = _directed_neighbors(adj)
+							out_neighbors = neigh.out_neighbors
+							in_neighbors  = neigh.in_neighbors
+
+						#	Reachable FROM SCC (OUT region)
+							reach_from_scc = falses(n)
+							queue = Int[]
+							@inbounds for v in 1:n
+								if in_scc[v]
+									reach_from_scc[v] = true
+									push!(queue, v)
+								end
+							end
+							while !isempty(queue)
+								u = pop!(queue)
+								for w in out_neighbors[u]
+									if !reach_from_scc[w]
+										reach_from_scc[w] = true
+										push!(queue, w)
+									end
+								end
+							end
+
+						#	Reachable TO SCC (IN region) via transpose (use in_neighbors as outgoing)
+							reach_to_scc = falses(n)
+							empty!(queue)
+							@inbounds for v in 1:n
+								if in_scc[v]
+									reach_to_scc[v] = true
+									push!(queue, v)
+								end
+							end
+							while !isempty(queue)
+								u = pop!(queue)
+								for w in in_neighbors[u]
+									if !reach_to_scc[w]
+										reach_to_scc[w] = true
+										push!(queue, w)
+									end
+								end
+							end
+
+						#	Region sizes
+							bt_scc_size = count(in_scc)
+							bt_in_size  = 0
+							bt_out_size = 0
+
+							@inbounds for v in 1:n
+								if !in_scc[v]
+									if reach_to_scc[v]
+										bt_in_size += 1
+									end
+									if reach_from_scc[v]
+										bt_out_size += 1
+									end
+								end
+							end
+					end
+
+			else
+				#	For undirected graphs: SCC stats mirror weak stats; bow-tie not meaningful.
+					num_scc            = 0
+					largest_scc        = 0
+					second_largest_scc = 0
+
+					bt_scc_size  = 0
+					bt_in_size   = 0
+					bt_out_size  = 0
+			end
+
+		#	Fractions (guard against n == 0)
+			if n == 0
+				bt_scc_frac = 0.0
+				bt_in_frac  = 0.0
+				bt_out_frac = 0.0
+			else
+				bt_scc_frac = bt_scc_size  / n
+				bt_in_frac  = bt_in_size   / n
+				bt_out_frac = bt_out_size  / n
+			end
+
+		#	Return summary as NamedTuple
+			return (
+				num_nodes            = n,
+				num_edges            = num_edges,
+				num_wcc              = num_wcc,
+				num_scc              = num_scc,
+				largest_scc          = largest_scc,
+				second_largest_scc   = second_largest_scc,
+				num_isolates         = num_isolates,
+				num_dyads            = num_dyads,
+				num_triads           = num_triads,
+				num_groups           = num_groups,
+				min_group_size       = min_group_size,
+				max_group_size       = max_group_size,
+				bow_tie_scc_size     = bt_scc_size,
+				bow_tie_in_size      = bt_in_size,
+				bow_tie_out_size     = bt_out_size,
+				bow_tie_scc_fraction = bt_scc_frac,
+				bow_tie_in_fraction  = bt_in_frac,
+				bow_tie_out_fraction = bt_out_frac,
+			)
+	end
+	@doc raw"""
+		component_statistics(edges::DataFrame; nodes=nothing, graph_type=:directed) -> NamedTuple
+
+		Summarize connectivity structure via weak and strong components, plus bow-tie analysis.
+
+		**Arguments**
+		- `edges::DataFrame`: Edge list with `:src`, `:dst` columns (weights ignored)
+		- `nodes::Union{Nothing,DataFrame,Vector}`: Optional node universe (includes isolates)
+			- `Nothing`: derive nodes from edges
+			- `DataFrame`: requires `:id` column
+			- `Vector{String}`: explicit node list
+		- `graph_type::Symbol`: `:directed` (default) or `:undirected`
+
+		**Returns**
+		`NamedTuple` with 18 fields:
+		- `num_nodes`: Total number of nodes in universe
+		- `num_edges`: Number of edges in input
+		- `num_wcc`: Number of weakly connected components
+		- `num_scc`: Number of strongly connected components (directed only)
+		- `largest_scc`: Size of largest SCC
+		- `second_largest_scc`: Size of second largest SCC
+		- `num_isolates`: Number of weak components of size 1
+		- `num_dyads`: Number of weak components of size 2
+		- `num_triads`: Number of weak components of size 3
+		- `num_groups`: Number of weak components with size ≥ 4
+		- `min_group_size`: Minimum size among groups (0 if none)
+		- `max_group_size`: Maximum size among groups (0 if none)
+		- `bow_tie_scc_size`: Size of giant SCC
+		- `bow_tie_in_size`: Number of nodes in IN region
+		- `bow_tie_out_size`: Number of nodes in OUT region
+		- `bow_tie_scc_fraction`: `bow_tie_scc_size / num_nodes`
+		- `bow_tie_in_fraction`: `bow_tie_in_size / num_nodes`
+		- `bow_tie_out_fraction`: `bow_tie_out_size / num_nodes`
+
+		**Algorithm Details**
+		
+		The function analyzes graph connectivity at two levels:
+
+		1. **Weak Components**: Ignoring edge direction, finds connected components using DFS/BFS
+		2. **Strong Components** (directed only): Uses Kosaraju's two-pass algorithm
+			- First pass: DFS on original graph to get finish times
+			- Second pass: DFS on transpose in reverse finish order
+
+		**Bow-tie Structure** (directed graphs):
+		
+		The bow-tie model partitions directed graphs into regions relative to the giant SCC:
+		- **SCC**: The largest strongly connected component (giant SCC)
+		- **IN**: Nodes that can reach the SCC but aren't in it
+		- **OUT**: Nodes reachable from the SCC but not in it
+		- **Tendrils/Disconnected**: Remaining nodes (not explicitly reported)
+
+		For undirected graphs, SCC statistics are set to 0 and bow-tie fractions to 0.0.
+
+		**Notes**
+		- Multi-edges are collapsed to single edges
+		- Edge weights are ignored (binary connectivity only)
+		- Self-loops do not affect component structure
+		- Easily converted to DataFrame: `DataFrame(component_statistics(edges))`
+
+		**Examples**
+	```julia
+		# Simple directed graph
+		edges = DataFrame(src=["A","B","C","A"], dst=["B","C","A","D"])
+		stats = component_statistics(edges)
+		# A,B,C form a 3-cycle (SCC), D is reachable from A (OUT region)
+
+		# Include isolates
+		stats = component_statistics(edges, nodes=["A","B","C","D","E"])
+		# E becomes an isolate (num_isolates = 1)
+
+		# Undirected analysis
+		stats = component_statistics(edges, graph_type=:undirected)
+		# All nodes in one weak component, bow-tie metrics = 0
+	```
+
+		**See Also**
+		- `_weak_components`: Internal weak component algorithm
+		- `_strong_components`: Internal SCC algorithm using Kosaraju
+		- `triad_census`: Analyze triadic closure patterns
+	""" component_statistics
 
 #   GLOBAL MEASURES
 
@@ -7362,14 +7825,9 @@ module Large_Graph_Similarity
 #	Size
 
 #	Number of Arcs/Edges
-
+#	Link Values: Min, Max, Mean, STD, and Sum
 #	Number of Self-Loops
-
-#	Number of Components
-#	Isolates
-#	Dyads
-#	Triads
-#	Groups >= 4
+#	Min, Max, and Mean Self-Loop Value
 
 #   Density
 
@@ -7377,7 +7835,6 @@ module Large_Graph_Similarity
 
 #   Note: Modularity is Reported When Group Degree Measures Are Calculated
 
-#	E/I Index
 
 ############################
 #   FEATURE CONSTRUCTORS   #
@@ -7414,6 +7871,7 @@ module Large_Graph_Similarity
 		   hop_reach_k,
            recommend_L,
 		   triad_census,
+		   component_statistics,
 		   reciprocity
 		   
 end # module julia_env

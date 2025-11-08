@@ -2942,9 +2942,10 @@
 #   GRAPH-LEVEL FEATURES   #
 ############################
 
-#  	Strongly Connected Components (SCC) Size Distribution (Largest & Second Largest)
-#   Bow-Ties Fractions (In, Out, SCC)
-	
+#	Construct Nodes File for Comparison Tests
+	nodes = agents[:,(1:2)]
+	rename!(nodes, ["id", "label"])
+
 #	CALCULATE GRAPH LEVEL FEATURES
 
 #	Calcuate Unweighted Triad Cenuses
@@ -2961,6 +2962,10 @@
 	triads_w_ud = triad_census(agent_agent_all_com.edges; weighted=true, graph_type=:undirected, L=	tau_grid_paremetrs.L, 
 				               tau_min=tau_grid_paremetrs.tau_min, tau_max=tau_grid_paremetrs.tau_max)
 	undirected_triad_analysis = leftjoin(triads_w_ud.summary, triads_ud, on=:triad)
+
+#	Calculate Weak and Strongly Connected Component Statistics
+	component_statistics(agent_agent_all_com.edges, nodes=nodes, graph_type=:directed)
+	component_statistics(agent_agent_all_com.edges, nodes=nodes, graph_type=:undirected)
 
 #	CONDUCT TESTS
 
@@ -2983,6 +2988,161 @@
 	print(string("Total Triad Delta: ", sum(triad_delta )))
 
 #	Weighted Triad Census Tests Listed in the Diagnostic Test Section
+
+#	Bow-Tie Tests: Pure SCC (all nodes strongly connected; no IN/OUT)
+	let
+		println("\n=== Component Test A: Pure SCC ===")
+
+		#	Graph: 1 ↔ 2 ↔ 3 ↔ 1 (strongly connected)
+			src = ["n1","n2","n3"]
+			dst = ["n2","n3","n1"]
+			edges = DataFrame(; src, dst)
+
+		#	Run component statistics (directed)
+			stats = component_statistics(edges; graph_type = :directed)
+
+		#	Basics
+			@assert stats.num_scc == 1
+			@assert stats.largest_scc == 3
+			@assert stats.second_largest_scc == 0
+
+		#	Bow-tie: everything is in SCC, no IN, no OUT
+			@assert stats.bow_tie_scc_size == 3
+			@assert stats.bow_tie_in_size  == 0
+			@assert stats.bow_tie_out_size == 0
+
+		#	If fractions are present, check them too
+			if haskey(stats, :bt_scc_frac)
+				@assert isapprox(stats.bow_tie_scc_fraction, 1.0; atol = 1e-12)
+				@assert isapprox(stats.bow_tie_in_fraction,  0.0; atol = 1e-12)
+				@assert isapprox(stats.bow_tie_out_fraction, 0.0; atol = 1e-12)
+			end
+
+		println("✓ Component Test A passed: pure SCC classified correctly.")
+	end
+
+	let
+		println("\n=== Component Test B: Canonical bow-tie ===")
+
+		#	Nodes:
+		#	  IN:    n1
+		#	  SCC:   n2, n3, n4
+		#	  OUT:   n5
+		#
+		#	Edges:
+		#	  n1 → n2      (IN)
+		#	  n2 → n3
+		#	  n3 → n4
+		#	  n4 → n2      (2–3–4 strongly connected)
+		#	  n4 → n5      (OUT)
+			src = ["n1","n2","n3","n4","n4"]
+			dst = ["n2","n3","n4","n2","n5"]
+			edges = DataFrame(; src, dst)
+
+		#	Run stats (directed)
+			stats = component_statistics(edges; graph_type = :directed)
+
+		#	Total nodes = 5
+			n = 5
+
+		#	SCC: largest SCC is {n2,n3,n4} → size 3
+			@assert stats.num_scc ≥ 1
+			@assert stats.largest_scc == 3
+
+		#	Bow-tie sets:
+		#	  SCC: {n2,n3,n4}  → size 3
+		#	  IN:  {n1}        → size 1
+		#	  OUT: {n5}        → size 1
+			@assert stats.bow_tie_scc_size == 3
+			@assert stats.bow_tie_in_size  == 1
+			@assert stats.bow_tie_out_size == 1
+
+		#	Fractions (if present)
+			if haskey(stats, :bt_scc_frac)
+				@assert isapprox(stats.bow_tie_scc_fraction, 3 / n; atol = 1e-12)
+				@assert isapprox(stats.bow_tie_in_fraction,  1 / n; atol = 1e-12)
+				@assert isapprox(stats.bow_tie_out_fraction, 1 / n; atol = 1e-12)
+			end
+
+		println("✓ Component Test B passed: canonical bow-tie classified correctly.")
+	end
+
+	let
+		println("\n=== Component Test C: Bow-tie embedded in larger graph ===")
+
+		#	Nodes:
+		#	  SCC(core):    n1, n2, n3    (3-cycle)
+		#	  IN:           n4            (n4 → n1)
+		#	  OUT:          n5            (n3 → n5)
+		#	  Extra SCC:    n6, n7        (6 ↔ 7)
+		#	  Isolate:      n8
+		#
+		#	Edges:
+		#	  Core SCC:     n1→n2, n2→n3, n3→n1
+		#	  IN:           n4→n1
+		#	  OUT:          n3→n5
+		#	  Extra SCC:    n6↔n7
+			src = ["n1","n2","n3","n4","n3","n6","n7"]
+			dst = ["n2","n3","n1","n1","n5","n7","n6"]
+			edges = DataFrame(; src, dst)
+
+		#	Run stats
+			stats = component_statistics(edges; graph_type = :directed)
+
+		#	Total nodes
+			n = 8
+
+		#	Largest SCC = {n1,n2,n3} → size 3
+			@assert stats.largest_scc == 3
+			@assert stats.num_scc ≥ 3   # core SCC, {6,7}, plus singletons
+
+		#	Bow-tie relative to largest SCC:
+		#	  SCC: {1,2,3}  → 3
+		#	  IN:  {4}      → 1
+		#	  OUT: {5}      → 1
+		#	  {6,7,8} are outside bow-tie sets.
+			@assert stats.bow_tie_scc_size == 3
+			@assert stats.bow_tie_in_size  == 1
+			@assert stats.bow_tie_out_size == 1
+
+		#	Fractions (if present)
+			if haskey(stats, :bt_scc_frac)
+				@assert isapprox(stats.bow_tie_scc_fraction, 3 / n; atol = 1e-12)
+				@assert isapprox(stats.bow_tie_in_fraction,  1 / n; atol = 1e-12)
+				@assert isapprox(stats.bow_tie_out_fraction, 1 / n; atol = 1e-12)
+			end
+
+		println("✓ Component Test C passed: bow-tie sets identified correctly within a larger graph.")
+	end
+
+	let
+		println("\n=== Component Test D: Undirected bow-tie sanity check ===")
+
+		#	Undirected triangle (stored as paired arcs)
+			src = ["n1","n2","n2","n3","n3","n1"]
+			dst = ["n2","n1","n3","n2","n1","n3"]
+			edges = DataFrame(; src, dst)
+
+		#	Run stats in undirected mode
+			stats = component_statistics(edges; graph_type = :undirected)
+
+		#	By design: SCC/bow-tie not meaningful for undirected graphs
+			@assert stats.num_scc            == 0
+			@assert stats.largest_scc        == 0
+			@assert stats.second_largest_scc == 0
+
+			@assert stats.bow_tie_scc_size   == 0
+			@assert stats.bow_tie_in_size    == 0
+			@assert stats.bow_tie_out_size   == 0
+
+			if haskey(stats, :bt_scc_frac)
+				@assert isapprox(stats.bow_tie_scc_fraction, 0.0; atol = 1e-12)
+				@assert isapprox(stats.bow_tie_in_fraction,  0.0; atol = 1e-12)
+				@assert isapprox(stats.bow_tie_out_fraction, 0.0; atol = 1e-12)
+			end
+
+		println("✓ Component Test D passed: undirected graphs give zero SCC/bow-tie stats.")
+	end
 
 #######################
 #   GLOBAL MEASURES   #
