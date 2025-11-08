@@ -2898,13 +2898,11 @@
 #   LOCAL REACH   #
 ###################
 
-#	Group-Level Degree: Total, In-Degree, Out-Degree, Between & Weighted Versions
-
-#	CALCULATE LOCAL REACH MEASURES
-
 #	Construct Nodes File for Comparison Tests
 	nodes = agents[:,(1:2)]
 	rename!(nodes, ["id", "label"])
+
+#	CALCULATE LOCAL REACH MEASURES
 
 # 	Calculating 2-Hop In-Reach 
 	in_hop_reach = hop_reach_k(agent_agent_all_com.edges, nodes=nodes, mode="in", k=2)
@@ -2917,6 +2915,44 @@
 # 	Calculating 2-Hop Undirected Reach 
 	all_hop_reach = hop_reach_k(agent_agent_all_com.edges, nodes=nodes, mode="all", k=2) 
 	rename!(all_hop_reach, ["node", "undirected_reach"])
+
+#	Calculate Group_Level Degree Statistics: Undirected/Unweighted 
+	stats_undirected_weighted = group_statistics(agent_agent_all_com.edges; directed = false,
+		                                         weighted = true, resolution_sweep = true, n_resolutions = 15,
+		                                         n_runs_per_gamma = 5, n_iterations_per_run = 20, seed = 123)
+	undirected_weighted_node_stats = stats_undirected_weighted.node_stats
+
+	println("Undirected / Weighted modularity = ", stats_undirected_weighted.modularity)
+	println("γ used (CHAMP) = ", stats_undirected_weighted.resolution_used)
+	first(stats_undirected_weighted.group_stats, 10)
+
+#	Calculate Group_Level Degree Statistics: Directed/Unweighted
+	stats_directed_unweighted = group_statistics(agent_agent_all_com.edges; directed = true, weighted = false,
+                                                 resolution_sweep = false, resolution = 1.0, n_runs_per_gamma    = 10,
+                                                 n_iterations_per_run= 20, seed = 123)
+	stats_directed_unweighted_node_stats = stats_directed_unweighted.node_stats
+
+	println("Directed / Unweighted modularity = ", stats_directed_unweighted.modularity)
+	first(stats_directed_unweighted.group_stats, 10)
+
+#	Calculate Group_Level Degree Statistics: Undirected/Weighted
+	stats_undirected_weighted = group_statistics(agent_agent_all_com.edges; directed = false, weighted = true, resolution_sweep = true,    
+												 n_resolutions = 15, n_runs_per_gamma = 5, n_iterations_per_run = 20, seed = 123)
+	stats_undirected_weighted_nodes_stats = stats_undirected_weighted.node_stats
+
+	println("Undirected / Weighted modularity = ", stats_undirected_weighted.modularity)
+	println("γ used (CHAMP) = ", stats_undirected_weighted.resolution_used)
+	first(stats_undirected_weighted.group_stats, 10)
+
+#	Calculate Group_Level Degree Statistics: Directed/Weighted
+	stats_directed_weighted = group_statistics(agent_agent_all_com.edges; directed = true,
+											   weighted = true, resolution_sweep = true, n_resolutions = 15, n_runs_per_gamma = 5, 
+											   n_iterations_per_run = 20, seed = 123)
+	stats_directed_weighted_node_stats = stats_directed_weighted.node_stats
+
+	println("Directed / Weighted modularity = ", stats_directed_weighted.modularity)
+	println("γ used (CHAMP) = ", stats_directed_weighted.resolution_used)
+	first(stats_directed_weighted.group_stats, 10)
 
 #	CONDUCT TESTS
 

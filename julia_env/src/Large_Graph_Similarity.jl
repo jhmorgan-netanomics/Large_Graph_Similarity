@@ -6179,8 +6179,738 @@ module Large_Graph_Similarity
 	- `_graph_to_sparse_matrix`: Graph conversion utility
 	""" hop_reach_k
 
-#	Group-Level Degree: Total, In-Degree, Out-Degree, Between & Weighted Versions
-#	E/I Index
+#	Helper: Node & Group Degree / Strength with loop-corrected totals
+	function _group_degree_stats_from_adj(adj::SparseMatrixCSC{Float64,Int},
+										node_ids::Vector{String},
+										membership::Vector{Int};
+										directed::Bool,
+										weighted::Bool)
+
+		"""
+		Args:
+			adj::SparseMatrixCSC{Float64,Int}:
+				Adjacency matrix in node_ids / membership order.
+			node_ids::Vector{String}:
+				Node identifiers in matrix order.
+			membership::Vector{Int}:
+				Community assignment per node (0 ⇒ no group).
+			directed::Bool:
+				Whether to treat graph as directed.
+			weighted::Bool:
+				If true, edge weights used as strengths; otherwise binary.
+		Returns:
+			NamedTuple:
+				(node_stats::DataFrame, group_stats::DataFrame)
+			Notes:
+				- Self-loops contribute 1 (or w) to in-degree and out-degree,
+				  but only 1 (or w) to total degree/strength.
+				- In-group / between-group measures computed per node and aggregated
+				  per community; E/I index uses group-level internal/external ties.
+		"""
+
+		#	Basic checks
+			n = size(adj, 1)
+			@assert size(adj, 2) == n "adj must be square"
+			@assert length(node_ids) == n "node_ids length must match adj size"
+			@assert length(membership) == n "membership length must match adj size"
+
+		#	Node-level degree (binary) and strength (weighted)
+			in_deg    = zeros(Int,     n)
+			out_deg   = zeros(Int,     n)
+			in_str    = zeros(Float64, n)
+			out_str   = zeros(Float64, n)
+			loop_bin  = zeros(Int,     n)
+			loop_w    = zeros(Float64, n)
+
+		#	In-group node-level measures
+			ing_in_deg   = zeros(Int,     n)
+			ing_out_deg  = zeros(Int,     n)
+			ing_in_str   = zeros(Float64, n)
+			ing_out_str  = zeros(Float64, n)
+			ing_loop_bin = zeros(Int,     n)      # self-loop in-group
+			ing_loop_w   = zeros(Float64, n)
+
+		#	Group-level internal / external tie sums (for E/I index)
+			gids = sort!(unique(membership))
+			gids = filter(!=(0), gids)          # drop "no group"
+			group_internal = Dict{Int,Float64}(g => 0.0 for g in gids)
+			group_external = Dict{Int,Float64}(g => 0.0 for g in gids)
+
+		#	Handles for iteration
+			rows = rowvals(adj)
+			vals = nonzeros(adj)
+
+		#	Iterate over edges
+			if directed
+				#	Directed: process each entry A[i,j] as edge i → j
+					@inbounds for j in 1:n
+						for idx in nzrange(adj, j)
+							i = rows[idx]
+							w = vals[idx]
+							bw = weighted ? w : (w != 0.0 ? 1.0 : 0.0)
+
+							#	Self-loop bookkeeping
+								if i == j
+									loop_bin[i] += 1
+									loop_w[i]   += w
+								end
+
+							#	Node-level degree / strength
+								out_deg[i]  += 1
+								in_deg[j]   += 1
+								out_str[i]  += w
+								in_str[j]   += w
+
+							#	Group-level logic (skip if either node unlabeled)
+								gi = membership[i]
+								gj = membership[j]
+								if gi == 0 && gj == 0
+									continue
+								end
+
+								if gi == gj && gi != 0
+									#	In-group tie
+									ing_out_deg[i] += 1
+									ing_in_deg[j]  += 1
+									ing_out_str[i] += w
+									ing_in_str[j]  += w
+
+									if i == j
+										ing_loop_bin[i] += 1
+										ing_loop_w[i]   += w
+									end
+
+									#	Group internal: count tie once for E/I
+										group_internal[gi] += bw
+								else
+									#	Between-group tie: count for each endpoint in a labeled group
+										if gi != 0
+											group_external[gi] += bw
+										end
+										if gj != 0
+											group_external[gj] += bw
+										end
+								end
+						end
+					end
+			else
+				#	Undirected: process each undirected tie once (i < j), loops once (i == j)
+					@inbounds for j in 1:n
+						for idx in nzrange(adj, j)
+							i = rows[idx]
+							w = vals[idx]
+							bw = weighted ? w : (w != 0.0 ? 1.0 : 0.0)
+
+							if i == j
+								#	self-loop: once
+									loop_bin[i] += 1
+									loop_w[i]   += w
+
+								#	degree/strength: counts once for the node
+									out_deg[i]  += 1
+									out_str[i]  += w
+
+									gi = membership[i]
+									if gi != 0
+										ing_out_deg[i] += 1
+										ing_out_str[i] += w
+										ing_loop_bin[i] += 1
+										ing_loop_w[i]   += w
+										group_internal[gi] += bw
+									end
+							elseif i < j
+								#	Edge between distinct nodes: count once, add to both endpoints
+									out_deg[i]  += 1
+									out_deg[j]  += 1
+									out_str[i]  += w
+									out_str[j]  += w
+
+									gi = membership[i]
+									gj = membership[j]
+
+									if gi == 0 && gj == 0
+										continue
+									end
+
+									if gi == gj && gi != 0
+										#	in-group internal undirected tie
+										ing_out_deg[i] += 1
+										ing_out_deg[j] += 1
+										ing_out_str[i] += w
+										ing_out_str[j] += w
+										group_internal[gi] += bw
+									else
+										#	between groups: each endpoint group gets external credit
+											if gi != 0
+												group_external[gi] += bw
+											end
+											if gj != 0
+												group_external[gj] += bw
+											end
+									end
+							end
+						end
+					end
+			end
+
+		#	Total degree / strength (self-loop counted ONCE)
+			if directed
+				total_deg = in_deg .+ out_deg .- loop_bin
+				total_str = in_str .+ out_str .- loop_w
+
+				ing_total_deg = ing_in_deg .+ ing_out_deg .- ing_loop_bin
+				ing_total_str = ing_in_str .+ ing_out_str .- ing_loop_w
+			else
+				#	We stored undirected degree in out_deg / out_str
+				total_deg = copy(out_deg)
+				total_str = copy(out_str)
+
+				ing_total_deg = copy(ing_out_deg)
+				ing_total_str = copy(ing_out_str)
+			end
+
+		#	Between-group node-level measures
+			between_in_deg   = in_deg  .- ing_in_deg
+			between_out_deg  = out_deg .- ing_out_deg
+			between_tot_deg  = total_deg .- ing_total_deg
+
+			between_in_str   = in_str  .- ing_in_str
+			between_out_str  = out_str .- ing_out_str
+			between_tot_str  = total_str .- ing_total_str
+
+		#	Assemble node-level DataFrame (full set; user wrapper can prune)
+			node_stats = DataFrame(
+				node                    = node_ids,
+				community               = membership,
+
+				in_degree               = in_deg,
+				out_degree              = out_deg,
+				total_degree            = total_deg,
+
+				in_strength             = in_str,
+				out_strength            = out_str,
+				total_strength          = total_str,
+
+				in_degree_in_group      = ing_in_deg,
+				out_degree_in_group     = ing_out_deg,
+				total_degree_in_group   = ing_total_deg,
+
+				in_degree_between       = between_in_deg,
+				out_degree_between      = between_out_deg,
+				total_degree_between    = between_tot_deg,
+
+				in_strength_in_group    = ing_in_str,
+				out_strength_in_group   = ing_out_str,
+				total_strength_in_group = ing_total_str,
+
+				in_strength_between     = between_in_str,
+				out_strength_between    = between_out_str,
+				total_strength_between  = between_tot_str
+			)
+
+		#	Group-level E/I index & totals
+			group_rows = NamedTuple[]
+			for g in gids
+				internal = get(group_internal, g, 0.0)
+				external = get(group_external, g, 0.0)
+				den      = internal + external
+				ei       = den == 0.0 ? NaN : (external - internal) / den
+
+				n_nodes_g = count(==(g), membership)
+
+				push!(group_rows, (
+					community     = g,
+					n_nodes       = n_nodes_g,
+					internal_ties = internal,
+					external_ties = external,
+					ei_index      = ei
+				))
+			end
+			group_stats = DataFrame(group_rows)
+
+		#	Return full results; caller controls which columns to keep
+			return (node_stats = node_stats, group_stats = group_stats)
+	end
+
+#	Group Statistics: community-level degrees, E/I index, modularity
+	function group_statistics(edges::DataFrame;
+							nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}} = nothing,
+							membership::Union{Nothing,DataFrame,AbstractVector{<:Integer},Dict} = nothing,
+							directed::Bool = false,
+							weighted::Bool = false,
+							resolution_sweep::Bool = false,
+							resolution::Float64 = 1.0,
+							n_resolutions::Int = 15,
+							n_runs_per_gamma::Int = 5,
+							n_iterations_per_run::Int = 10,
+							seed::Union{Int,Nothing} = nothing)
+		"""
+		Args:
+			edges::DataFrame: Edge list with :src, :dst, optional :weight
+			nodes::Union{Nothing,DataFrame,Vector}: Optional node universe (includes isolates)
+			membership::Union{Nothing,DataFrame,Vector,Dict}: Optional community assignment
+			directed::Bool: Treat graph as directed (true) or undirected (false)
+			weighted::Bool: Use edge weights (true) or binary (false)
+			resolution_sweep::Bool: Use CHAMP sweep (true) or single Leiden (false) when detecting
+			resolution::Float64: Resolution γ for single-resolution Leiden
+			n_resolutions::Int: Number of γ values in CHAMP sweep
+			n_runs_per_gamma::Int: Leiden runs per γ
+			n_iterations_per_run::Int: Leiden iterations per run
+			seed::Union{Int,Nothing}: Random seed or nothing
+		Returns:
+			NamedTuple: (node_stats, group_stats, modularity, resolution_used, n_groups, membership_table)
+		Notes:
+			- Returns both node-level and group-level statistics
+			- Node stats columns filtered by graph type (directed/weighted)
+			- Detects communities if membership not provided
+			- Self-loops counted once in total degree/strength
+		"""
+
+		#	Validate edges
+			@assert hasproperty(edges, :src) && hasproperty(edges, :dst) "edges must have :src and :dst"
+
+		#	Handle empty graph
+			if nrow(edges) == 0
+				empty_node_df = DataFrame(
+					node = String[],
+					community = Int[],
+					total_degree = Int[]
+				)
+				empty_group_df = DataFrame(
+					group_id = Int[],
+					group_size = Int[],
+					in_group_degree_total = Int[],
+					between_group_degree_total = Int[],
+					EI_index = Float64[]
+				)
+				return (
+					node_stats = empty_node_df,
+					group_stats = empty_group_df,
+					modularity = 0.0,
+					resolution_used = resolution,
+					n_groups = 0,
+					membership_table = DataFrame(node = String[], community = Int[])
+				)
+			end
+
+		#	Prepare edges & weights (binary vs weighted)
+			clean_edges = deepcopy(edges)
+
+			if weighted
+				#	Weighted: ensure :weight exists and is Float64
+					if !hasproperty(clean_edges, :weight)
+						clean_edges.weight = ones(Float64, nrow(clean_edges))
+					else
+						clean_edges.weight = Float64.(clean_edges.weight)
+					end
+					agg_func = sum
+			else
+				#	Unweighted: force binary weights
+					clean_edges.weight = ones(Float64, nrow(clean_edges))
+					agg_func = maximum
+			end
+
+		#	Aggregate multi-edges
+			clean_edges = _aggregate_multi_edges(clean_edges; agg_func = agg_func)
+
+		#	Build base adjacency (always weighted numeric, for reuse)
+			adj_base, node_map, idx_to_node = _graph_to_sparse_matrix(
+				clean_edges;
+				nodes = nodes,
+				weighted = true
+			)
+
+		#	Preserve node index object for community routines
+			ni = deepcopy(idx_to_node)
+
+		#	Extract node ids in matrix order
+			node_ids = if idx_to_node isa DataFrame
+				hasproperty(idx_to_node, :id) ? String.(idx_to_node.id) : String.(idx_to_node[:, 1])
+			else
+				String.(idx_to_node)
+			end
+			n = length(node_ids)
+
+		#	Build / align community membership
+			resolution_used = resolution
+			partition_df = DataFrame(node = String[], community = Int[])
+
+			if membership === nothing
+				#	Detect communities (Leiden or CHAMP)
+					if resolution_sweep
+						#	CHAMP sweep over gamma range
+							community_solution = champ_community_detection(
+								clean_edges;
+								nodes = ni,
+								resolution = nothing,
+								resolution_range = (0.5, 1.8),
+								n_resolutions = n_resolutions,
+								weighted = weighted,
+								directed = directed,
+								n_runs_per_gamma = n_runs_per_gamma,
+								n_iterations_per_run = n_iterations_per_run,
+								seed = seed,
+								show_progress = true
+							)
+							resolution_used = community_solution.resolution_used
+
+						#	Build partition_df from CHAMP result
+							if community_solution.node_names isa DataFrame
+								partition_df = DataFrame(
+									node = String.(community_solution.node_names.id),
+									community = Int.(community_solution.membership)
+								)
+							else
+								partition_df = DataFrame(
+									node = String.(community_solution.node_names),
+									community = Int.(community_solution.membership)
+								)
+							end
+					else
+						#	Single-resolution Leiden at given γ
+							community_solution = leiden_community_detection(
+								clean_edges;
+								nodes = ni,
+								resolution = resolution,
+								n_iterations = n_iterations_per_run,
+								n_runs = n_runs_per_gamma,
+								weighted = weighted,
+								directed = directed,
+								seed = seed
+							)
+							resolution_used = resolution
+
+						#	Build partition_df from Leiden result
+							if community_solution.node_names isa DataFrame
+								partition_df = DataFrame(
+									node = String.(community_solution.node_names.id),
+									community = Int.(community_solution.membership)
+								)
+							else
+								partition_df = DataFrame(
+									node = String.(community_solution.node_names),
+									community = Int.(community_solution.membership)
+								)
+							end
+					end
+			else
+				#	Membership provided by user → respect it
+					if membership isa DataFrame
+						pm = deepcopy(membership)
+						rename!(pm, lowercase.(string.(propertynames(pm))))
+						@assert hasproperty(pm, :node) && hasproperty(pm, :community) "membership DataFrame must have :node and :community"
+						partition_df = DataFrame(
+							node = String.(pm.node),
+							community = Int.(pm.community)
+						)
+
+					elseif membership isa AbstractVector
+						@assert length(membership) == n "membership vector length must match node count"
+						partition_df = DataFrame(
+							node = node_ids,
+							community = Int.(membership)
+						)
+
+					elseif membership isa Dict
+						communities = zeros(Int, n)
+						for i in 1:n
+							communities[i] = get(membership, node_ids[i], 0)
+						end
+						partition_df = DataFrame(
+							node = node_ids,
+							community = communities
+						)
+
+					else
+						throw(ArgumentError("Unsupported membership type: $(typeof(membership))"))
+					end
+			end
+
+		#	Align partition to matrix order (node_ids)
+			if partition_df.node != node_ids
+				#	Map and reorder
+					part_map = Dict(partition_df.node .=> partition_df.community)
+					membership_vec = [get(part_map, nid, 0) for nid in node_ids]
+
+				#	Rebuild partition_df in canonical order
+					partition_df = DataFrame(node = node_ids, community = membership_vec)
+
+				#	Fill zeros (missing communities) with unique singleton groups
+					if any(membership_vec .== 0)
+						max_comm = maximum(filter(!=(0), membership_vec); init = 0)
+						for i in eachindex(membership_vec)
+							if membership_vec[i] == 0
+								max_comm += 1
+								membership_vec[i] = max_comm
+								partition_df.community[i] = max_comm
+							end
+						end
+					end
+			else
+				membership_vec = partition_df.community
+			end
+
+		#	Use helper function to get comprehensive node and group stats
+			stats = _group_degree_stats_from_adj(
+				adj_base,
+				node_ids,
+				membership_vec;
+				directed = directed,
+				weighted = weighted
+			)
+			
+			full_node_stats = stats.node_stats
+			helper_group_stats = stats.group_stats
+
+		#	Filter node_stats columns based on graph type
+			if directed && weighted
+				#	Directed + Weighted: keep all columns
+					filtered_node_stats = full_node_stats
+					
+			elseif directed && !weighted
+				#	Directed + Binary: exclude strength columns
+					filtered_node_stats = select(full_node_stats,
+						:node, :community,
+						:in_degree, :out_degree, :total_degree,
+						:in_degree_in_group, :out_degree_in_group, :total_degree_in_group,
+						:in_degree_between, :out_degree_between, :total_degree_between
+					)
+					
+			elseif !directed && weighted
+				#	Undirected + Weighted: only total degree/strength columns
+					filtered_node_stats = select(full_node_stats,
+						:node, :community,
+						:total_degree, :total_strength,
+						:total_degree_in_group, :total_strength_in_group,
+						:total_degree_between, :total_strength_between
+					)
+					
+			else
+				#	Undirected + Binary: only total degree columns
+					filtered_node_stats = select(full_node_stats,
+						:node, :community,
+						:total_degree,
+						:total_degree_in_group,
+						:total_degree_between
+					)
+			end
+
+		#	Build group_stats DataFrame with appropriate columns based on graph type
+			groups = sort(unique(membership_vec))
+			group_rows = NamedTuple[]
+			
+			for g in groups
+				#	Find matching row in helper_group_stats
+					helper_row = helper_group_stats[helper_group_stats.community .== g, :]
+					if nrow(helper_row) == 0
+						continue
+					end
+					helper_row = helper_row[1, :]
+					
+				#	Get node indices for this group
+					idx = findall(==(g), membership_vec)
+					ng = length(idx)
+					
+				#	Sum up group totals from node stats
+					group_nodes = full_node_stats[full_node_stats.community .== g, :]
+					
+				#	Assemble per-group row with schema depending on flags
+					if directed && weighted
+						push!(group_rows, (
+							group_id = g,
+							group_size = ng,
+							in_group_degree_total = sum(group_nodes.total_degree_in_group),
+							in_group_degree_in = sum(group_nodes.in_degree_in_group),
+							in_group_degree_out = sum(group_nodes.out_degree_in_group),
+							between_group_degree_total = sum(group_nodes.total_degree_between),
+							between_group_degree_in = sum(group_nodes.in_degree_between),
+							between_group_degree_out = sum(group_nodes.out_degree_between),
+							in_group_strength_total = sum(group_nodes.total_strength_in_group),
+							in_group_strength_in = sum(group_nodes.in_strength_in_group),
+							in_group_strength_out = sum(group_nodes.out_strength_in_group),
+							between_group_strength_total = sum(group_nodes.total_strength_between),
+							between_group_strength_in = sum(group_nodes.in_strength_between),
+							between_group_strength_out = sum(group_nodes.out_strength_between),
+							EI_index = helper_row.ei_index,
+						))
+					elseif directed && !weighted
+						push!(group_rows, (
+							group_id = g,
+							group_size = ng,
+							in_group_degree_total = sum(group_nodes.total_degree_in_group),
+							in_group_degree_in = sum(group_nodes.in_degree_in_group),
+							in_group_degree_out = sum(group_nodes.out_degree_in_group),
+							between_group_degree_total = sum(group_nodes.total_degree_between),
+							between_group_degree_in = sum(group_nodes.in_degree_between),
+							between_group_degree_out = sum(group_nodes.out_degree_between),
+							EI_index = helper_row.ei_index,
+						))
+					elseif !directed && weighted
+						push!(group_rows, (
+							group_id = g,
+							group_size = ng,
+							in_group_degree_total = sum(group_nodes.total_degree_in_group),
+							between_group_degree_total = sum(group_nodes.total_degree_between),
+							in_group_strength_total = sum(group_nodes.total_strength_in_group),
+							between_group_strength_total = sum(group_nodes.total_strength_between),
+							EI_index = helper_row.ei_index,
+						))
+					else
+						#	Undirected & Unweighted
+							push!(group_rows, (
+								group_id = g,
+								group_size = ng,
+								in_group_degree_total = sum(group_nodes.total_degree_in_group),
+								between_group_degree_total = sum(group_nodes.total_degree_between),
+								EI_index = helper_row.ei_index,
+							))
+					end
+			end
+
+			group_df = DataFrame(group_rows)
+			n_groups = nrow(group_df)
+
+		#	Build modularity adjacency A_Q (graph-type specific)
+			if directed && weighted
+				#	Case 1: directed, weighted
+					A_Q = copy(adj_base)
+
+			elseif directed && !weighted
+				#	Case 2: directed, binary
+					A_Q = map(x -> x > 0 ? 1.0 : 0.0, adj_base)
+
+			elseif !directed && weighted
+				#	Case 3: undirected, weighted (symmetrize by average)
+					A_Q = 0.5 .* (adj_base + adj_base')
+
+			else
+				#	Case 4: undirected, binary
+					A_Q0 = max.(adj_base, adj_base')
+					A_Q = map(x -> x > 0 ? 1.0 : 0.0, A_Q0)
+			end
+
+		#	Graph-level modularity
+			modularity = calculate_modularity(
+				A_Q, membership_vec;
+				weighted = weighted,
+				directed = directed,
+				γ = resolution_used
+			)
+
+		#	Return results with node_stats added
+			return (
+				node_stats = filtered_node_stats,
+				group_stats = group_df,
+				modularity = modularity,
+				resolution_used = resolution_used,
+				n_groups = n_groups,
+				membership_table = partition_df
+			)
+	end
+	@doc raw"""
+		group_statistics(edges::DataFrame; nodes=nothing, membership=nothing, ...) -> NamedTuple
+
+		Compute node-level and group-level statistics for a graph given a community partition.
+
+		**Arguments**
+		- `edges::DataFrame`: Edge list with `:src`, `:dst`, optional `:weight`
+		- `nodes::Union{Nothing,DataFrame,Vector}`: Optional node universe (includes isolates)
+		- `membership`: Optional community assignment:
+			- `nothing` (default): communities are detected
+			- `DataFrame`: must contain `:node` and `:community`
+			- `Vector{<:Integer}`: one community id per node in matrix order
+			- `Dict`: maps node id → community id
+		- `directed::Bool`: Treat graph as directed (`true`) or undirected (`false`)
+		- `weighted::Bool`: If `true`, use edge weights. If `false`, treat edges as binary
+		- `resolution_sweep::Bool`: If `true` and `membership === nothing`, runs CHAMP community
+			detection over a γ-range. If `false`, runs Leiden at the given `resolution`
+		- `resolution::Float64`: Resolution γ for single-resolution Leiden (default `1.0`)
+		- `n_resolutions::Int`: Number of γ-values in CHAMP sweep
+		- `n_runs_per_gamma::Int`: Number of Leiden runs per γ
+		- `n_iterations_per_run::Int`: Number of Leiden iterations per run
+		- `seed::Union{Int,Nothing}`: Random seed for reproducibility
+
+		**Returns**
+		`NamedTuple` with 6 fields:
+
+		1. **`node_stats::DataFrame`**: Node-level statistics with columns filtered by graph type:
+			- Always: `:node`, `:community`
+			- **Undirected + Binary**: 
+				- `:total_degree`, `:total_degree_in_group`, `:total_degree_between`
+			- **Undirected + Weighted**: 
+				- All undirected binary columns plus:
+				- `:total_strength`, `:total_strength_in_group`, `:total_strength_between`
+			- **Directed + Binary**:
+				- `:in_degree`, `:out_degree`, `:total_degree`
+				- `:in_degree_in_group`, `:out_degree_in_group`, `:total_degree_in_group`
+				- `:in_degree_between`, `:out_degree_between`, `:total_degree_between`
+			- **Directed + Weighted**:
+				- All directed binary columns plus:
+				- `:in_strength`, `:out_strength`, `:total_strength`
+				- `:in_strength_in_group`, `:out_strength_in_group`, `:total_strength_in_group`
+				- `:in_strength_between`, `:out_strength_between`, `:total_strength_between`
+
+		2. **`group_stats::DataFrame`**: Group-level aggregated statistics:
+			- Always: `:group_id`, `:group_size`, `:EI_index`
+			- Additional columns follow same pattern as node_stats but aggregated to group level
+
+		3. **`modularity::Float64`**: Modularity of the partition under `resolution_used`
+
+		4. **`resolution_used::Float64`**: Resolution γ actually used (from CHAMP or given `resolution`)
+
+		5. **`n_groups::Int`**: Number of groups
+
+		6. **`membership_table::DataFrame`**: Node-level membership with `:node` and `:community`
+
+		**Algorithm Details**
+
+		Community Detection:
+		- When `membership === nothing`:
+			- If `resolution_sweep == false`: Single-resolution Leiden at `resolution`
+			- If `resolution_sweep == true`: CHAMP over γ-range, returns selected partition
+		- When `membership !== nothing`: Uses provided partition directly
+
+		Degree Computation:
+		- Self-loops are counted **once** in total degree/strength
+		- In-group degree: edges where both endpoints are in the same group
+		- Between-group degree: total degree minus in-group degree
+		- For undirected graphs, adjacency is symmetrized
+
+		E/I Index:
+		- For each group: `E/I = (E − I) / (E + I)`
+		- `I` = in-group ties (internal)
+		- `E` = between-group ties (external)
+		- Uses strengths if weighted, degrees if binary
+
+		Modularity:
+		- Computed using graph-type-specific adjacency `A_Q`:
+			- Directed weighted: `A_Q = W`
+			- Directed binary: `A_Q = 1(W > 0)`
+			- Undirected weighted: `A_Q = (W + Wᵀ) / 2`
+			- Undirected binary: `A_Q = 1(max(W, Wᵀ) > 0)`
+
+		**Examples**
+	```julia
+		# Directed weighted network
+		result = group_statistics(edges; directed=true, weighted=true)
+		result.node_stats    # Node-level with all degree/strength columns
+		result.group_stats   # Group-level aggregates
+		
+		# Detect communities with CHAMP
+		result = group_statistics(edges; resolution_sweep=true)
+		result.resolution_used  # Selected γ from sweep
+		
+		# Use predefined communities
+		communities = DataFrame(node=["A","B","C"], community=[1,1,2])
+		result = group_statistics(edges; membership=communities)
+	```
+
+		**See Also**
+		- `leiden_community_detection`: Single-resolution community detection
+		- `champ_community_detection`: Multi-resolution sweep
+		- `calculate_modularity`: Modularity computation
+		- `_group_degree_stats_from_adj`: Internal helper for degree calculations
+	""" group_statistics
 
 #   GRAPH-LEVEL FEATURES
 
@@ -7869,6 +8599,7 @@ module Large_Graph_Similarity
 		   modularity_vitality,
 		   core_decomposition,
 		   hop_reach_k,
+		   group_statistics,
            recommend_L,
 		   triad_census,
 		   component_statistics,
