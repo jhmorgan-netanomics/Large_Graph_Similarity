@@ -19,6 +19,7 @@
     using CSV
     using DataFrames
 	using LinearAlgebra
+	using Random
 	using SparseArrays
 	using Statistics
 	using StatsBase
@@ -324,6 +325,92 @@
 			adj_matrix = sparse(src_idx, dst_idx, weights, n, n)
 		
 		#	Return matrix and mappings
+			return (adj_matrix, node_to_idx, idx_to_node)
+	end
+
+#	Helper: graph (nodes + edges) to sparse adjacency with fixed node universe
+	function _graph_to_sparse_matrix(edges::DataFrame;
+									nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}}=nothing,
+									weighted::Bool=true)
+		"""
+		Args:
+			edges::DataFrame
+				Required columns: :src, :dst
+				Optional column:  :weight
+				src/dst are node IDs (treated as String; supports long IDs)
+		
+			nodes::Union{Nothing,DataFrame,Vector{<:AbstractString}}
+				Nothing  → infer nodes from edges (isolates excluded)
+				DataFrame: columns :id and :label (both string vectors). Uses :id as the ID universe.
+				Vector   : string vector of node IDs forming the ID universe (includes isolates, if any)
+		
+			weighted::Bool
+				If true and edges has :weight, use it; otherwise use ones.
+				If false, ignore any :weight column and use ones.
+		
+		Returns:
+			Tuple{SparseMatrixCSC{Float64,Int64}, Dict{Any,Int}, Vector{Any}}
+				(adj_matrix, node_to_idx, idx_to_node)
+		
+		Notes:
+			- When `nodes` is provided, the returned matrix is sized to that universe
+			(so isolates are included). All edge endpoints must exist in `nodes`.
+			- When `nodes` is not provided, falls back to `_edgelist_to_sparse_matrix`
+			which infers the node set from edge endpoints only.
+		"""
+
+		#	Basic validation for edge columns
+			@assert hasproperty(edges, :src) && hasproperty(edges, :dst) "_graph_to_sparse_matrix: edges must have :src and :dst"
+
+		#	Fallback: no nodes supplied → just delegate to the existing helper
+			if nodes === nothing
+				return _edgelist_to_sparse_matrix(edges; weighted=weighted)
+			end
+
+		#	Build the fixed node universe (idx_to_node) and mapping (node_to_idx)
+			ids = String[]
+			if nodes isa DataFrame
+				#	Nodes as a DataFrame of IDs and Labels (Screen Names)
+					ndf = nodes::DataFrame
+					@assert hasproperty(ndf, :id) && hasproperty(ndf, :label) "_graph_to_sparse_matrix: nodes DataFrame must have :id and :label"
+					ids = String.(ndf.id)
+			else
+				#	Vector of node IDs
+					ids = String.(nodes::AbstractVector{<:AbstractString})
+			end
+
+		#	Specifyign Node Specific Return Objects
+			n = length(ids)
+			node_to_idx = Dict{Any,Int}(id => i for (i, id) in enumerate(ids))
+			if(typeof(nodes) == DataFrame)
+				idx_to_node = nodes
+			else
+				idx_to_node = Vector{Any}(ids)  # keep Any to match requested return type
+			end
+
+		#	Map edge endpoints to indices (validate all endpoints are known)
+			src_ids = String.(edges.src)
+			dst_ids = String.(edges.dst)
+
+			unknown_src = Set{String}(s for s in src_ids if !haskey(node_to_idx, s))
+			unknown_dst = Set{String}(d for d in dst_ids if !haskey(node_to_idx, d))
+			if !isempty(unknown_src) || !isempty(unknown_dst)
+				missing_ids = union(unknown_src, unknown_dst)
+				examples = join(collect(Iterators.take(missing_ids, 5)), ", ")
+				throw(ArgumentError("_graph_to_sparse_matrix: edges reference IDs not present in supplied nodes (examples: $examples)"))
+			end
+
+			src_idx = [node_to_idx[s] for s in src_ids]
+			dst_idx = [node_to_idx[d] for d in dst_ids]
+
+		#	Determine edge weights per spec
+			use_weights = weighted && hasproperty(edges, :weight)
+			weights = use_weights ? Float64.(edges.weight) : ones(Float64, nrow(edges))
+
+		#	Construct sparse adjacency (no symmetrization here; caller decides)
+			adj_matrix = sparse(src_idx, dst_idx, weights, n, n)
+
+		#	Return adjacency and mappings
 			return (adj_matrix, node_to_idx, idx_to_node)
 	end
 
@@ -2202,6 +2289,144 @@
 			)
 	end
 
+#	Weighted Triad Tests Helper: Motif generator — DL triads (directed, canonical representatives)
+	function _motif_triad_edges_directed(triad::String; weight::Float64=1.0)
+		"""
+		Args:
+			triad::String: one of ["003","012","102","021D","021U","021C","111D","111U",
+									"030T","030C","201","120D","120U","120C","210","300"]
+			weight::Float64: edge weight to assign (default 1.0)
+		Returns:
+			DataFrame: columns [:src, :dst, :weight] with node ids "n1","n2","n3"
+		Notes:
+			- Canonical 3-node representatives for each DL class.
+			- No self-loops; multi-edges not used here.
+			- Use with `_graph_to_sparse_matrix(...; weighted=true|false)` in tests.
+		"""
+		#	Creating Update Objects
+			src = String[]
+			dst = String[]
+			wts = Float64[]
+
+		#	local helper
+			@inline function add(i::Int, j::Int)
+				push!(src, "n$(i)"); push!(dst, "n$(j)"); push!(wts, weight)
+			end
+
+		#	Assign edges by class (canonical forms)
+			if triad == "003"
+				#	no edges
+			elseif triad == "012"
+				add(1,2)
+			elseif triad == "102"
+				add(1,2); add(2,1)
+			elseif triad == "021D"
+				add(1,2); add(1,3)
+			elseif triad == "021U"
+				add(2,1); add(3,1)
+			elseif triad == "021C"
+				add(1,2); add(2,3)
+			elseif triad == "111D"
+    			add(1,2); add(2,1); add(3,1)   # mutual(1,2) + k→i ⇒ t1=4, t2=1, t3=3 → 111D
+			elseif triad == "111U"
+				add(1,2); add(2,1); add(2,3)   # mutual(1,2) + j→k ⇒ t1=4, t2=2, t3=1 ⇒ 111U  		# mutual(1,2) + in from 3 → j (k→j)
+			elseif triad == "030T"
+				add(1,2); add(2,3); add(1,3)             # transitive tournament
+			elseif triad == "030C"
+				add(1,2); add(2,3); add(3,1)             # 3-cycle
+			elseif triad == "201"
+				add(1,2); add(2,1); add(1,3); add(3,1)   # two mutual dyads: (1,2) & (1,3)
+			elseif triad == "120D" 	
+    			add(1,2); add(2,1); add(3,1); add(3,2)
+			elseif triad == "120U"
+    			add(1,2); add(2,1); add(1,3); add(2,3)
+			elseif triad == "120C"
+				add(1,2); add(2,1); add(2,3); add(3,1)   # mutual(1,2) + 2→3, 3→1 (cyclic)
+			elseif triad == "210"
+				add(1,2); add(2,1); add(1,3); add(3,1); add(2,3)  # two mutuals + one single
+			elseif triad == "300"
+				add(1,2); add(2,1); add(1,3); add(3,1); add(2,3); add(3,2) # all mutuals
+			else
+				throw(ArgumentError("Unknown triad code: $triad"))
+			end
+
+		#	Return Motif Edge List
+			return DataFrame(; src, dst, weight = wts)
+	end
+
+#	Weighted Triad Tests Helper: Motif generator — undirected triads (mapped to 16-class vector)
+	function _motif_triad_edges_undirected(kind::Symbol; weight::Float64=1.0)
+		"""
+		Args:
+			kind::Symbol: :empty (003), :single (102), :open (201), :triangle (300)
+			weight::Float64: edge weight to assign (default 1.0)
+		Returns:
+			DataFrame: columns [:src, :dst, :weight] with node ids "n1","n2","n3"
+		Notes:
+			- Simple undirected motifs; returned as paired arcs (i→j, j→i) to
+			  keep pipeline uniform (symmetrization handled upstream).
+		"""
+		#	Update Objects
+			src = String[]
+			dst = String[]
+			wts = Float64[]
+
+		#	Populate Triads
+			@inline function add_und(i::Int, j::Int)
+				#	store both directions to emulate undirected edge
+					push!(src, "n$(i)"); push!(dst, "n$(j)"); push!(wts, weight)
+					push!(src, "n$(j)"); push!(dst, "n$(i)"); push!(wts, weight)
+			end
+
+			if kind === :empty
+				#	003
+					nothing
+			elseif kind === :single
+				#	102 (one undirected edge)
+					add_und(1,2)
+			elseif kind === :open
+				#	201 (wedge)
+					add_und(1,2); add_und(1,3)
+			elseif kind === :triangle
+				#	300 (triangle)
+					add_und(1,2); add_und(2,3); add_und(1,3)
+			else
+				throw(ArgumentError("Unknown undirected kind: $kind"))
+			end
+
+		#	Return Undirected Graph
+			return DataFrame(; src, dst, weight = wts)
+	end
+
+#	Weighted Triad Tests Helper: Motif suite — return a Dict of all 16 directed triads
+	function _motif_suite_directed(; weight::Float64=1.0)
+		"""
+		Args:
+			weight::Float64: edge weight for all edges (default 1.0)
+		Returns:
+			Dict{String,DataFrame}: triad_code => edges DataFrame
+		Notes:
+			- Useful for unit tests that iterate across all DL classes.
+		"""
+		codes = ["003","012","102","021D","021U","021C","111D","111U",
+				 "030T","030C","201","120D","120U","120C","210","300"]
+		return Dict(code => _motif_triad_edges_directed(code; weight=weight) for code in codes)
+	end
+
+#	Weighted Triad Tests Helper: Motif suite — undirected 4-class set
+	function _motif_suite_undirected(; weight::Float64=1.0)
+		"""
+		Args:
+			weight::Float64: edge weight for all edges (default 1.0)
+		Returns:
+			Dict{Symbol,DataFrame}: kind => edges DataFrame
+		Notes:
+			- Kinds: :empty→003, :single→102, :open→201, :triangle→300.
+		"""
+		kinds = [:empty, :single, :open, :triangle]
+		return Dict(k => _motif_triad_edges_undirected(k; weight=weight) for k in kinds)
+	end
+
 ##########################
 #   GRAPH IMPORT TESTS   #
 ##########################
@@ -2678,92 +2903,7 @@
 
 #	CONDUCT TESTS
 
-#	Helper: graph (nodes + edges) to sparse adjacency with fixed node universe
-	function _graph_to_sparse_matrix(edges::DataFrame;
-									nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}}=nothing,
-									weighted::Bool=true)
-		"""
-		Args:
-			edges::DataFrame
-				Required columns: :src, :dst
-				Optional column:  :weight
-				src/dst are node IDs (treated as String; supports long IDs)
-		
-			nodes::Union{Nothing,DataFrame,Vector{<:AbstractString}}
-				Nothing  → infer nodes from edges (isolates excluded)
-				DataFrame: columns :id and :label (both string vectors). Uses :id as the ID universe.
-				Vector   : string vector of node IDs forming the ID universe (includes isolates, if any)
-		
-			weighted::Bool
-				If true and edges has :weight, use it; otherwise use ones.
-				If false, ignore any :weight column and use ones.
-		
-		Returns:
-			Tuple{SparseMatrixCSC{Float64,Int64}, Dict{Any,Int}, Vector{Any}}
-				(adj_matrix, node_to_idx, idx_to_node)
-		
-		Notes:
-			- When `nodes` is provided, the returned matrix is sized to that universe
-			(so isolates are included). All edge endpoints must exist in `nodes`.
-			- When `nodes` is not provided, falls back to `_edgelist_to_sparse_matrix`
-			which infers the node set from edge endpoints only.
-		"""
-
-		#	Basic validation for edge columns
-			@assert hasproperty(edges, :src) && hasproperty(edges, :dst) "_graph_to_sparse_matrix: edges must have :src and :dst"
-
-		#	Fallback: no nodes supplied → just delegate to the existing helper
-			if nodes === nothing
-				return _edgelist_to_sparse_matrix(edges; weighted=weighted)
-			end
-
-		#	Build the fixed node universe (idx_to_node) and mapping (node_to_idx)
-			ids = String[]
-			if nodes isa DataFrame
-				#	Nodes as a DataFrame of IDs and Labels (Screen Names)
-					ndf = nodes::DataFrame
-					@assert hasproperty(ndf, :id) && hasproperty(ndf, :label) "_graph_to_sparse_matrix: nodes DataFrame must have :id and :label"
-					ids = String.(ndf.id)
-			else
-				#	Vector of node IDs
-					ids = String.(nodes::AbstractVector{<:AbstractString})
-			end
-
-		#	Specifyign Node Specific Return Objects
-			n = length(ids)
-			node_to_idx = Dict{Any,Int}(id => i for (i, id) in enumerate(ids))
-			if(typeof(nodes) == DataFrame)
-				idx_to_node = nodes
-			else
-				idx_to_node = Vector{Any}(ids)  # keep Any to match requested return type
-			end
-
-		#	Map edge endpoints to indices (validate all endpoints are known)
-			src_ids = String.(edges.src)
-			dst_ids = String.(edges.dst)
-
-			unknown_src = Set{String}(s for s in src_ids if !haskey(node_to_idx, s))
-			unknown_dst = Set{String}(d for d in dst_ids if !haskey(node_to_idx, d))
-			if !isempty(unknown_src) || !isempty(unknown_dst)
-				missing_ids = union(unknown_src, unknown_dst)
-				examples = join(collect(Iterators.take(missing_ids, 5)), ", ")
-				throw(ArgumentError("_graph_to_sparse_matrix: edges reference IDs not present in supplied nodes (examples: $examples)"))
-			end
-
-			src_idx = [node_to_idx[s] for s in src_ids]
-			dst_idx = [node_to_idx[d] for d in dst_ids]
-
-		#	Determine edge weights per spec
-			use_weights = weighted && hasproperty(edges, :weight)
-			weights = use_weights ? Float64.(edges.weight) : ones(Float64, nrow(edges))
-
-		#	Construct sparse adjacency (no symmetrization here; caller decides)
-			adj_matrix = sparse(src_idx, dst_idx, weights, n, n)
-
-		#	Return adjacency and mappings
-			return (adj_matrix, node_to_idx, idx_to_node)
-	end
-
+#	START BACK HERE!!!!
 
 ############################
 #   GRAPH-LEVEL FEATURES   #
@@ -2781,222 +2921,26 @@
 	squartini_reciprocity = reciprocity(agent_agent_all_com.edges, weighted=true, mode=:dyad_based, weighted_method=:squartini)
 	arc_reciprocity = reciprocity(agent_agent_all_com.edges, weighted=true, mode=:arc_based)
 
+#	Calcuate Unweighted Triad Cenuses
+	triads_dir = triad_census(agent_agent_all_com.edges; weighted=false, graph_type=:directed)
+	triads_ud = triad_census(agent_agent_all_com.edges; weighted=false, graph_type=:undirected)
+
+#	Calcuate Weighted Triad Cenuses
+	tau_grid_paremetrs = recommend_L(agent_agent_all_com.edges; graph_type=:directed)
+	triads_w_dir = triad_census(agent_agent_all_com.edges; weighted=true, graph_type=:directed, L= tau_grid_paremetrs.L, 
+				               tau_min=tau_grid_paremetrs.tau_min, tau_max=tau_grid_paremetrs.tau_max)
+	directed_triad_analysis = leftjoin(triads_w_dir.summary, triads_dir, on=:triad)
+
+	tau_grid_paremetrs = recommend_L(agent_agent_all_com.edges; graph_type=:undirected)
+	triads_w_ud = triad_census(agent_agent_all_com.edges; weighted=true, graph_type=:undirected, L=	tau_grid_paremetrs.L, 
+				               tau_min=tau_grid_paremetrs.tau_min, tau_max=tau_grid_paremetrs.tau_max)
+	undirected_triad_analysis = leftjoin(triads_w_ud.summary, triads_ud, on=:triad)
+
 #	CONDUCT TESTS
 
+# 	Unweighted Triad Tests: Directed with Reciprocity Collapse (diagnostic / Pajek-ish on directed)
+	triads_dir_rc = triad_census(agent_agent_all_com.edges; weighted=false, graph_type=:directed, reciprocity_collapse=true)
 
-#	Helper: BM Triad Census (directed, simple 0/1, loopless)
-	function _triad_census_bm_directed(adj::SparseMatrixCSC{Float64,Int})
-		"""
-		Args:
-			adj::SparseMatrixCSC{Float64,Int}: directed simple graph (0/1); self-loops must be zero
-		Returns:
-			NamedTuple: (counts::Vector{Int}, labels::Vector{String})
-		Notes:
-			- Implements Batagelj–Mrvar (2001) via RSiena’s dyad-driven approach.
-			- Triad classes follow Davis–Leinhardt order:
-			  ["003","012","102","021D","021U","021C","111D","111U","030T","030C","201","120D","120U","120C","210","300"].
-			- Assumes: no multi-edges (binary), no self-loops; adj[i,i]==0.
-		"""
-
-		#	Dimensions & quick guards
-			n = size(adj, 1)
-			@assert size(adj, 2) == n "adj must be square"
-			n == 0 && return (counts = zeros(Int, 16), labels = _dl_labels())
-
-		#	Ensure binary semantics (defensive; cheap on nonzeros)
-			vals = nonzeros(adj)
-			@inbounds for t in eachindex(vals)
-				vals[t] = vals[t] > 0 ? 1.0 : 0.0
-			end
-
-		#	Precompute transpose (for quick dyad tests)
-			adjT = SparseMatrixCSC(transpose(adj))
-
-		#	Local edge tests (0/1)
-			@inline has_ij(i::Int, j::Int) = adj[i, j] != 0.0
-			@inline has_ji(i::Int, j::Int) = adjT[i, j] != 0.0  # == adj[j, i]
-
-		#	Code per dyad (RSiena-style) to 1..4:
-		#	1: empty, 2: forward (i->j), 3: backward (j->i), 4: reciprocal
-			@inline function dyad_code(i::Int, j::Int)
-				a = has_ij(i, j)
-				b = has_ji(i, j)           # == adj[j,i]
-				return a ? (b ? 4 : 2) : (b ? 3 : 1)
-			end
-
-		#	Neighbors for each node (non-empty dyads, any direction)
-			neighbors = Vector{Vector{Int}}(undef, n)
-			@inbounds for i in 1:n
-				# union of out- and in-neighbors
-					outs = findnz(adj[i, :])[1]
-					ins  = findnz(adj[:, i])[1]
-					# remove self (defensive)
-					outs = filter(j -> j != i, outs)
-					ins  = filter(j -> j != i, ins)
-					if isempty(outs)
-						neighbors[i] = unique(ins)
-					elseif isempty(ins)
-						neighbors[i] = unique(outs)
-					else
-						neighbors[i] = unique(vcat(outs, ins))
-					end
-			end
-
-		#	Neighbors with higher index (non-empty dyads i<j)
-			neighborsHigher = Vector{Vector{Int}}(undef, n)
-			@inbounds for i in 1:n
-				if isempty(neighbors[i])
-					neighborsHigher[i] = Int[]
-				else
-					neighborsHigher[i] = [ j for j in neighbors[i] if j > i ]
-				end
-			end
-
-		#	Triad class labels & counts
-			labels = _dl_labels()
-			tc     = zeros(Int, 16)
-
-		#	Lookup table (4 x 4 x 4) mapping (i->j, j->k, i->k) codes to triad class index
-			lookup = _dl_lookup()
-
-		#	Main loops over non-empty dyads (i < j)
-			if any(!isempty, neighborsHigher)
-				@inbounds for i in 1:n
-					for j in neighborsHigher[i]
-						#	nodes linked to i OR j (any direction), excluding i,j
-							third = _bm_union_neighbors_excluding(neighbors[i], neighbors[j], i, j)
-
-						#	store triads with just one tie (i,j) + isolated k
-							triadTypeIdx = (dyad_code(i, j) == 4) ? 3 : 2   # 3 => "102" (mutual), 2 => "012" (single arc)
-							tc[triadTypeIdx] += n - length(third) - 2
-
-						#	enumerate non-empty third nodes
-							for k in third
-								#	only store triads once (RSiena condition)
-									if j < k || (i < k && k < j && !_bm_is_neighbor(neighbors[i], k))
-										t1 = dyad_code(i, j)
-										t2 = dyad_code(j, k)
-										t3 = dyad_code(i, k)
-										klass = lookup[t1, t2, t3]
-										tc[klass] += 1
-									end
-							end
-					end
-				end
-			end
-
-		#	Assign empty triads (003) by residual
-			total_triads = (n * (n - 1) * (n - 2)) ÷ 6   # C(n,3)
-			tc[1] = total_triads - sum(tc[2:end])
-
-		#	Return
-			return (counts = tc, labels = labels)
-	end
-
-
-#	Helper: Davis–Leinhardt triad labels (fixed order used by RSiena)
-	function _dl_labels()
-		"""
-		Args:
-			None
-		Returns:
-			Vector{String}: ["003","012","102","021D","021U","021C","111D","111U","030T","030C","201","120D","120U","120C","210","300"]
-		Notes:
-			- This order matches RSiena's 'tc' vector in sienaGOF TriadCensus.
-		"""
-		return ["003","012","102","021D","021U","021C","111D","111U","030T","030C","201","120D","120U","120C","210","300"]
-	end
-
-
-#	Helper: Build the 4×4×4 lookup table (RSiena mapping)
-	function _dl_lookup()
-		"""
-		Args:
-			None
-		Returns:
-			Array{Int,3}: lookup[t1,t2,t3] → triad class index (1..16)
-		Notes:
-			- t1,t2,t3 ∈ {1: empty, 2: forward, 3: backward, 4: reciprocal}.
-			- Mapping mirrors the RSiena R code (Sindhuja/RSiena summary).
-		"""
-		L = fill(0, (4,4,4))
-
-		#	i->j, j->k, i->k   (copying RSiena's assignments)
-			L[1,1,1] = 1
-			L[2,1,1] = L[1,2,1] = L[1,1,2] = L[3,1,1] = L[1,3,1] = L[1,1,3] = 2
-			L[4,1,1] = L[1,4,1] = L[1,1,4] = 3
-			L[2,1,2] = L[3,2,1] = L[1,3,3] = 4
-			L[2,3,1] = L[3,1,3] = L[1,2,2] = 5
-			L[2,2,1] = L[3,3,1] = L[2,1,3] = L[3,1,2] = L[1,2,3] = L[1,3,2] = 6
-			L[4,3,1] = L[4,1,3] = L[2,4,1] = L[1,4,2] = L[3,1,4] = L[1,2,4] = 7
-			L[4,2,1] = L[4,1,2] = L[3,4,1] = L[1,4,3] = L[2,1,4] = L[1,3,4] = 8
-			L[2,2,2] = L[2,3,3] = L[2,3,2] = L[3,3,3] = L[3,2,2] = L[3,2,3] = 9
-			L[2,2,3] = L[3,3,2] = 10
-			L[4,4,1] = L[4,1,4] = L[1,4,4] = 11
-			L[2,4,2] = L[3,2,4] = L[4,3,3] = 12
-			L[2,3,4] = L[3,4,3] = L[4,2,2] = 13
-			L[2,2,4] = L[3,3,4] = L[2,4,3] = L[3,4,2] = L[4,2,3] = L[4,3,2] = 14
-			L[2,4,4] = L[4,2,4] = L[4,4,2] = L[3,4,4] = L[4,3,4] = L[4,4,3] = 15
-			L[4,4,4] = 16
-
-		#	Return
-			return L
-	end
-
-
-#	Helper: Union of neighbor lists excluding two nodes (sorted-unique)
-	function _bm_union_neighbors_excluding(a::Vector{Int}, b::Vector{Int}, i::Int, j::Int)
-		"""
-		Args:
-			a::Vector{Int}: neighbors of i (any direction)
-			b::Vector{Int}: neighbors of j (any direction)
-			i::Int, j::Int: indices to exclude
-		Returns:
-			Vector{Int}: sorted unique union minus {i,j}
-		Notes:
-			- Uses sort + unique for determinism; input sizes are neighborhood-scale.
-		"""
-		if isempty(a)
-			u = copy(b)
-		elseif isempty(b)
-			u = copy(a)
-		else
-			u = vcat(a, b)
-		end
-		if !isempty(u)
-			sort!(u)
-			u = unique(u)
-			# remove i,j if present
-			(pos = searchsortedfirst(u, i)) <= length(u) && (pos <= length(u) && u[pos] == i) && deleteat!(u, pos)
-			(pos = searchsortedfirst(u, j)) <= length(u) && (pos <= length(u) && u[pos] == j) && deleteat!(u, pos)
-		end
-		return u
-	end
-
-
-#	Helper: Is 'k' in 'nbrs'? (binary search on sorted vector)
-	function _bm_is_neighbor(nbrs::Vector{Int}, k::Int)
-		"""
-		Args:
-			nbrs::Vector{Int}: sorted neighbors
-			k::Int: node id
-		Returns:
-			Bool: true if k ∈ nbrs
-		Notes:
-			- Expects nbrs sorted (we sort in the union helper).
-		"""
-		if isempty(nbrs)
-			return false
-		end
-		idx = searchsortedfirst(nbrs, k)
-		return (idx <= length(nbrs)) && (nbrs[idx] == k)
-	end
-
-
-
-
-
-#	Triad Census Comparative tests
 	triad_types = ["003"; "012";  "102"; "021D"; "021U"; "021C"; "111D"; "111U";
 				   "030T"; "030C"; "201"; "120D"; "120U"; "120C"; "210"; "300"]
 
@@ -3006,8 +2950,819 @@
 	expected_counts = readlines("/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data/triad_census_expected.vec")
 	expected_counts = parse.(Float64, expected_counts[(2:length(expected_counts))])
 
-	pajek_triad_census = DataFrame(type = triad_types, observed_count = observed_counts, expected_count = expected_counts)
-
+	pajek_triad_census = DataFrame(triad = triad_types, observed_count = observed_counts, expected_count = expected_counts)
+	leftjoin!(pajek_triad_census, triads_dir_rc, on=:triad)
+	pajek_triad_census.count = convert.(Float64, pajek_triad_census.count) 
+	triad_delta = pajek_triad_census.observed_count .- pajek_triad_census.count 
+	print(string("Total Triad Delta: ", sum(triad_delta )))
 
 #	Reciprocity Tests
 	test_reciprocity_methods()
+
+
+
+########################
+#   DIAGNOSTIC TESTS   #
+########################
+
+#	Note: To Complete the Weighted Test Move the Triad Census Helper Functions Back into the Test File from Large_Graph_Similarity.jl
+
+#	Weighted Triad Test A: Directed canonical triads → single BM (binary)
+	let
+		suite  = _motif_suite_directed()
+		labels = _dl_labels()
+
+		for (code, edges) in suite
+			df = _triad_census_bm_from_edges(edges; nodes=["n1","n2","n3"], reciprocity_collapse=false)
+
+			# keep only nonzero classes
+			nz = df[df.count .> 0, :]
+
+			if nrow(nz) != 1 || nz.triad[1] != code || nz.count[1] != 1
+				println("\n✗ Triad mismatch for code = $code")
+				println("Nonzero classes returned:")
+				show(nz; allrows=true, allcols=true)
+				error("Expected exactly one triad '$code' with count=1")
+			end
+		end
+
+		println("✓ Exec A: Directed canonical triads pass (binary BM).")
+	end
+
+#	Weighted Triad Test B: Undirected 4 motifs (as paired arcs) → BM with reciprocity_collapse
+	let
+		suiteU = _motif_suite_undirected()
+		map_expected = Dict(
+			:empty    => "003",
+			:single   => "102",
+			:open     => "201",
+			:triangle => "300",
+		)
+		labels = _dl_labels()
+		for (k, edges) in suiteU
+			df = _triad_census_bm_from_edges(edges; nodes=["n1","n2","n3"], reciprocity_collapse=true)
+			counts = Dict(df.triad .=> df.count)
+			@assert sum(values(counts)) == 1
+			for lab in labels
+				@assert counts[lab] == (lab == map_expected[k] ? 1 : 0)
+			end
+		end
+		println("✓ Exec B: Undirected motifs pass (BM via reciprocity collapse).")
+	end
+
+#	Weighted Triad Test C: Layered BM (directed), single τ ⇒ should match binary BM
+	let
+		#	Specify Graph
+			edges = _motif_triad_edges_directed("030C"; weight=1.0)  # 3-cycle
+			resL = _triad_census_layered(edges;
+				graph_type=:directed,
+				reciprocity_collapse=false,
+				nodes=["n1","n2","n3"],
+				L=1, tau_min=1.0, tau_max=1.0)
+			dfL = resL.per_tau
+			dfB = _triad_census_bm_from_edges(edges; nodes=["n1","n2","n3"], reciprocity_collapse=false)
+
+		# 	Compare counts at the single τ
+			countL = Dict((dfL[dfL.tau .== 1.0, :]).triad .=> (dfL[dfL.tau .== 1.0, :]).count)
+			countB = Dict(dfB.triad .=> dfB.count)
+			@assert countL == countB
+			println("✓ Exec C: Layered (directed, single τ) matches binary BM.")
+	end
+
+#	Weighted Triad Test D (diagnostic, direct thresholds): Undirected, sum-before-threshold at τ = 2.0 and 4.0
+	let
+		#	Triangle with uneven weights (no duplicates):
+		#	(1,2)=1, (2,3)=1, (1,3)=3, each stored as a single paired arc
+			src = ["n1","n2",  "n2","n3",  "n1","n3"]
+			dst = ["n2","n1",  "n3","n2",  "n3","n1"]
+			wt  = [1,1,        1,1,        3,3]
+			edges = DataFrame(; src, dst, weight=Float64.(wt))
+
+		#	Build weighted adjacency once (same path as layered)
+			Aw, _, _ = _graph_to_sparse_matrix(edges; weighted=true)
+
+		#	Compute undirected sums (for human-readable debug)
+			AU_sum = Aw .+ Aw'
+			n = size(AU_sum, 1)
+			@inbounds for i in 1:n; AU_sum[i, i] = 0.0; end
+			dropzeros!(AU_sum)
+
+		#	Debug: show undirected summed weights matrix (expect off-diagonals 2,2,6)
+			println("\n[Debug] Undirected summed weights (W + W'):")
+			display(Matrix(AU_sum))
+
+		# 	--- τ = 2.0 ---
+			Ab2 = _prepare_binary_for_mode(Aw, 2.0, :undirected, false)
+			println("\n[Debug] Binary undirected at τ=2.0 (expect triangle):")
+			display(Matrix(Ab2))
+
+			res2 = _triad_census_bm_undirected(Ab2)
+			counts2_vec = res2 isa AbstractVector ? res2 : res2.counts16
+			counts2 = Dict(_dl_labels() .=> counts2_vec)
+
+			println("[Debug] Non-zero triads at τ=2.0:")
+			for (lab, val) in sort(collect(counts2))
+				if val != 0; println("  ", lab, " => ", val); end
+			end
+
+			@assert get(counts2, "300", 0) == 1 "Expected 300=1 at τ=2.0 but saw $(filter(p->p[2]!=0, collect(counts2)))"
+			@assert sum(values(counts2)) == 1
+
+		#	--- τ = 4.0 ---
+			Ab4 = _prepare_binary_for_mode(Aw, 4.0, :undirected, false)
+			println("\n[Debug] Binary undirected at τ=4.0 (expect single edge):")
+			display(Matrix(Ab4))
+
+			res4 = _triad_census_bm_undirected(Ab4)
+			counts4_vec = res4 isa AbstractVector ? res4 : res4.counts16
+			counts4 = Dict(_dl_labels() .=> counts4_vec)
+
+			println("[Debug] Non-zero triads at τ=4.0:")
+			for (lab, val) in sort(collect(counts4))
+				if val != 0; println("  ", lab, " => ", val); end
+			end
+
+			@assert get(counts4, "102", 0) == 1 "Expected 102=1 at τ=4.0 but saw $(filter(p->p[2]!=0, collect(counts4)))"
+			@assert sum(values(counts4)) == 1
+
+		#	Report Test Results
+			println("✓ Exec D: Undirected sum-before-threshold produces 300 at τ=2.0 and 102 at τ=4.0.")
+	end
+
+#	Weighted Triad Test E: Smoke test — all 16 directed motifs through layered (single τ)
+	let
+		suite = _motif_suite_directed()
+		for (code, edges) in suite
+			res = _triad_census_layered(edges;
+				graph_type=:directed, reciprocity_collapse=false,
+				nodes=["n1","n2","n3"], L=1, tau_min=1.0, tau_max=1.0)
+			df = res.per_tau
+			rows = df[df.tau .== 1.0, :]
+			counts = Dict(rows.triad .=> rows.count)
+			@assert sum(values(counts)) == 1
+			@assert counts[code] == 1
+		end
+		println("✓ Exec E: Layered (directed, single τ) passes all 16 canonical motifs.")
+	end
+
+#	Weighted Triad Test F: Wrapper routing matrix (directed/undirected × weighted/unweighted)
+	let
+		labels = _dl_labels()
+
+		#	directed binary: 030C (3-cycle) → "030C" = 1
+			edges_dir = _motif_triad_edges_directed("030C"; weight=1.0)
+			df_db = triad_census(edges_dir; nodes=["n1","n2","n3"],
+								 weighted=false, graph_type=:directed, reciprocity_collapse=false)
+			counts_db = Dict(df_db.triad .=> df_db.count)
+			@assert get(counts_db, "030C", 0) == 1 && sum(values(counts_db)) == 1
+
+		#	undirected binary (paired arcs): triangle → "300" = 1
+			edges_und = _motif_triad_edges_undirected(:triangle; weight=1.0)
+			df_ub = triad_census(edges_und; nodes=["n1","n2","n3"],
+								 weighted=false, graph_type=:undirected, reciprocity_collapse=false)
+			counts_ub = Dict(df_ub.triad .=> df_ub.count)
+			@assert get(counts_ub, "300", 0) == 1 && sum(values(counts_ub)) == 1
+
+		#	directed weighted (layered, single τ): should match directed binary
+			res_dw = triad_census(edges_dir; nodes=["n1","n2","n3"],
+								  weighted=true, graph_type=:directed,
+								  reciprocity_collapse=false, L=1, tau_min=1.0, tau_max=1.0)
+			df_dw = res_dw.per_tau
+			cnt_dw = Dict((df_dw[df_dw.tau .== first(unique(df_dw.tau)), :]).triad .=> (df_dw[df_dw.tau .== first(unique(df_dw.tau)), :]).count)
+			@assert cnt_dw == counts_db
+
+		#	undirected weighted (layered, single τ): triangle (paired arcs@1.0) → "300" = 1
+			res_uw = triad_census(edges_und; nodes=["n1","n2","n3"],
+								  weighted=true, graph_type=:undirected,
+								  reciprocity_collapse=false, L=1, tau_min=1.0, tau_max=1.0)
+			df_uw = res_uw.per_tau
+			cnt_uw = Dict((df_uw[df_uw.tau .== first(unique(df_uw.tau)), :]).triad .=> (df_uw[df_uw.tau .== first(unique(df_uw.tau)), :]).count)
+			@assert get(cnt_uw, "300", 0) == 1 && sum(values(cnt_uw)) == 1
+
+		println("✓ Exec F: Wrapper routes correctly across all four (dir/undir × bin/weighted).")
+	end
+
+#	Weighted Triad Test G: Layered monotonicity of density vs τ (undirected & directed)
+	let
+		#	local helpers: monotone checks with tolerance
+			@inline _mono_inc(v; tol=1e-12) = all(diff(v) .>= -tol)
+			@inline _mono_dec(v; tol=1e-12) = all(diff(v) .<=  tol)
+
+		#	local helper: safe first density for (τ, triad)
+			@inline function _first_density(df::DataFrame, τ::Float64, tri::String)
+				sub = df[(isapprox.(df.tau, τ; rtol=1e-12, atol=1e-14)) .& (df.triad .== tri), :]
+				return nrow(sub) == 0 ? 0.0 : sub.density[1]
+			end
+
+		#	small weighted example (paired arcs)
+			src = ["n1","n2","n2","n3","n1","n3","n1","n4","n4","n1"]
+			dst = ["n2","n1","n3","n2","n3","n1","n4","n1","n1","n4"]
+			wt  = [3,3, 2,2, 1,1, 4,4, 4,4]
+			edges = DataFrame(; src, dst, weight=Float64.(wt))
+
+		#	UNDIRECTED layered
+			resU = triad_census(edges; weighted=true, graph_type=:undirected,
+								reciprocity_collapse=false, L=10, tau_min=1.0, tau_max=4.0)
+			dfU  = resU.per_tau
+			tauU = sort(unique(dfU.tau))
+
+			#	monotone guarantees for undirected
+			d003 = [ _first_density(dfU, τ, "003") for τ in tauU ]
+			d300 = [ _first_density(dfU, τ, "300") for τ in tauU ]
+			@assert _mono_inc(d003)  # empties increase as τ grows
+			@assert _mono_dec(d300)  # triangles decrease as τ grows
+
+			#	probability simplex check across the 4 undirected classes per τ
+			for τ in tauU
+				s = _first_density(dfU, τ, "003") +
+					_first_density(dfU, τ, "102") +
+					_first_density(dfU, τ, "201") +
+					_first_density(dfU, τ, "300")
+				@assert isapprox(s, 1.0; atol=1e-12, rtol=0.0)
+			end
+
+		#	DIRECTED layered
+			resD = triad_census(edges; weighted=true, graph_type=:directed,
+								reciprocity_collapse=false, L=10, tau_min=1.0, tau_max=4.0)
+			dfD  = resD.per_tau
+			tauD = sort(unique(dfD.tau))
+
+		#	minimal invariants: (i) 003 nondecreasing, (ii) all densities ∈ [0,1], (iii) sum to 1 per τ
+			d003D = [ _first_density(dfD, τ, "003") for τ in tauD ]
+			@assert _mono_inc(d003D)
+
+			labels = _dl_labels()
+			for τ in tauD
+				s = 0.0
+				for tri in labels
+					d = _first_density(dfD, τ, tri)
+					@assert 0.0 - 1e-12 <= d <= 1.0 + 1e-12
+					s += d
+				end
+				@assert isapprox(s, 1.0; atol=1e-12, rtol=0.0)
+			end
+
+		println("✓ Exec G: Monotonic invariants hold (003↑, 300↓); densities are valid and sum to 1.")
+	end
+
+#	Weighted Triad Test H: Duplication invariance (undirected weighted path)
+	let
+		#	Base: one paired arc per undirected edge
+			src1 = ["n1","n2",  "n2","n3",  "n1","n3"]
+			dst1 = ["n2","n1",  "n3","n2",  "n3","n1"]
+			wt1  = [1,1,        2,2,        3,3]
+			e1 = DataFrame(; src=src1, dst=dst1, weight=Float64.(wt1))
+
+		#	Duplicated list: add duplicates of (n1,n2) pair
+			src2 = vcat(src1, "n1","n2","n2","n1")
+			dst2 = vcat(dst1, "n2","n1","n1","n2")
+			wt2  = vcat(wt1,   1,1,        1,1)
+			e2 = DataFrame(; src=src2, dst=dst2, weight=Float64.(wt2))
+
+		# 	boundary-safe τ values: one that keeps all, one that drops all
+			nodes = ["n1","n2","n3"]
+			for τ in (1.0, 6.1)   # 1.0 ≪ 2 keeps all; 6.1 ≫ 6 drops all
+				Aw1,_,_ = _graph_to_sparse_matrix(e1; weighted=true, nodes=nodes)
+				Aw2,_,_ = _graph_to_sparse_matrix(e2; weighted=true, nodes=nodes)
+				B1 = _prepare_binary_for_mode(Aw1, τ, :undirected, false)
+				B2 = _prepare_binary_for_mode(Aw2, τ, :undirected, false)
+
+				@assert Matrix(B1) == Matrix(B2)
+
+				c1 = _triad_census_bm_undirected(B1); v1 = c1 isa AbstractVector ? c1 : c1.counts16
+				c2 = _triad_census_bm_undirected(B2); v2 = c2 isa AbstractVector ? c2 : c2.counts16
+				@assert v1 == v2
+			end
+
+
+		#	Print Results
+			println("✓ Exec H: Undirected layered is invariant to duplication at τ≤2 and τ>6 (as expected).")
+	end
+
+#	Weighted Triad Test I: Edge cases — isolates & self-loops are handled/removed
+	let
+		#	graph with an isolate (n4) and self-loops (n2→n2, n3→n3)
+			src = ["n1","n2","n2","n3","n3"]
+			dst = ["n2","n1","n2","n3","n3"]
+			wt  = [1,1,  5,  2,  3]
+			nodes = ["n1","n2","n3","n4"]  # include isolate n4
+			edges = DataFrame(; src, dst, weight=Float64.(wt))
+
+		#	binary directed: loops dropped; with 4 nodes → 2×102 (mutual + isolated) + 2×003 (empty)
+			df = triad_census(edges; nodes=nodes, weighted=false, graph_type=:directed, reciprocity_collapse=false)
+			cnt = Dict(df.triad .=> df.count)
+			@assert get(cnt, "102", 0) == 2
+			@assert get(cnt, "003", 0) == 2
+			@assert sum(values(cnt)) == 4
+
+		#	layered undirected with τ high enough to kill all edges → all 003 (C(4,3)=4)
+			res = triad_census(edges; nodes=nodes, weighted=true, graph_type=:undirected,
+							   reciprocity_collapse=false, L=1, tau_min=10.0, tau_max=10.0)
+			dfL = res.per_tau
+			sub003 = dfL[dfL.triad .== "003", :]
+			@assert nrow(sub003) == 1
+			@assert sub003.count[1] == 4
+			@assert all(dfL.count[dfL.triad .!= "003"] .== 0)
+
+		println("✓ Exec I: Isolates kept; self-loops excluded; directed=2×102+2×003; undirected at high τ → all 003.")
+	end
+
+# 	Weighted Triad Test J: Multi-component Graph Test (CORRECTED)
+	let
+		#	Declare the Test
+			println("\n=== Test J: Multi-component graphs ===")
+		
+		# 	Create a graph with 3 components:
+		# 	Component 1: triangle (n1,n2,n3) with reciprocal edges
+		# 	Component 2: single reciprocal edge (n4,n5) 
+		# 	Component 3: isolate (n6)
+			src = ["n1","n2","n2","n3","n1","n3", "n4","n5"]
+			dst = ["n2","n1","n3","n2","n3","n1", "n5","n4"]
+			wt  = [1,1,     1,1,     1,1,        2,2]
+			edges = DataFrame(; src, dst, weight=Float64.(wt))
+			nodes = ["n1","n2","n3","n4","n5","n6"]
+		
+		#	Binary directed test
+			df = triad_census(edges; nodes=nodes, weighted=false, graph_type=:directed)
+			cnt = Dict(df.triad .=> df.count)
+		
+		#	With 6 nodes, C(6,3) = 20 triads total
+			@assert sum(values(cnt)) == 20 "Total triads should be C(6,3)=20"
+		
+		# Correct expected counts:
+		# - "300": 1 (the triangle n1-n2-n3)
+		# - "102": 13 (any reciprocal edge with an isolated third node)
+		#   * 3 reciprocal edges from triangle × 3 isolated nodes = 9
+		#   * 1 reciprocal edge n4-n5 × 4 isolated nodes = 4
+		#   * Total = 13
+		# - "003": 6 (triads with no edges at all)
+		
+			@assert get(cnt, "300", 0) == 1 "Should have 1 triangle (n1,n2,n3)"
+			@assert get(cnt, "102", 0) == 13 "Should have 13 single reciprocal edge triads"
+			@assert get(cnt, "003", 0) == 6 "Should have 6 empty triads"
+		
+		#	Weighted undirected test at high τ (kills all edges)
+			res = triad_census(edges; nodes=nodes, weighted=true, graph_type=:undirected,
+						L=1, tau_min=10.0, tau_max=10.0)
+			dfW = res.per_tau
+			cntW = Dict(dfW.triad .=> dfW.count)
+			@assert get(cntW, "003", 0) == 20 "All triads should be empty at high τ"
+		
+		#	Print Test Results
+			println("✓ Test J: Multi-component graphs handled correctly")
+	end
+
+#	Weighted Triad Test K: Larger Sparse Network Test
+	let
+		println("\n=== Test K: Larger sparse network ===")
+		
+		# 	Create a sparse network with 100 nodes, ~200 edges (density ≈ 0.04)
+			Random.seed!(42)
+			n = 100
+			m = 200  # number of directed edges
+		
+		# 	Generate random edges with weights
+			src_nodes = String[]
+			dst_nodes = String[]
+			weights = Float64[]
+			
+			for _ in 1:m
+				i = rand(1:n)
+				j = rand(1:n)
+				while i == j  # no self-loops
+					j = rand(1:n)
+				end
+				push!(src_nodes, "n$i")
+				push!(dst_nodes, "n$j") 
+				push!(weights, exp(randn()))  # log-normal weights
+			end
+			
+			edges = DataFrame(src=src_nodes, dst=dst_nodes, weight=weights)
+			all_nodes = ["n$i" for i in 1:n]
+		
+		# 	Test 1: Binary version should have correct total
+			df = triad_census(edges; nodes=all_nodes, weighted=false, graph_type=:directed)
+			total = sum(df.count)
+			expected = (n * (n-1) * (n-2)) ÷ 6
+			@assert total == expected "Total triads should be C($n,3)=$expected, got $total"
+		
+		#	Test 2: Weighted version with multiple τ values
+			res = triad_census(edges; nodes=all_nodes, weighted=true, graph_type=:directed,
+						L=5, tau_min=0.1, tau_max=10.0)
+		
+		# 	Check basic invariants
+			taus = unique(res.per_tau.tau)
+			@assert length(taus) == 5 "Should have 5 τ values"
+			
+			for τ in taus
+				sub = res.per_tau[res.per_tau.tau .== τ, :]
+				total_at_tau = sum(sub.count)
+				@assert total_at_tau == expected "Total triads at τ=$τ should be $expected"
+				
+				density_sum = sum(sub.density)
+				@assert isapprox(density_sum, 1.0; atol=1e-10) "Densities should sum to 1 at τ=$τ"
+			end
+		
+		#	Test 3: Monotonicity of 003 class
+			counts_003 = [sum(res.per_tau[(res.per_tau.tau .== τ) .& (res.per_tau.triad .== "003"), :count])
+						for τ in sort(taus)]
+			@assert all(diff(counts_003) .>= 0) "003 counts should be non-decreasing with τ"
+			
+			println("✓ Test K: Larger sparse network (n=$n, m=$m) processed correctly")
+	end
+
+#	Weighted Triad Test L: Weight Distribution Edge Cases
+	let
+		#	Declare Test
+			println("\n=== Test L: Weight distribution edge cases ===")
+		
+		#	Test 1: Weights spanning many orders of magnitude
+			src = ["n1","n2","n2","n3","n1","n3"]
+			dst = ["n2","n1","n3","n2","n3","n1"]
+			wt  = [0.001, 0.001, 10.0, 10.0, 1000.0, 1000.0]
+			edges = DataFrame(; src, dst, weight=Float64.(wt))
+		
+			res = triad_census(edges; weighted=true, graph_type=:undirected, 
+							L=10, tau_min=0.001, tau_max=2000.0)
+		
+		# 	Check that τ grid spans the range appropriately
+			taus = unique(res.per_tau.tau)
+			@assert minimum(taus) <= 0.01 "τ grid should include small values"
+			@assert maximum(taus) >= 1000 "τ grid should include large values"
+		
+		#	At τ=0.001, should have full triangle
+			low_tau = res.per_tau[res.per_tau.tau .== minimum(taus), :]
+			@assert any((low_tau.triad .== "300") .& (low_tau.count .== 1)) "Should have triangle at low τ"
+		
+		# 	Test 2: Near-zero weights (close to machine epsilon)
+			wt2 = [eps(), eps(), 1.0, 1.0, 1.0, 1.0]
+			edges2 = DataFrame(; src, dst, weight=Float64.(wt2))
+		
+			res2 = triad_census(edges2; weighted=true, graph_type=:undirected,
+							L=5, tau_min=eps(), tau_max=2.0)
+			@assert !isnan(sum(res2.summary.AUMC_density)) "Should handle near-zero weights"
+		
+		#	Test 3: All identical weights (degenerate case)
+			wt3 = fill(5.0, 6)
+			edges3 = DataFrame(; src, dst, weight=wt3)
+			
+			res3 = triad_census(edges3; weighted=true, graph_type=:undirected,
+							L=3, tau_min=1.0, tau_max=20.0)
+		
+		# 	With identical weights, behavior should be predictable
+		# 	Below threshold: full triangle, above threshold: empty
+			taus3 = unique(res3.per_tau.tau)
+			for τ in taus3
+				sub = res3.per_tau[res3.per_tau.tau .== τ, :]
+				if τ <= 10.0  # sum of paired weights = 10.0
+					@assert any((sub.triad .== "300") .& (sub.count .== 1)) "Triangle at τ=$τ"
+				else
+					@assert any((sub.triad .== "003") .& (sub.count .== 1)) "Empty at τ=$τ"
+				end
+			end
+		
+		#	Test 4: Negative weights (should be filtered or handled gracefully)
+			wt4 = [-1.0, -1.0, 2.0, 2.0, 3.0, 3.0]
+			edges4 = DataFrame(; src, dst, weight=Float64.(wt4))
+		
+		#	The function should either filter negatives or handle them gracefully
+		# 	Based on your implementation using max(0, weight), negatives become 0
+			res4 = triad_census(edges4; weighted=true, graph_type=:undirected,
+							L=3, tau_min=1.0, tau_max=10.0)
+			@assert !isnan(sum(res4.summary.AUMC_density)) "Should handle negative weights"
+
+		#	Declare Results
+			println("✓ Test L: Weight distribution edge cases handled correctly")
+	end
+
+# 	Weighted Triad Test M: Reciprocity Collapse Completeness
+	let
+		#	Declare Tests
+			println("\n=== Test M: Reciprocity collapse completeness ===")
+		
+		#	Create a directed graph with various edge patterns
+			src = ["n1","n2", "n2","n3", "n3","n1", "n1","n4", "n5","n6"]
+			dst = ["n2","n1", "n3","n2", "n1","n3", "n4","n1", "n6","n5"]
+			wt  = [1,2,       3,1,       1,1,       4,2,       1,1]
+			edges = DataFrame(; src, dst, weight=Float64.(wt))
+			nodes = ["n1","n2","n3","n4","n5","n6"]
+		
+		#	Test 1: Binary case with reciprocity_collapse
+			df_collapsed = triad_census(edges; nodes=nodes, weighted=false, 
+										graph_type=:directed, reciprocity_collapse=true)
+			cnt_collapsed = Dict(df_collapsed.triad .=> df_collapsed.count)
+		
+		#	Only {003, 102, 201, 300} should be non-zero
+			allowed_classes = Set(["003", "102", "201", "300"])
+			for (triad, count) in cnt_collapsed
+				if !(triad in allowed_classes)
+					@assert count == 0 "Class $triad should be 0 with reciprocity_collapse, got $count"
+				end
+			end
+		
+		#	Test 2: Compare with explicit undirected treatment
+		#	Convert to undirected by keeping max weight per direction
+			edges_und = copy(edges)
+
+		#	Add reverse edges where missing
+			for i in 1:nrow(edges)
+				s, d, w = edges.src[i], edges.dst[i], edges.weight[i]
+				if !any((edges.src .== d) .& (edges.dst .== s))
+					push!(edges_und, (src=d, dst=s, weight=0.0))
+				end
+			end
+		
+			df_undirected = triad_census(edges_und; nodes=nodes, weighted=false,
+										graph_type=:undirected)
+			cnt_undirected = Dict(df_undirected.triad .=> df_undirected.count)
+		
+		#	Collapsed directed should match undirected
+			@assert cnt_collapsed == cnt_undirected "Reciprocity collapse should match undirected"
+		
+		#	Test 3: Weighted case with reciprocity_collapse
+			res_collapsed_w = triad_census(edges; nodes=nodes, weighted=true,
+									graph_type=:directed, reciprocity_collapse=true,
+									L=5, tau_min=0.5, tau_max=5.0)
+		
+		#	Check that only allowed classes appear
+			for row in eachrow(res_collapsed_w.per_tau)
+				if !(row.triad in allowed_classes)
+					@assert row.count == 0 "Class $(row.triad) should be 0 at τ=$(row.tau)"
+				end
+			end
+		
+		#	Print Test Results
+			println("✓ Test M: Reciprocity collapse produces only undirected motif classes")
+	end
+
+# 	Weighted Triad Test N: τ Grid and AUMC Stability
+	let
+		#	Declare Tests
+			println("\n=== Test N: τ grid and AUMC stability ===")
+		
+		# 	Fixed graph with known weights
+			src = ["n1","n2","n2","n3","n1","n3","n3","n4"]
+			dst = ["n2","n1","n3","n2","n3","n1","n4","n3"]
+			wt  = [2,2,     3,3,     5,5,     1,1]
+			edges = DataFrame(; src, dst, weight=Float64.(wt))
+		
+		# 	Test 1: Different L values produce monotonic refinements
+			res5 = triad_census(edges; weighted=true, graph_type=:undirected,
+							L=5, tau_min=1.0, tau_max=10.0)
+			res10 = triad_census(edges; weighted=true, graph_type=:undirected,
+								L=10, tau_min=1.0, tau_max=10.0)
+			res20 = triad_census(edges; weighted=true, graph_type=:undirected,
+								L=20, tau_min=1.0, tau_max=10.0)
+			
+			taus5 = sort(unique(res5.per_tau.tau))
+			taus10 = sort(unique(res10.per_tau.tau))
+			taus20 = sort(unique(res20.per_tau.tau))
+			
+			@assert length(taus5) <= length(taus10) <= length(taus20) "Grid should refine with L"
+		
+		#	Test 2: AUMC values should be reasonably stable (not necessarily monotonically converging)
+			aumc5 = res5.summary[res5.summary.triad .== "300", :AUMC_density][1]
+			aumc10 = res10.summary[res10.summary.triad .== "300", :AUMC_density][1]
+			aumc20 = res20.summary[res20.summary.triad .== "300", :AUMC_density][1]
+		
+		# 	Check that AUMC values are reasonably close (within 20% of each other)
+			aumc_vals = [aumc5, aumc10, aumc20]
+			aumc_max = maximum(aumc_vals)
+			aumc_min = minimum(aumc_vals)
+			
+			if aumc_max > 0
+				relative_variation = (aumc_max - aumc_min) / aumc_max
+				@assert relative_variation < 0.2 "AUMC values should be stable across resolutions (variation < 20%)"
+			end
+		
+		#	Test 3: Edge case where all weights fall outside τ range
+			res_outside = triad_census(edges; weighted=true, graph_type=:undirected,
+									L=3, tau_min=100.0, tau_max=200.0)
+		
+		#	All edges have weight < 100, so all triads should be empty
+			for row in eachrow(res_outside.per_tau)
+				if row.triad == "003"
+					@assert row.count == 4 "All triads should be empty when τ > all weights"
+				else
+					@assert row.count == 0 "Non-empty classes should have count 0"
+				end
+			end
+		
+		#	Test 4: τ grid bounds should be respected
+			res_bounds = triad_census(edges; weighted=true, graph_type=:undirected,
+									L=10, tau_min=2.0, tau_max=8.0)
+			
+			taus_bounds = sort(unique(res_bounds.per_tau.tau))
+			@assert minimum(taus_bounds) >= 2.0 "τ_min should be respected"
+			@assert maximum(taus_bounds) <= 8.0 "τ_max should be respected"
+			@assert length(taus_bounds) <= 10 "Should have at most L τ values"
+		
+		#	Test 5: Single L should give single τ value
+			res_single = triad_census(edges; weighted=true, graph_type=:undirected,
+									L=1, tau_min=5.0, tau_max=5.0)
+			taus_single = unique(res_single.per_tau.tau)
+			@assert length(taus_single) == 1 "L=1 should give single τ"
+			@assert taus_single[1] == 5.0 "Single τ should match specified value"
+		
+		#	Print Results
+			println("✓ Test N: τ grid and AUMC calculations are stable")
+	end
+
+# 	Weighted Triad Test O: Determinism/Ordering Invariance
+	let
+		#	Declare Test
+			println("\n=== Test O: Determinism and ordering invariance ===")
+
+		# 	Original edge order
+			src1 = ["n1","n2","n2","n3","n1","n3","n4","n5"]
+			dst1 = ["n2","n1","n3","n2","n3","n1","n5","n4"]
+			wt1  = [1,1,     2,2,     3,3,     4,4]
+			edges1 = DataFrame(src=src1, dst=dst1, weight=Float64.(wt1))
+
+		#	Convenience: a stable sort for per_tau/summary DFs
+			sort_per_tau(df) = sort(df, [:tau, :triad])
+			sort_summary(df) = sort(df, [:triad])
+
+		#	Test 1: Shuffle edge order (directed, weighted)
+			Random.seed!(123)
+			perm = randperm(length(src1))
+			edges2 = DataFrame(src=src1[perm], dst=dst1[perm], weight=wt1[perm])
+
+			res1 = triad_census(edges1; weighted=true, graph_type=:directed,
+								L=5, tau_min=1.0, tau_max=5.0)
+			res2 = triad_census(edges2; weighted=true, graph_type=:directed,
+								L=5, tau_min=1.0, tau_max=5.0)
+
+			@assert sort_per_tau(res1.per_tau) == sort_per_tau(res2.per_tau) "Results should be invariant to edge order"
+			@assert sort_summary(res1.summary) == sort_summary(res2.summary) "Summaries should be invariant to edge order"
+			@assert res1.meta == res2.meta
+
+		#	Test 2: Different node label ordering (same universe)
+			nodes_a = ["n1","n2","n3","n4","n5"]
+			nodes_b = ["n3","n1","n4","n2","n5"]  # permuted
+
+			res_a = triad_census(edges1; nodes=nodes_a, weighted=false, graph_type=:directed)
+			res_b = triad_census(edges1; nodes=nodes_b, weighted=false, graph_type=:directed)
+
+			cnt_a = Dict(res_a.triad .=> res_a.count)
+			cnt_b = Dict(res_b.triad .=> res_b.count)
+			@assert cnt_a == cnt_b "Results should be invariant to node label ordering"
+
+		#	Test 3: Multiple identical runs deterministic (undirected, layered)
+		#	NOTE: wrapper wants Float64, so give numeric tau bounds (no :auto).
+		#	For these edges, max undirected sum = 8 (4+4), so use [1.0, 8.0].
+			res_run1 = triad_census(edges1; weighted=true, graph_type=:undirected,
+									L=10, tau_min=1.0, tau_max=8.0)
+			res_run2 = triad_census(edges1; weighted=true, graph_type=:undirected,
+									L=10, tau_min=1.0, tau_max=8.0)
+
+			@assert sort_per_tau(res_run1.per_tau) == sort_per_tau(res_run2.per_tau) "Repeated runs should be deterministic"
+			@assert sort_summary(res_run1.summary) == sort_summary(res_run2.summary) "Summary should be deterministic"
+			@assert res_run1.meta == res_run2.meta "Meta should be deterministic"
+
+		#	Test 4: Duplicate edges in different positions (directed, weighted)
+			edges_dup1 = vcat(edges1, DataFrame(src=["n1"], dst=["n2"], weight=[1.0]))
+			edges_dup2 = vcat(DataFrame(src=["n1"], dst=["n2"], weight=[1.0]), edges1)
+
+			res_dup1 = triad_census(edges_dup1; weighted=true, graph_type=:directed,
+									L=3, tau_min=1.0, tau_max=5.0)
+			res_dup2 = triad_census(edges_dup2; weighted=true, graph_type=:directed,
+									L=3, tau_min=1.0, tau_max=5.0)
+
+			@assert sort_per_tau(res_dup1.per_tau) == sort_per_tau(res_dup2.per_tau) "Duplicate position shouldn't matter"
+			@assert sort_summary(res_dup1.summary) == sort_summary(res_dup2.summary)
+			@assert res_dup1.meta == res_dup2.meta
+
+		#	Print Results
+			println("✓ Test O: Results are deterministic and order-invariant")
+	end
+
+#	Weighted Triad Test P: Threshold boundary is inclusive
+	let
+		#	Duplicates both directions → AU[1,2] = 8
+			src = ["n1","n2","n2","n1"]
+			dst = ["n2","n1","n1","n2"]
+			wt  = fill(2.0, 4)
+			edges = DataFrame(; src, dst, weight = wt)
+			nodes = ["n1","n2","n3"]
+
+		#	Conduct Triad Census
+			res = triad_census(edges; nodes = nodes,
+								weighted = true, graph_type = :undirected,
+								L = 1, tau_min = 8.0, tau_max = 8.0)
+
+		#	Conduct Test
+			sub = res.per_tau[(res.per_tau.tau .== 8.0) .& (res.per_tau.triad .== "102"), :]
+			@assert nrow(sub) == 1 "Missing or multiple '102' rows at τ=8.0"
+			row102 = sub[1, :]
+			@assert row102.count == 1 "Exactly-on-threshold retained should yield one 102 triad"
+	end
+
+	let
+		#	one paired arc each way → AU[1,2] = 4
+			src = ["n1","n2"]; dst = ["n2","n1"]; wt = [2.0, 2.0]
+			edges = DataFrame(; src, dst, weight = wt)
+			nodes = ["n1","n2","n3"]
+
+		#	Conduct Triad Census
+			res = triad_census(edges; nodes = nodes,
+								weighted = true, graph_type = :undirected,
+								L = 1, tau_min = 4.0, tau_max = 4.0)
+
+		#	Perform Test
+			sub = res.per_tau[(res.per_tau.tau .== 4.0) .& (res.per_tau.triad .== "102"), :]
+			@assert nrow(sub) == 1 "Missing or multiple '102' rows at τ=4.0"
+			row102 = sub[1, :]
+			@assert row102.count == 1
+	end
+
+# 	Weighted Triad Test Q: Degenerate graphs (n<3)
+	let
+		edges0 = DataFrame(src=String[], dst=String[], weight=Float64[])
+		nodes0 = String[]
+		df0 = triad_census(edges0; nodes=nodes0, weighted=false, graph_type=:directed)
+		@assert sum(df0.count) == 0
+
+		nodes2 = ["n1","n2"]
+		edges2 = DataFrame(src=["n1"], dst=["n2"], weight=[1.0])
+		df2 = triad_census(edges2; nodes=nodes2, weighted=false, graph_type=:directed)
+		@assert sum(df2.count) == 0  # C(2,3)=0
+	end
+
+# 	Weighted Triad Test R: Archetypes (star / chain / clique)
+	let
+		# Star K_{1,4} as undirected (paired arcs)
+		src = ["n1","n2","n1","n3","n1","n4","n1","n5",
+			"n2","n1","n3","n1","n4","n1","n5","n1"]
+		dst = ["n2","n1","n3","n1","n4","n1","n5","n1",
+			"n1","n2","n1","n3","n1","n4","n1","n5"]
+		wt  = fill(1.0, length(src))
+		edges = DataFrame(;src,dst,weight=wt)
+		df = triad_census(edges; nodes=["n$i" for i in 1:5], weighted=false, graph_type=:undirected)
+		cnt = Dict(df.triad .=> df.count)
+		@assert get(cnt,"201",0) > 0 && get(cnt,"300",0) == 0  # star has wedges, no triangles
+	end
+
+# 	Weighted Triad Test S: Collapse vs undirected on random binary digraph
+	let
+		Random.seed!(7)
+		n = 30; m = 120
+		src = String[]; dst = String[]
+		for _ in 1:m
+			i = rand(1:n); j = rand(1:n); while i==j; j=rand(1:n); end
+			push!(src,"n$i"); push!(dst,"n$j")
+		end
+		edges = DataFrame(;src,dst)
+
+		df_coll = triad_census(edges; weighted=false, graph_type=:directed, reciprocity_collapse=true)
+		df_undir = triad_census(edges; weighted=false, graph_type=:undirected)
+		@assert Dict(df_coll.triad .=> df_coll.count) == Dict(df_undir.triad .=> df_undir.count)
+	end
+
+#	Weighted Triad Test T: Directed layered (no collapse) ≠ Undirected layered (sum-before-threshold)
+	let
+		#	asymmetric weights on a triangle
+			src = ["n1","n2","n2","n3","n1","n3"]
+			dst = ["n2","n1","n3","n2","n3","n1"]
+			wt  = Float64.([1, 4, 2, 1, 6, 0.5])
+			edges = DataFrame(;src,dst,weight=wt)
+
+			Rd = triad_census(edges; weighted=true, graph_type=:directed,   L=5, tau_min=1.0, tau_max=6.0)
+			Ru = triad_census(edges; weighted=true, graph_type=:undirected, L=5, tau_min=1.0, tau_max=6.0)
+			@assert Rd.per_tau != Ru.per_tau  # intentionally different semantics
+	end
+
+#	Weighted Triad Test U: Output shape and uniqueness
+	let
+		src = ["a","b","b","c","a","c"]; dst = ["b","a","c","b","c","a"]; wt = fill(1.0,6)
+		edges = DataFrame(;src,dst,weight=wt)
+		res = triad_census(edges; weighted=true, graph_type=:undirected, L=7, tau_min=1.0, tau_max=6.0)
+		taus = sort(unique(res.per_tau.tau))
+		for τ in taus
+			sub = res.per_tau[res.per_tau.tau .== τ, :]
+			@assert nrow(sub) == 16
+			@assert length(unique(sub.triad)) == 16
+		end
+		@assert issorted(taus)
+	end
+
+#	Weighted Triad  Test V: Node universe superset with isolates (weighted, directed layered)
+	let
+		src = ["n1","n2","n2","n1"]; dst = ["n2","n1","n1","n2"]; wt = [2,2,2,2] .|> Float64
+		edges = DataFrame(;src,dst,weight=wt)
+		nodes = ["n$i" for i in 1:6]  # add 4 isolates
+		res = triad_census(edges; nodes=nodes, weighted=true, graph_type=:directed, L=3, tau_min=1.0, tau_max=3.0)
+		total = (length(nodes)*(length(nodes)-1)*(length(nodes)-2)) ÷ 6
+		for τ in unique(res.per_tau.tau)
+			@assert sum(res.per_tau[res.per_tau.tau .== τ, :count]) == total
+		end
+	end
+
+# 	Weighted Triad Test W: τ grid determinism
+	let
+		src=["n1","n2","n2","n1"]; dst=["n2","n1","n1","n2"]; wt=[1.0,1.0,1.0,1.0]
+		edges = DataFrame(;src,dst,weight=wt)
+		R1 = triad_census(edges; weighted=true, graph_type=:undirected, L=9, tau_min=1.0, tau_max=10.0)
+		R2 = triad_census(edges; weighted=true, graph_type=:undirected, L=9, tau_min=1.0, tau_max=10.0)
+		@assert sort(unique(R1.per_tau.tau)) == sort(unique(R2.per_tau.tau))
+	end
