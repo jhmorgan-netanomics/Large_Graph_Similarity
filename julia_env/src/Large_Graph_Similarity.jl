@@ -43,8 +43,20 @@ module Large_Graph_Similarity
 		"Date", "Datetime", "DateTime",
 	])
 
-#	Coalesce multi-valued string-like fields into one String using MULTI_SEP
+#	Helper: Coalesce multi-valued string-like fields into one String using MULTI_SEP
 	function _coalesce_str!(dict::Dict{String,Any}, key::String, val::AbstractString)
+		"""
+		Args:
+			dict::Dict{String,Any}: target dictionary to modify in-place
+			key::String: dictionary key to update
+			val::AbstractString: value to append or set
+		Returns:
+			Nothing
+		Notes:
+			- If key doesn't exist or is empty, sets it to val
+			- If key exists with content, appends val using MULTI_SEP separator
+			- Modifies dict in-place
+		"""
 		existing = get(dict, key, nothing)
 		if existing === nothing || existing === missing || isempty(String(existing))
 			dict[key] = String(val)
@@ -54,8 +66,21 @@ module Large_Graph_Similarity
 		return nothing
 	end
 
-#	Coerce a raw string into the requested ORA data type (per your rules)
+#	Helper: Coerce a raw string into the requested ORA data type
 	function _coerce_value(raw::AbstractString, dtype::AbstractString)
+		"""
+		Args:
+			raw::AbstractString: raw string value to coerce
+			dtype::AbstractString: target ORA data type ("Text", "Number", "Date", etc.)
+		Returns:
+			Union{String,Float64,Int,DateTime,Missing}: coerced value or missing if parsing fails
+		Notes:
+			- "Text"/"Text Category"/"URI" → String
+			- "Number" → Float64 or missing
+			- "Number Category" → Int or missing  
+			- "Date"/"Datetime"/"DateTime" → DateTime or missing
+			- Unknown types → String
+		"""
 		s = strip(String(raw))
 		if dtype == "Text" || dtype == "Text Category" || dtype == "URI"
 			return s
@@ -68,9 +93,9 @@ module Large_Graph_Similarity
 		elseif dtype in ("Date", "Datetime", "DateTime")
 			#	Try common ISO-8601 variants first
 			formats = (dateformat"yyyy-mm-ddTHH:MM:SS.szzzz",
-			           dateformat"yyyy-mm-ddTHH:MM:SSzzzz",
-			           dateformat"yyyy-mm-ddTHH:MM:SS",
-			           dateformat"yyyy-mm-dd")
+					dateformat"yyyy-mm-ddTHH:MM:SSzzzz",
+					dateformat"yyyy-mm-ddTHH:MM:SS",
+					dateformat"yyyy-mm-dd")
 			for fmt in formats
 				dt = tryparse(DateTime, s, fmt)
 				dt !== nothing && return dt
@@ -82,8 +107,18 @@ module Large_Graph_Similarity
 		end
 	end
 
-#	Parse <propertyIdentities> to map property id → ORA data type
+#	Helper: Parse <propertyIdentities> to map property id → ORA data type
 	function _collect_nodeset_schema(nodeset::EzXML.Node)
+		"""
+		Args:
+			nodeset::EzXML.Node: XML nodeset element containing property definitions
+		Returns:
+			Dict{String,String}: mapping from property id to ORA data type
+		Notes:
+			- Walks <propertyIdentities>/<propertyIdentity> elements
+			- Extracts id and dataType attributes
+			- Returns empty Dict if no schema found
+		"""
 		#	Schema map
 			schema = Dict{String,String}()
 
@@ -107,8 +142,18 @@ module Large_Graph_Similarity
 			return schema
 	end
 
-#	Extract one or more textual values from a <property> node
-	function _extract_property_values(p::EzXML.Node)::Vector{String}
+#	Helper: Extract one or more textual values from a <property> node
+	function _extract_property_values(p::EzXML.Node)
+		"""
+		Args:
+			p::EzXML.Node: XML property element
+		Returns:
+			Vector{String}: extracted values in file order
+		Notes:
+			- Checks: (1) value attribute, (2) <value> child elements, (3) direct text content
+			- Returns empty vector if no values found
+			- Preserves file order, does not deduplicate
+		"""
 		#	Collect in file order, dedup later only if needed by callers
 			vals = String[]
 
@@ -136,13 +181,22 @@ module Large_Graph_Similarity
 			return vals
 	end
 
-#	Ingest a single <property> into `row` using schema rules (top-level helper)
-	function _ingest_property!(
-		row::Dict{String,Any},
-		p::EzXML.Node,
-		schema::Dict{String,String},
-		prop_keys::Set{String}
-	)
+#	Helper: Ingest a single <property> into row using schema rules
+	function _ingest_property!(row::Dict{String,Any}, p::EzXML.Node, schema::Dict{String,String}, prop_keys::Set{String})
+		"""
+		Args:
+			row::Dict{String,Any}: target row dictionary (modified in-place)
+			p::EzXML.Node: XML property element to ingest
+			schema::Dict{String,String}: property id → datatype mapping
+			prop_keys::Set{String}: tracks all property keys seen (modified in-place)
+		Returns:
+			Nothing
+		Notes:
+			- Modifies row in-place based on property type
+			- Text types accumulate with MULTI_SEP separator
+			- Numeric/Date types keep last value only
+			- Updates prop_keys with encountered property id
+		"""
 		#	Property id and dtype
 			pid = haskey(p, "id") ? p["id"] : nothing
 			pid === nothing && return
@@ -185,8 +239,20 @@ module Large_Graph_Similarity
 			return nothing
 	end
 
-#	Read one <nodeset> block into (standardized_key, DataFrame)
+#	Helper: Read one <nodeset> block into (standardized_key, DataFrame)
 	function _parse_nodeset(nodeset::EzXML.Node)
+		"""
+		Args:
+			nodeset::EzXML.Node: XML nodeset element to parse
+		Returns:
+			Tuple{String,DataFrame}: (standardized_key, DataFrame with node data)
+		Notes:
+			- Standardizes nodeset type to canonical key using TYPE_TO_STDKEY
+			- Enforces column order: "Node ID", "Node Label", schema properties, extra properties
+			- Guarantees "Node ID" and "Node Label" columns exist
+			- Handles missing values based on datatype
+			- Throws error if required attributes missing
+		"""
 		#	Attributes
 			ns_type = haskey(nodeset, "type") ? nodeset["type"] : nothing
 			ns_id   = haskey(nodeset, "id")   ? nodeset["id"]   : nothing
@@ -301,8 +367,23 @@ module Large_Graph_Similarity
 			return stdkey, df
 	end
 
-#	Parse one <network> block; strict on node existence; flag missing weights
+#	Helper: Parse one <network> block with strict node existence checking
 	function _parse_network(netnode::EzXML.Node, nodesets_map::Dict{String,DataFrame})
+		"""
+		Args:
+			netnode::EzXML.Node: XML network element to parse
+			nodesets_map::Dict{String,DataFrame}: mapping of nodeset keys to DataFrames
+		Returns:
+			Tuple{String,NamedTuple}: (network_id, meta_information)
+				meta contains: id, sourceType, targetType, sourceNodeset, targetNodeset,
+							isDirected, isBinary, allowSelfLoops, hadMissingWeights, edges
+		Notes:
+			- Strictly validates all source/target nodes exist in respective nodesets
+			- Flags missing weights but continues processing
+			- Defaults: isDirected=true, isBinary=false, allowSelfLoops=false
+			- Standardizes URL nodeset key capitalization
+			- Throws error on missing attributes or unknown nodes
+		"""
 		#	Attributes
 			net_id = haskey(netnode, "id") ? netnode["id"] : nothing
 			net_id === nothing && error("<network> missing 'id'")
@@ -794,19 +875,31 @@ module Large_Graph_Similarity
 ########################
 
 #   ORA Meta-Network Import Function
-    function load_ora_xml(filepath::AbstractString)
-		#	Developer Notes
-			#	- Strict on network node references; permissive on attributes.
-			#	- Multi-valued string-like properties are concatenated with MULTI_SEP.
-			#	- Numbers → Float64, Number Categories → Int64, Date/Datetime → DateTime.
-			#	- IDs remain Strings; Url nodeset standardized as "URL".
-
-		#	Read XML
+	function load_ora_xml(filepath::AbstractString)
+		"""
+		Args:
+			filepath::AbstractString: path to ORA XML file
+		Returns:
+			NamedTuple: (nodesets::Dict{String,DataFrame}, networks::Dict{String,NamedTuple})
+				- nodesets: Dict with keys "Agent", "Tweet", "Hashtag", "URL"
+					Each DataFrame has "Node ID" column plus property columns
+				- networks: Dict keyed by network id, values contain:
+					id, sourceType, targetType, sourceNodeset, targetNodeset,
+					isDirected, isBinary, allowSelfLoops, hadMissingWeights, edges
+		Notes:
+			- Strict on network node references (throws on unknown nodes)
+			- Permissive on attributes (missing → "" or missing)
+			- Multi-valued string properties concatenated with MULTI_SEP
+			- Type conversions: Number→Float64, Number Category→Int64, Date→DateTime
+			- IDs remain Strings; "Url" nodeset standardized to "URL"
+			- Supports both <MetaNetwork> root and <DynamicMetaNetwork>/<MetaNetwork> nesting
+		"""
+		#	Read and validate XML document
 			doc = readxml(filepath)
 			root = doc.root
 			(root === nothing) && error("Empty XML document")
 
-		#	Locate <MetaNetwork> (may be nested under <DynamicMetaNetwork>)
+		#	Locate <MetaNetwork> element (handle both root and nested cases)
 			meta = nothing
 			if root.name == "MetaNetwork"
 				meta = root
@@ -820,7 +913,7 @@ module Large_Graph_Similarity
 			end
 			meta === nothing && error("No <MetaNetwork> element found")
 
-		#	Parse nodesets
+		#	Parse all nodesets into DataFrames
 			nodesets_map = Dict{String,DataFrame}()
 			for child in eachelement(meta)
 				if child.name == "nodes"
@@ -833,12 +926,12 @@ module Large_Graph_Similarity
 				end
 			end
 
-		#	Ensure expected sets exist (warn if missing)
+		#	Validate expected nodesets exist (warn but continue if missing)
 			for must in ("Agent", "Tweet", "Hashtag", "URL")
 				haskey(nodesets_map, must) || @warn "Nodeset '$must' not found in file"
 			end
 
-		#	Parse networks (strict)
+		#	Parse all networks with strict node validation
 			networks_map = Dict{String,NamedTuple}()
 			for child in eachelement(meta)
 				if child.name == "networks"
@@ -851,10 +944,10 @@ module Large_Graph_Similarity
 				end
 			end
 
-		#	Clean up
+		#	Clean up XML document resources
 			EzXML.finalize(doc)
 
-		#	Return structure
+		#	Return structured output
 			return (;
 				nodesets = nodesets_map,
 				networks = networks_map,
@@ -865,36 +958,36 @@ module Large_Graph_Similarity
 
 		Read an ORA **MetaNetwork** XML export and return:
 		- `nodesets::Dict{String,DataFrame}` with keys:
-		  - `"Agent"`, `"Tweet"`, `"Hashtag"`, `"URL"` (standardized from `Url`)
-		  - Each DataFrame has an `id::String` column plus one column per declared property.
-		    * String-like (`Text`, `Text Category`, `URI`) are `String`. Multiple
-		      occurrences are concatenated with the configured separator.
-		    * `Number` → `Union{Missing,Float64}`
-		    * `Number Category` → `Union{Missing,Int64}`
-		    * `Date/Datetime/DateTime` → `Union{Missing,DateTime}`
+		- `"Agent"`, `"Tweet"`, `"Hashtag"`, `"URL"` (standardized from `Url`)
+		- Each DataFrame has an `id::String` column plus one column per declared property.
+			* String-like (`Text`, `Text Category`, `URI`) are `String`. Multiple
+			occurrences are concatenated with the configured separator.
+			* `Number` → `Union{Missing,Float64}`
+			* `Number Category` → `Union{Missing,Int64}`
+			* `Date/Datetime/DateTime` → `Union{Missing,DateTime}`
 		- `networks::Dict{String,NamedTuple}` keyed by the network `id` in the file.
-		  Each value contains:
-		  - `id::String`, `sourceType::String`, `targetType::String`
-		  - `sourceNodeset::String`, `targetNodeset::String`
-		  - `isDirected::Bool`, `isBinary::Bool`, `allowSelfLoops::Bool`
-		  - `hadMissingWeights::Bool` (true if any `<link>` lacked a `value`)
-		  - `edges::DataFrame` with columns `:src::String`, `:dst::String`, `:weight::Float64`
+		Each value contains:
+		- `id::String`, `sourceType::String`, `targetType::String`
+		- `sourceNodeset::String`, `targetNodeset::String`
+		- `isDirected::Bool`, `isBinary::Bool`, `allowSelfLoops::Bool`
+		- `hadMissingWeights::Bool` (true if any `<link>` lacked a `value`)
+		- `edges::DataFrame` with columns `:src::String`, `:dst::String`, `:weight::Float64`
 
 		Behavior
 		--------
 		- **Strict on networks**: throws if any `<link>` references an unknown node id.
 		- **Permissive on attributes**: unknown/missing properties become `""` (strings)
-		  or `missing` (numeric/date types).
+		or `missing` (numeric/date types).
 		- IDs are preserved as **Strings**. The `Url` nodeset is exposed as **"URL"**.
 
 		Example
 		-------
-		```julia
+	```julia
 		out = load_ora_xml("/path/to/Balikatan_2022_Processed.xml")
 		df_agents = out.nodesets["Agent"]
 		nt = out.networks["Agent x Tweet - Sender"]
 		first(nt.edges, 5)
-		```
+	```
 	""" load_ora_xml
 
 ################
@@ -5831,11 +5924,262 @@ module Large_Graph_Similarity
 
 #   LOCAL REACH
 
+#	Helper: k-hop reach (directed / undirected)
+	function _k_hop_reach_counts(adj::SparseMatrixCSC{<:Real,Int};
+								mode::String = "out",
+								k::Int = 2)
+		"""
+		Args:
+			adj::SparseMatrixCSC{<:Real,Int}: adjacency matrix (any numeric weights)
+			mode::String: "in", "out", or "all"
+			k::Int: maximum hop distance (0 ≤ k ≤ n-1)
+		Returns:
+			Vector{Int}: for each node i, number of nodes within ≤ k steps (including i)
+		Notes:
+			- Treats edges as binary (presence/absence), ignores weights.
+			- Mirrors igraph::neighborhood(order = k, mode = ...) + length().
+		"""
+		#	Basic checks
+			n = size(adj, 1)
+			@assert size(adj, 2) == n "adj must be square"
+			@assert mode in ("in", "out", "all") "mode must be \"in\", \"out\", or \"all\""
+			@assert 0 ≤ k ≤ n - 1 "k must satisfy 0 ≤ k ≤ n-1 for a graph with $n nodes"
+
+		#	Trivial case: k == 0 → each node only reaches itself
+			if k == 0
+				return fill(1, n)
+			end
+
+		#	Build neighbor lists (binary, drop self-loops)
+			rows = rowvals(adj)
+			out_neighbors = [Int[] for _ in 1:n]
+			in_neighbors  = [Int[] for _ in 1:n]
+
+			@inbounds for j in 1:n             # column = destination
+				for idx in nzrange(adj, j)
+					i = rows[idx]             # row = source
+					i == j && continue        # drop self-loops
+					push!(out_neighbors[i], j)
+					push!(in_neighbors[j],  i)
+				end
+			end
+
+		#	Result container
+			reach = zeros(Int, n)
+
+		#	BFS per node, bounded at distance k
+			queue = Vector{Int}(undef, n)
+			dist  = Vector{Int}(undef, n)
+			seen  = falses(n)
+
+			@inbounds for s in 1:n
+				#	Reset BFS state
+					fill!(seen, false)
+					fill!(dist, -1)
+
+				#	Initialize at source
+					head = 1
+					tail = 1
+					queue[1] = s
+					seen[s] = true
+					dist[s] = 0
+					count = 1    # always includes self
+
+				#	BFS up to distance k
+					while head ≤ tail
+						#	Dequeue current node
+							u = queue[head]; head += 1
+							du = dist[u]
+							du == k && continue  # don't expand beyond k
+
+						#	Select neighbors based on mode
+							if mode == "out"
+								nbrs = out_neighbors[u]
+							elseif mode == "in"
+								nbrs = in_neighbors[u]
+							else  # "all"
+								#	Union-like behavior: visit both sets
+								#	Duplicates guarded by `seen`
+									nbrs_out = out_neighbors[u]
+									nbrs_in  = in_neighbors[u]
+									nbrs = nbrs_out
+
+								#	Process out-neighbors
+									for v in nbrs
+										if !seen[v]
+											seen[v] = true
+											dist[v] = du + 1
+											if dist[v] ≤ k
+												tail += 1
+												queue[tail] = v
+												count += 1
+											end
+										end
+									end
+
+								#	Process in-neighbors separately and continue outer loop
+									for v in nbrs_in
+										if !seen[v]
+											seen[v] = true
+											dist[v] = du + 1
+											if dist[v] ≤ k
+												tail += 1
+												queue[tail] = v
+												count += 1
+											end
+										end
+									end
+									continue
+							end
+
+						#	Process neighbors for "in" or "out" mode
+							for v in nbrs
+								if !seen[v]
+									seen[v] = true
+									dist[v] = du + 1
+									if dist[v] ≤ k
+										tail += 1
+										queue[tail] = v
+										count += 1
+									end
+								end
+							end
+					end
+
+				#	Store result for node s
+					reach[s] = count
+			end
+
+		#	Return k-hop reach counts
+			return reach
+	end
+
+#	k-hop reach (igraph-style neighborhood counts)
+	function hop_reach_k(edges::DataFrame;
+						nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}} = nothing,
+						mode::String = "out",
+						k::Int = 2)
+		"""
+		Args:
+			edges::DataFrame: Required columns: :src, :dst (weights ignored here)
+			nodes::Union{Nothing,DataFrame,Vector{<:AbstractString}}: Optional node universe (includes isolates if provided)
+			mode::String: "in" (nodes that can reach this node), "out" (nodes this node can reach), "all" (undirected reach)
+			k::Int: Maximum hop distance (0 ≤ k ≤ n-1)
+		Returns:
+			DataFrame: (:node → node id, :reach_k → number of nodes within ≤ k hops including self)
+		Notes:
+			- Semantics mirror igraph::neighborhood(order = k, mode = ...), then length().
+			- Internally treats the graph as unweighted (binary edges).
+		"""
+
+		#	Basic validation on inputs
+			@assert hasproperty(edges, :src) && hasproperty(edges, :dst) "edges must have :src and :dst"
+			@assert mode in ("in", "out", "all") "mode must be \"in\", \"out\", or \"all\""
+
+		#	Build adjacency (unweighted; multi-edges → presence)
+			adj, _, idx_to_node = isnothing(nodes) ?
+				_graph_to_sparse_matrix(edges; weighted = false) :
+				_graph_to_sparse_matrix(edges; nodes = nodes, weighted = false)
+
+		#	Enforce k bound now that we know n
+			n = size(adj, 1)
+			@assert 0 ≤ k ≤ n - 1 "k must satisfy 0 ≤ k ≤ n-1 for a graph with $n nodes"
+
+		#	Compute k-hop reach counts
+			reachk = _k_hop_reach_counts(adj; mode = mode, k = k)
+
+		#	Extract node names from idx_to_node
+			node_names = if idx_to_node isa DataFrame
+				hasproperty(idx_to_node, :id) ? String.(idx_to_node.id) : String.(idx_to_node[:, 1])
+			else
+				String.(idx_to_node)
+			end
+
+		#	Return tidy results
+			return DataFrame(
+				node    = node_names,
+				reach_k = reachk,
+			)
+	end
+	@doc raw"""
+	hop_reach_k(edges::DataFrame; nodes=nothing, mode="out", k=2) -> DataFrame
+
+	Compute k-hop neighborhood sizes for all nodes in a graph.
+
+	**Arguments**
+	- `edges::DataFrame`: Edge list with required columns `:src` and `:dst`. Weights are ignored.
+	- `nodes::Union{Nothing,DataFrame,Vector{String}}`: Optional node universe to include isolates.
+	  - `Nothing`: derive nodes from edges (default)
+	  - `DataFrame`: requires `:id` column for node identifiers
+	  - `Vector{String}`: explicit list of node identifiers
+	- `mode::String`: Direction of reach calculation
+	  - `"out"`: nodes reachable FROM each node (default)
+	  - `"in"`: nodes that can reach TO each node
+	  - `"all"`: undirected reach (union of in and out)
+	- `k::Int`: Maximum hop distance (default 2). Must satisfy 0 ≤ k ≤ n-1.
+
+	**Returns**
+	`DataFrame` with columns:
+	- `:node`: Node identifier (String)
+	- `:reach_k`: Number of nodes within k hops, including self (Int)
+
+	**Algorithm Details**
+	
+	The function uses Breadth-First Search (BFS) to compute reachability. BFS is a graph 
+	traversal algorithm that explores nodes level by level:
+	
+	1. **Initialization**: Start at a source node with distance 0
+	2. **Queue-based exploration**: Maintain a FIFO queue of nodes to visit
+	3. **Level-wise expansion**: 
+	   - Process all nodes at distance d before any at distance d+1
+	   - Mark each visited node to avoid revisiting
+	   - Track distance from source to enforce the k-hop limit
+	4. **Termination**: Stop when queue is empty or all nodes at distance k are processed
+
+	For a k-hop neighborhood, BFS guarantees we find all nodes reachable within k steps
+	while avoiding unnecessary exploration beyond that distance. The algorithm runs in
+	O(n × (m + n)) time for computing all n nodes' neighborhoods, where m is the number
+	of edges.
+
+	The implementation handles directed/undirected semantics through neighbor selection:
+	- `"out"`: follows outgoing edges only
+	- `"in"`: follows incoming edges only  
+	- `"all"`: follows both (treated as undirected)
+
+	**Details**
+	The count includes the source node itself, matching igraph's `neighborhood(order=k)` 
+	semantics. Multi-edges are treated as single edges, and edge weights are ignored.
+	Self-loops are excluded from the traversal.
+
+	**Examples**
+```julia
+	# Simple directed graph
+	edges = DataFrame(src=["A","A","B"], dst=["B","C","C"])
+	
+	# 2-hop out-reach from each node
+	hop_reach_k(edges, k=2, mode="out")
+	# A reaches {A,B,C} → 3
+	# B reaches {B,C} → 2  
+	# C reaches {C} → 1
+	
+	# 1-hop in-reach (who can reach each node in 1 step)
+	hop_reach_k(edges, k=1, mode="in")
+	# A reaches {A} → 1
+	# B reaches {A,B} → 2
+	# C reaches {A,B,C} → 3
+	
+	# Include isolates
+	nodes = ["A","B","C","D"]
+	hop_reach_k(edges, nodes=nodes, k=2)
+	# D reaches only {D} → 1
+```
+
+	**See Also**
+	- `_k_hop_reach_counts`: Internal implementation using sparse matrices
+	- `_graph_to_sparse_matrix`: Graph conversion utility
+	""" hop_reach_k
+
 #	Group-Level Degree: Total, In-Degree, Out-Degree, Between & Weighted Versions
-
-#   2-Hop In-Reach (How Many Can Reach this Node in 2 Steps)
-
-#   2-Hop Out-Reach (How Many Nodes Can this Node Reach in 2 Steps)
 
 #   GRAPH-LEVEL FEATURES
 
@@ -6801,12 +7145,9 @@ module Large_Graph_Similarity
 	`_triad_census_bm_from_edges`, `_triad_census_layered`
 	""" triad_census
 
-
 #  	Strongly Connected Components (SCC) Size Distribution (Largest & Second Largest)
 
 #   Bow-Ties Fractions (In, Out, SCC)
-
-
 
 #   GLOBAL MEASURES
 
@@ -7043,9 +7384,9 @@ module Large_Graph_Similarity
 ############################
 
 
-############################
-#   COMPARISON FUNCTIONS   #
-############################
+####################################
+#   NETWORK COMPARISON FUNCTIONS   #
+####################################
 
 
 
@@ -7070,6 +7411,7 @@ module Large_Graph_Similarity
 		   champ_community_detection,
 		   modularity_vitality,
 		   core_decomposition,
+		   hop_reach_k,
            recommend_L,
 		   triad_census,
 		   reciprocity

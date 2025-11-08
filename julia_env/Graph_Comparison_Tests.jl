@@ -2898,15 +2898,45 @@
 #   LOCAL REACH   #
 ###################
 
-#	2-hop in-reach (how many can reach this node in 2 steps)
-#	2-hop out-reach (how many this node can reach in 2 steps)
+#	Group-Level Degree: Total, In-Degree, Out-Degree, Between & Weighted Versions
 
 #	CALCULATE LOCAL REACH MEASURES
 
+#	Construct Nodes File for Comparison Tests
+	nodes = agents[:,(1:2)]
+	rename!(nodes, ["id", "label"])
+
+# 	Calculating 2-Hop In-Reach 
+	in_hop_reach = hop_reach_k(agent_agent_all_com.edges, nodes=nodes, mode="in", k=2)
+	rename!(in_hop_reach, ["node", "in_reach"])
+
+# 	Calculating 2-Hop Out-Reach 
+	out_hop_reach = hop_reach_k(agent_agent_all_com.edges, nodes=nodes, mode="out", k=2) 
+	rename!(out_hop_reach, ["node", "out_reach"])
+
+# 	Calculating 2-Hop Undirected Reach 
+	all_hop_reach = hop_reach_k(agent_agent_all_com.edges, nodes=nodes, mode="all", k=2) 
+	rename!(all_hop_reach, ["node", "undirected_reach"])
 
 #	CONDUCT TESTS
 
-#	START BACK HERE!!!!
+#	2-Hope Comparison Tests: Perfect Match
+	igraph_2k_reach = CSV.read("/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data/Balikatan_AllComm_2Reach_Counts.csv",
+			 				   DataFrame, types=Dict(1 => String))
+	reach_2k_counts = leftjoin(in_hop_reach, out_hop_reach, on=:node)
+	leftjoin!(reach_2k_counts, all_hop_reach, on=:node)
+	leftjoin!(reach_2k_counts, igraph_2k_reach, on=:node)
+
+	var_names = names(reach_2k_counts)[(2:ncol(reach_2k_counts))]
+	for i in eachindex(var_names)
+		 reach_2k_counts[!,var_names[i]] = convert.(Int64, reach_2k_counts[:,var_names[i]])
+	end
+
+	in_reach_delta = reach_2k_counts.in_reach .- reach_2k_counts.in_reach_2
+	out_reach_delta = reach_2k_counts.out_reach .- reach_2k_counts.out_reach_2
+	all_reach_delta = reach_2k_counts.undirected_reach .- reach_2k_counts.undirected_reach_2
+	print(string("In-Reach Delta: ", sum(in_reach_delta), ", Out-Reach Delta: ", sum(out_reach_delta),
+		   ", Undirected-Reach Delta: ", sum(all_reach_delta)))
 
 ############################
 #   GRAPH-LEVEL FEATURES   #
@@ -2914,7 +2944,7 @@
 
 #  	Strongly Connected Components (SCC) Size Distribution (Largest & Second Largest)
 #   Bow-Ties Fractions (In, Out, SCC)
-
+	
 #	CALCULATE GRAPH LEVEL FEATURES
 
 #	Calcuate Unweighted Triad Cenuses
