@@ -1,5 +1,30 @@
 __precompile__(true)
+
 module Large_Graph_Similarity
+@doc raw"""
+MIT License
+
+Copyright (c) 2025 Jonathan H. Morgan, Ph.D., Netanomics
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+""" 
+
 #   Packages
     using CSV
     using DataFrames
@@ -998,9 +1023,9 @@ module Large_Graph_Similarity
 
 #	In-Degree
 	function in_degree(edges::DataFrame; 
-	                   weighted::Bool=true, 
-	                   normalize::Bool=false,
-	                   agg_func::Function=sum)
+					weighted::Bool=true, 
+					normalize::Bool=false,
+					agg_func::Function=sum)
 		"""
 		Args:
 			edges::DataFrame: edge list with src, dst, and optionally weight columns
@@ -1010,8 +1035,8 @@ module Large_Graph_Similarity
 		Returns:
 			DataFrame: columns [node, in_degree]
 		Notes:
-			When normalize=false: in-degree is the sum of weights of incoming edges (column sums).
-			When normalize=true: uses freeman_degree_normalization(...; mode=:in, directed=true) and renames the score to :in_degree.
+			- When normalize=false: in-degree is the sum of weights of incoming edges (column sums).
+			- When normalize=true: uses freeman_degree_normalization(...; mode=:in, directed=true) and renames the score to :in_degree.
 		"""
 
 		#	Validation
@@ -1038,15 +1063,67 @@ module Large_Graph_Similarity
 			adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=weighted)
 			in_deg_values = vec(sum(adj, dims=1))
 
-		#	Assembling Result
+		#	Assembling result
 			return DataFrame(node = idx_to_node, in_degree = in_deg_values)
 	end
+	@doc raw"""
+		in_degree(edges::DataFrame; weighted=true, normalize=false, agg_func=sum) -> DataFrame
+
+		Compute in-degree centrality for each node in a directed network.
+
+		**Arguments**
+		- `edges::DataFrame`: Edge list with `:src` and `:dst` columns, optionally `:weight`
+		- `weighted::Bool`: Use edge weights if available (default: `true`)
+		- `normalize::Bool`: Apply Freeman normalization if `true` (default: `false`)
+		- `agg_func::Function`: Function to aggregate multi-edges (default: `sum`)
+
+		**Returns**
+		`DataFrame` with columns:
+		- `:node`: Node identifier
+		- `:in_degree`: Sum of weights of incoming edges (or normalized value)
+
+		**Details**
+		
+		In-degree measures the total incoming connectivity to a node. For directed networks,
+		this represents receptivity or popularity (Wasserman & Faust, 1994, p. 126).
+		
+		When `normalize=false`:
+		- Returns raw in-degree: sum of weights of all incoming edges
+		- For binary networks: count of incoming edges
+		
+		When `normalize=true`:
+		- Applies Freeman normalization (Freeman, 1979)
+		- Scales values to [0,1] for comparison across networks
+		
+		**Examples**
+	```julia
+		edges = DataFrame(src=["A","B","C"], dst=["B","B","B"])
+		in_degree(edges)
+		# B has in-degree of 3 (three incoming edges)
+		
+		# With weights
+		edges.weight = [1.5, 2.0, 0.5]
+		in_degree(edges; weighted=true)
+		# B has in-degree of 4.0 (sum of weights)
+	```
+
+		**References**
+		- Wasserman, S., & Faust, K. (1994). *Social Network Analysis: Methods and Applications*. 
+		Cambridge University Press.
+		- Freeman, L. C. (1979). Centrality in social networks: Conceptual clarification. 
+		*Social Networks*, 1(3), 215-239.
+
+		**See Also**
+		- `out_degree`: Outgoing connectivity
+		- `total_degree`: Combined in and out degree
+		- `freeman_degree_normalization`: Normalization method
+	""" in_degree
 
 #	Out-Degree
 	function out_degree(edges::DataFrame; 
-	                    weighted::Bool=true, 
-	                    normalize::Bool=false,
-	                    agg_func::Function=sum)
+						weighted::Bool=true, 
+						normalize::Bool=false,
+						agg_func::Function=sum)
 		"""
 		Args:
 			edges::DataFrame: edge list with src, dst, and optionally weight columns
@@ -1056,8 +1133,8 @@ module Large_Graph_Similarity
 		Returns:
 			DataFrame: columns [node, out_degree]
 		Notes:
-			When normalize=false: out-degree is the sum of weights of outgoing edges (row sums).
-			When normalize=true: uses freeman_degree_normalization(...; mode=:out, directed=true) and renames the score to :out_degree.
+			- When normalize=false: out-degree is the sum of weights of outgoing edges (row sums).
+			- When normalize=true: uses freeman_degree_normalization(...; mode=:out, directed=true) and renames the score to :out_degree.
 		"""
 
 		#	Validation
@@ -1084,19 +1161,71 @@ module Large_Graph_Similarity
 			adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=weighted)
 			out_deg_values = vec(sum(adj, dims=2))
 
-		#	Assembling Result
+		#	Assembling result
 			return DataFrame(node = idx_to_node, out_degree = out_deg_values)
 	end
+	@doc raw"""
+		out_degree(edges::DataFrame; weighted=true, normalize=false, agg_func=sum) -> DataFrame
+
+		Compute out-degree centrality for each node in a directed network.
+
+		**Arguments**
+		- `edges::DataFrame`: Edge list with `:src` and `:dst` columns, optionally `:weight`
+		- `weighted::Bool`: Use edge weights if available (default: `true`)
+		- `normalize::Bool`: Apply Freeman normalization if `true` (default: `false`)
+		- `agg_func::Function`: Function to aggregate multi-edges (default: `sum`)
+
+		**Returns**
+		`DataFrame` with columns:
+		- `:node`: Node identifier
+		- `:out_degree`: Sum of weights of outgoing edges (or normalized value)
+
+		**Details**
+		
+		Out-degree measures the total outgoing connectivity from a node. For directed networks,
+		this represents expansiveness or influence (Wasserman & Faust, 1994, p. 126).
+		
+		When `normalize=false`:
+		- Returns raw out-degree: sum of weights of all outgoing edges
+		- For binary networks: count of outgoing edges
+		
+		When `normalize=true`:
+		- Applies Freeman normalization (Freeman, 1979)
+		- Scales values to [0,1] for comparison across networks
+		
+		**Examples**
+	```julia
+		edges = DataFrame(src=["A","A","A"], dst=["B","C","D"])
+		out_degree(edges)
+		# A has out-degree of 3 (three outgoing edges)
+		
+		# With weights
+		edges.weight = [1.5, 2.0, 0.5]
+		out_degree(edges; weighted=true)
+		# A has out-degree of 4.0 (sum of weights)
+	```
+
+		**References**
+		- Wasserman, S., & Faust, K. (1994). *Social Network Analysis: Methods and Applications*. 
+		Cambridge University Press.
+		- Freeman, L. C. (1979). Centrality in social networks: Conceptual clarification. 
+		*Social Networks*, 1(3), 215-239.
+
+		**See Also**
+		- `in_degree`: Incoming connectivity
+		- `total_degree`: Combined in and out degree
+		- `freeman_degree_normalization`: Normalization method
+	""" out_degree
 
 #	Total Degree
 	function total_degree(edges::DataFrame; 
-	                      weighted::Bool=true, 
-	                      normalize::Bool=false,
-	                      agg_func::Function=sum,
-	                      ignore_direction::Bool=false,
-	                      drop_self_loops::Bool=false,
-	                      count_self_loops_once::Bool=true,
-	                      atol::Float64=1e-12)
+						weighted::Bool=true, 
+						normalize::Bool=false,
+						agg_func::Function=sum,
+						ignore_direction::Bool=false,
+						drop_self_loops::Bool=false,
+						count_self_loops_once::Bool=true,
+						atol::Float64=1e-12)
 		"""
 		Args:
 			edges::DataFrame: edge list with src, dst, and optionally weight columns
@@ -1110,20 +1239,18 @@ module Large_Graph_Similarity
 		Returns:
 			DataFrame: columns [node, total_degree]
 		Notes:
-			Order of operations:
-			1) Build sparse adjacency (weighted or unweighted).
-			2) Symmetrize if `ignore_direction=true` (A ← max(A, A')).
-			3) If `drop_self_loops=true`, zero the diagonal once.
-			4) Compute totals.
-
-			Self-loop behavior:
-			- By default (`count_self_loops_once=true`), a self-loop contributes its weight **once**
-			  to total-degree (consistent with Freeman's numerator `row + col − diag` and ORA outputs).
-			- If `drop_self_loops=true`, loops contribute nothing.
-			- If `count_self_loops_once=false`, each self-loop contributes twice (once to in-degree,
-			  once to out-degree), matching pure graph-theoretic totals.
-
-			When `normalize=true`, the function applies Freeman’s :all normalization on the prepared matrix.
+			- Order of operations:
+			1) Build sparse adjacency (weighted or unweighted)
+			2) Symmetrize if ignore_direction=true (A ← max(A, A'))
+			3) If drop_self_loops=true, zero the diagonal once
+			4) Compute totals
+			- Self-loop behavior:
+			* By default (count_self_loops_once=true), a self-loop contributes its weight once
+				to total-degree (consistent with Freeman's numerator row + col − diag and ORA outputs)
+			* If drop_self_loops=true, loops contribute nothing
+			* If count_self_loops_once=false, each self-loop contributes twice (once to in-degree,
+				once to out-degree), matching pure graph-theoretic totals
+			- When normalize=true, applies Freeman's :all normalization on the prepared matrix
 		"""
 
 		#	Validation
@@ -1200,11 +1327,78 @@ module Large_Graph_Similarity
 
 			return DataFrame(node = idx_to_node, total_degree = total_deg_values)
 	end
+	@doc raw"""
+		total_degree(edges::DataFrame; weighted=true, normalize=false, ...) -> DataFrame
 
-#   In/Out Degree Ratio
+		Compute total degree centrality for each node in a network.
+
+		**Arguments**
+		- `edges::DataFrame`: Edge list with `:src` and `:dst` columns, optionally `:weight`
+		- `weighted::Bool`: Use edge weights if available (default: `true`)
+		- `normalize::Bool`: Apply Freeman normalization if `true` (default: `false`)
+		- `agg_func::Function`: Function to aggregate multi-edges (default: `sum`)
+		- `ignore_direction::Bool`: Treat as undirected if `true` (default: `false`)
+		- `drop_self_loops::Bool`: Exclude self-loops entirely (default: `false`)
+		- `count_self_loops_once::Bool`: Count self-loops once in total (default: `true`)
+		- `atol::Float64`: Tolerance for symmetry tests (default: `1e-12`)
+
+		**Returns**
+		`DataFrame` with columns:
+		- `:node`: Node identifier
+		- `:total_degree`: Sum of in-degree and out-degree (with self-loop adjustment)
+
+		**Details**
+		
+		Total degree combines in-degree and out-degree, measuring overall connectivity
+		(Wasserman & Faust, 1994, p. 101). The computation follows:
+		
+		For directed networks:
+		- `total = in_degree + out_degree - self_loops` (when `count_self_loops_once=true`)
+		- This prevents double-counting self-loops, consistent with Freeman (1979)
+		
+		For undirected networks (or `ignore_direction=true`):
+		- Symmetrizes adjacency matrix using `max(A, A')`
+		- Computes degree from symmetrized matrix
+		
+		Self-loop handling:
+		- `count_self_loops_once=true`: Self-loop contributes weight once (default)
+		- `drop_self_loops=true`: Self-loops ignored completely
+		- `count_self_loops_once=false`: Self-loop contributes twice
+		
+		When `normalize=true`:
+		- Applies Freeman normalization
+		- Denominator: `V(N-1)` for undirected, `2V(N-1)` for directed
+		- Where V = max weight, N = number of nodes
+		
+		**Examples**
+	```julia
+		edges = DataFrame(src=["A","B","A"], dst=["B","A","A"])
+		total_degree(edges)
+		# A: total_degree = 3 (1 out + 1 in + 1 self-loop counted once)
+		# B: total_degree = 2 (1 out + 1 in)
+		
+		# Ignore direction (symmetrize)
+		total_degree(edges; ignore_direction=true)
+		# A: total_degree = 2 (connected to B and self)
+		# B: total_degree = 1 (connected to A)
+	```
+
+		**References**
+		- Wasserman, S., & Faust, K. (1994). *Social Network Analysis: Methods and Applications*. 
+		Cambridge University Press.
+		- Freeman, L. C. (1979). Centrality in social networks: Conceptual clarification. 
+		*Social Networks*, 1(3), 215-239.
+
+		**See Also**
+		- `in_degree`: Incoming connectivity only
+		- `out_degree`: Outgoing connectivity only
+		- `degree_ratio`: Ratio of in to out degree
+	""" total_degree
+
+#	In/Out Degree Ratio
 	function degree_ratio(edges::DataFrame; 
-	                      weighted::Bool=true,
-	                      epsilon::Float64=1e-10)
+						weighted::Bool=true,
+						epsilon::Float64=1e-10)
 		"""
 		Args:
 			edges::DataFrame: edge list with src, dst, and optionally weight columns
@@ -1213,8 +1407,8 @@ module Large_Graph_Similarity
 		Returns:
 			DataFrame: columns [node, in_degree, out_degree, in_out_ratio]
 		Notes:
-			Ratio of in-degree to out-degree.
-			Indicates authority (>1) vs hub (<1) behavior.
+			- Ratio of in-degree to out-degree
+			- Indicates authority (>1) vs hub (<1) behavior
 		"""
 		
 		#	Calculate in and out degrees
@@ -1235,9 +1429,68 @@ module Large_Graph_Similarity
 			pure_sources = (result.in_degree .== 0) .& (result.out_degree .> 0)
 			result.in_out_ratio[pure_sources] .= 0.0
 		
-		#	Assembling Result
+		#	Assembling result
 			return result
 	end
+	@doc raw"""
+		degree_ratio(edges::DataFrame; weighted=true, epsilon=1e-10) -> DataFrame
+
+		Compute the ratio of in-degree to out-degree for each node.
+
+		**Arguments**
+		- `edges::DataFrame`: Edge list with `:src` and `:dst` columns, optionally `:weight`
+		- `weighted::Bool`: Use edge weights if available (default: `true`)
+		- `epsilon::Float64`: Small value to avoid division by zero (default: `1e-10`)
+
+		**Returns**
+		`DataFrame` with columns:
+		- `:node`: Node identifier
+		- `:in_degree`: Incoming connectivity
+		- `:out_degree`: Outgoing connectivity  
+		- `:in_out_ratio`: Ratio of in_degree to out_degree
+
+		**Details**
+		
+		The in/out degree ratio distinguishes between different node roles in directed
+		networks (Wasserman & Faust, 1994, p. 126-128):
+		
+		- **Ratio > 1**: Node as "authority" - receives more than sends
+		- **Ratio < 1**: Node as "hub" - sends more than receives
+		- **Ratio = 1**: Balanced node - equal in and out connections
+		- **Ratio = Inf**: Pure sink - only receives (out_degree = 0)
+		- **Ratio = 0**: Pure source - only sends (in_degree = 0)
+		
+		The epsilon parameter prevents division by zero while preserving
+		interpretability for nodes with very small out-degrees.
+		
+		**Examples**
+	```julia
+		edges = DataFrame(
+			src=["A","A","B","C","C"],
+			dst=["B","C","C","A","B"]
+		)
+		degree_ratio(edges)
+		# A: ratio ≈ 0.5 (hub - 1 in, 2 out)
+		# B: ratio = 2.0 (authority - 2 in, 1 out)
+		# C: ratio = 2.0 (authority - 2 in, 1 out)
+		
+		# Pure sink example
+		edges = DataFrame(src=["A","B"], dst=["C","C"])
+		degree_ratio(edges)
+		# C: ratio = Inf (sink - 2 in, 0 out)
+	```
+
+		**References**
+		- Wasserman, S., & Faust, K. (1994). *Social Network Analysis: Methods and Applications*. 
+		Cambridge University Press.
+		- Kleinberg, J. M. (1999). Authoritative sources in a hyperlinked environment. 
+		*Journal of the ACM*, 46(5), 604-632.
+
+		**See Also**
+		- `in_degree`: Compute in-degree only
+		- `out_degree`: Compute out-degree only
+		- `eigenvector_centrality`: Related authority measure
+	""" degree_ratio
 
 #	Freeman Degree Normalization (edges → sparse; uni/bipartite; directed/undirected)
 	function freeman_degree_normalization(edges::DataFrame;
@@ -8344,6 +8597,270 @@ module Large_Graph_Similarity
 
 #   GLOBAL MEASURES
 
+#	Global Link Statistics
+	function link_statistics(edges::DataFrame;
+							nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}} = nothing,
+							graph_type::Symbol = :directed,
+							weighted::Bool = hasproperty(edges, :weight))
+		"""
+		Args:
+			edges::DataFrame: Input edge list with at least :src and :dst columns
+			nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}}: Optional node universe (for isolates/fixed ordering)
+			graph_type::Symbol: :directed or :undirected
+			weighted::Bool: If true, preserve numeric weights; if false, binarize
+		Returns:
+			DataFrame: One row per group ("all_links", "nonself_links", "self_loops") with columns:
+				- count, min, max, mean, std, sum
+				- density: classic global density (same for all rows)
+		Notes:
+			- Density includes self-loops in the numerator L
+			- Directed: D = L / (N * (N - 1))
+			- Undirected: D = 2L / (N * (N - 1))
+			- Unweighted graphs are forced to be binary (0/1) before stats
+			- Weighted undirected graphs are symmetrized via max.(A, A'), so weights persist without being averaged or halved
+		"""
+
+		#	Validation
+			@assert hasproperty(edges, :src) && hasproperty(edges, :dst) "edges must have :src and :dst"
+			@assert graph_type in (:directed, :undirected) "graph_type must be :directed or :undirected"
+
+		#	Infer node count from supplied nodes
+			function _infer_n(nodes_local)
+				if nodes_local === nothing
+					return 0
+				elseif nodes_local isa DataFrame
+					return nrow(nodes_local)
+				else
+					return length(nodes_local::AbstractVector)
+				end
+			end
+			n_nodes_from_nodes = _infer_n(nodes)
+
+		#	Early return for empty edge set
+			if nrow(edges) == 0
+				n = n_nodes_from_nodes
+				den = n > 1 ? Float64(n) * Float64(n - 1) : 0.0
+				density = den > 0.0 ? 0.0 : NaN
+
+				return DataFrame(;
+					group   = ["all_links","nonself_links","self_loops"],
+					count   = [0,0,0],
+					min     = [NaN,NaN,NaN],
+					max     = [NaN,NaN,NaN],
+					mean    = [NaN,NaN,NaN],
+					std     = [NaN,NaN,NaN],
+					sum     = [0.0,0.0,0.0],
+					density = [density,density,density]
+				)
+			end
+
+		#	Determine directionality
+			directed = (graph_type === :directed)
+
+		#	Aggregate multi-edges
+			agg_func = weighted ? sum : maximum
+			clean_edges = _aggregate_multi_edges(edges; agg_func = agg_func)
+
+		#	Build adjacency matrix
+			A, node_map, idx_to_node = _graph_to_sparse_matrix(
+				clean_edges;
+				nodes    = nodes,
+				weighted = weighted
+			)
+			n = size(A, 1)
+			if n == 0 && n_nodes_from_nodes > 0
+				n = n_nodes_from_nodes
+			end
+
+		#	Handle unweighted and undirected transformations
+			if !weighted
+				#	Binarize unweighted matrices
+					vals = nonzeros(A)
+					@inbounds for k in eachindex(vals)
+						vals[k] = vals[k] != 0.0 ? 1.0 : 0.0
+					end
+					if !directed
+						#	Unweighted undirected: symmetrize by presence
+							A = max.(A, A')
+					end
+			elseif !directed
+				#	Weighted undirected: symmetrize via max to preserve weights
+					A = max.(A, A')
+			end
+
+		#	Extract weights into categories
+			rows = rowvals(A)
+			vals = nonzeros(A)
+			all_w     = Float64[]
+			nonself_w = Float64[]
+			loop_w    = Float64[]
+
+			if directed
+				@inbounds for j in 1:n
+					for idx in nzrange(A, j)
+						i = rows[idx]
+						w = vals[idx]
+						if w != 0.0
+							push!(all_w, w)
+							if i == j
+								push!(loop_w, w)
+							else
+								push!(nonself_w, w)
+							end
+						end
+					end
+				end
+			else
+				@inbounds for j in 1:n
+					for idx in nzrange(A, j)
+						i = rows[idx]
+						w = vals[idx]
+						if w != 0.0
+							if i == j
+								#	Self-loop
+									push!(all_w, w)
+									push!(loop_w, w)
+							elseif i < j
+								#	Unique representative of {i,j}
+									push!(all_w, w)
+									push!(nonself_w, w)
+							end
+						end
+					end
+				end
+			end
+
+		#	Summarizer helper
+			function _summarize(ws::Vector{Float64})
+				c = length(ws)
+				if c == 0
+					return (c, NaN, NaN, NaN, NaN, 0.0)
+				else
+					s  = sum(ws)
+					mn = minimum(ws)
+					mx = maximum(ws)
+					μ  = s / c
+					var_acc = 0.0
+					@inbounds for w in ws
+						d = w - μ
+						var_acc += d * d
+					end
+					σ = sqrt(var_acc / c)
+					return (c, mn, mx, μ, σ, s)
+				end
+			end
+
+		#	Compute summary stats
+			c_all,  min_all,  max_all,  mean_all,  std_all,  sum_all  = _summarize(all_w)
+			c_non,  min_non,  max_non,  mean_non,  std_non,  sum_non  = _summarize(nonself_w)
+			c_loop, min_loop, max_loop, mean_loop, std_loop, sum_loop = _summarize(loop_w)
+
+		#	Global density (same for all rows), classic formulas with L = total links incl loops
+			L = c_all	# total number of nonzero links including self-loops
+
+			if n > 1
+				if directed
+					#	Directed: D = L / (N * (N - 1))
+						den = Float64(n) * Float64(n - 1)
+						density = den > 0.0 ? (L / den) : NaN
+				else
+					#	Undirected: D = 2L / (N * (N - 1))
+						den = Float64(n) * Float64(n - 1)
+						density = den > 0.0 ? (2.0 * L / den) : NaN
+				end
+			else
+				density = NaN
+			end
+
+		#	Assembling result
+			return DataFrame(;
+				group   = ["all_links","nonself_links","self_loops"],
+				count   = [c_all, c_non, c_loop],
+				min     = [min_all, min_non, min_loop],
+				max     = [max_all, max_non, max_loop],
+				mean    = [mean_all, mean_non, mean_loop],
+				std     = [std_all, std_non, std_loop],
+				sum     = [sum_all, sum_non, sum_loop],
+				density = [density, density, density]
+			)
+	end
+	@doc raw"""
+		link_statistics(edges::DataFrame; nodes=nothing, graph_type=:directed, weighted=auto) -> DataFrame
+
+		Compute global link statistics and density for a network.
+
+		**Arguments**
+		- `edges::DataFrame`: Edge list with `:src` and `:dst` columns, optionally `:weight`
+		- `nodes::Union{Nothing,DataFrame,Vector}`: Optional node universe (includes isolates)
+		- `graph_type::Symbol`: `:directed` (default) or `:undirected`
+		- `weighted::Bool`: Preserve weights (`true`) or binarize (`false`), auto-detects by default
+
+		**Returns**
+		`DataFrame` with three rows for link groups:
+		- `"all_links"`: All edges including self-loops
+		- `"nonself_links"`: Edges between distinct nodes
+		- `"self_loops"`: Self-edges only
+		
+		Each row contains:
+		- `:count`: Number of edges in group
+		- `:min`, `:max`, `:mean`, `:std`: Weight statistics
+		- `:sum`: Total weight in group
+		- `:density`: Global network density (same for all rows)
+
+		**Details**
+		
+		Provides comprehensive edge-level statistics following Wasserman & Faust (1994, p. 129-131).
+		
+		**Density Calculation**:
+		
+		Network density measures the proportion of possible edges that are present:
+		- Directed: `D = L / (N × (N - 1))`
+		- Undirected: `D = 2L / (N × (N - 1))`
+		
+		Where:
+		- `L` = total number of edges (including self-loops)
+		- `N` = number of nodes
+		- Denominator excludes self-loops from possible edges
+		
+		**Edge Weight Handling**:
+		- Unweighted: Forces binary (0/1) adjacency
+		- Weighted + Directed: Preserves original weights
+		- Weighted + Undirected: Symmetrizes using `max(A[i,j], A[j,i])`
+		
+		**Multi-edge Aggregation**:
+		- Weighted: Sums parallel edges
+		- Unweighted: Takes maximum (presence/absence)
+
+		**Examples**
+	```julia
+		# Simple directed network
+		edges = DataFrame(
+			src=["A","B","C","A"],
+			dst=["B","C","A","A"],
+			weight=[1.5, 2.0, 0.5, 3.0]
+		)
+		link_statistics(edges; weighted=true)
+		# all_links: count=4, sum=7.0, mean=1.75
+		# nonself_links: count=3, sum=4.0
+		# self_loops: count=1, sum=3.0
+		# density ≈ 0.67 (4 edges / 6 possible)
+		
+		# Undirected version
+		link_statistics(edges; graph_type=:undirected)
+		# Symmetrizes adjacency, counts unique edges
+	```
+
+		**References**
+		- Wasserman, S., & Faust, K. (1994). *Social Network Analysis: Methods and Applications*. 
+		Cambridge University Press.
+		- Scott, J. (2017). *Social Network Analysis* (4th ed.). SAGE Publications.
+
+		**See Also**
+		- `component_statistics`: Connectivity analysis
+		- `group_statistics`: Community-level metrics
+		- `triad_census`: Local structure analysis
+	""" link_statistics
+
 #   Global Reciprocity
 	function reciprocity(edges::DataFrame;
 	                     weighted::Bool=false,
@@ -8552,19 +9069,387 @@ module Large_Graph_Similarity
 	- Carley KM (2002). Summary of Key Network Measures. CMU/CASOS.
 	""" reciprocity
 
-#	Size
+#	Helper Function for assortativity_degree: extract edge degree sequences
+	function _degree_edge_sequences(adj::SparseMatrixCSC{Float64,Int}, graph_type::Symbol)
+		"""
+		Args:
+			adj::SparseMatrixCSC{Float64,Int}: adjacency matrix (binary or weighted)
+			graph_type::Symbol: :directed or :undirected
+		Returns:
+			NamedTuple: (x::Vector{Float64}, y::Vector{Float64})
+				x: remaining degree (k-1) at tail of each directed edge
+				y: remaining degree (k-1) at head of each directed edge
+		Notes:
+			- Self-loops are ignored for the purposes of assortativity.
+			- Degrees are computed as binary neighbor counts (nonzero entries),
+			  then converted to remaining degree k-1 at each edge endpoint.
+			- For :directed:
+				- x = k_out(i) - 1 for source node i
+				- y = k_in(j)  - 1 for target node j
+			- For :undirected:
+				- Graph is symmetrized with max.(adj, adj').
+				- Each undirected edge {i,j} is treated as two directed edges
+				  (i→j and j→i) in the (x,y) sequences.
+		"""
+		
+		#	Validation
+			@assert graph_type in (:directed, :undirected) "graph_type must be :directed or :undirected"
+			n = size(adj, 1)
+			@assert size(adj, 2) == n "adj must be square"
 
-#	Number of Arcs/Edges
-#	Link Values: Min, Max, Mean, STD, and Sum
-#	Number of Self-Loops
-#	Min, Max, and Mean Self-Loop Value
+		#	Drop self-loops defensively (we do not use them in assortativity)
+			@inbounds for i in 1:n
+				adj[i, i] = 0.0
+			end
+			dropzeros!(adj)
 
-#   Density
+		#	Directed case: out-degree / in-degree
+			if graph_type === :directed
+				#	Compute out-degree & in-degree (binary)
+					outdeg = zeros(Float64, n)
+					indeg  = zeros(Float64, n)
+					rows   = rowvals(adj)
+					vals   = nonzeros(adj)
 
-#   Degree Assortativity
+					@inbounds for j in 1:n
+						for idx in nzrange(adj, j)
+							i = rows[idx]
+							if vals[idx] != 0.0
+								outdeg[i] += 1.0
+								indeg[j]  += 1.0
+							end
+						end
+					end
 
-#   Note: Modularity is Reported When Group Degree Measures Are Calculated
+				#	Build sequences over edges, using remaining degree (k-1)
+					x = Float64[]
+					y = Float64[]
+					@inbounds for j in 1:n
+						for idx in nzrange(adj, j)
+							i = rows[idx]
+							if vals[idx] != 0.0
+								push!(x, outdeg[i] - 1.0)
+								push!(y, indeg[j]  - 1.0)
+							end
+						end
+					end
 
+				#	Return directed sequences
+					return (x = x, y = y)
+			end
+
+		#	Undirected case: symmetrize and treat each edge as two directed edges
+			AU = max.(adj, adj')
+			@inbounds for i in 1:n
+				AU[i, i] = 0.0
+			end
+			dropzeros!(AU)
+
+		#	Degree in undirected case: number of neighbors (binary)
+			deg   = zeros(Float64, n)
+			rowsU = rowvals(AU)
+			valsU = nonzeros(AU)
+
+			@inbounds for j in 1:n
+				for idx in nzrange(AU, j)
+					i = rowsU[idx]
+					if valsU[idx] != 0.0
+						deg[i] += 1.0
+					end
+				end
+			end
+
+		#	Build sequences: for each undirected edge {i,j} (i<j),
+		#	add two directed samples (i→j and j→i), using k-1.
+			x = Float64[]
+			y = Float64[]
+			@inbounds for j in 1:n
+				for idx in nzrange(AU, j)
+					i = rowsU[idx]
+					if valsU[idx] != 0.0 && i < j
+						#	i→j
+							push!(x, deg[i] - 1.0)
+							push!(y, deg[j] - 1.0)
+						#	j→i
+							push!(x, deg[j] - 1.0)
+							push!(y, deg[i] - 1.0)
+					end
+				end
+			end
+
+		#	Return edge sequences for undirected case
+			return (x = x, y = y)
+	end
+
+#	Helper Function for assortativity_degree: Pearson / covariance core
+	function _assortativity_from_sequences(x::Vector{Float64}, y::Vector{Float64};
+											normalized::Bool = true)
+		"""
+		Args:
+			x::Vector{Float64}: values at tail of each directed edge
+			y::Vector{Float64}: values at head of each directed edge
+			normalized::Bool: if true, return Pearson r; if false, covariance
+		Returns:
+			Float64: assortativity coefficient (r) or covariance
+		Notes:
+			- If there are no edges, or zero variance in either x or y, returns NaN.
+			- Normalized = true:
+				r = cov(x,y) / (σ_x * σ_y)
+			  where cov, σ_x, σ_y are taken over the edge samples.
+			- Normalized = false:
+				returns cov(x,y) only (non-normalized Newman value-based assortativity).
+		"""
+		
+		#	Validation
+			@assert length(x) == length(y) "x and y must have the same length"
+			m = length(x)
+			if m == 0
+				return NaN
+			end
+
+		#	Compute means
+			μx = sum(x) / m
+			μy = sum(y) / m
+
+		#	Covariance and variances
+			cov_xy = 0.0
+			var_x  = 0.0
+			var_y  = 0.0
+			@inbounds for i in 1:m
+				dx = x[i] - μx
+				dy = y[i] - μy
+				cov_xy += dx * dy
+				var_x  += dx * dx
+				var_y  += dy * dy
+			end
+			cov_xy /= m
+			var_x  /= m
+			var_y  /= m
+
+		#	Non-normalized case → covariance only
+			if !normalized
+				return cov_xy
+			end
+
+		#	Normalized: Pearson r
+			if var_x <= 0.0 || var_y <= 0.0
+				return NaN
+			end
+			return cov_xy / sqrt(var_x * var_y)
+	end
+
+#	Degree Assortativity (Newman 2002/2003, value-based on vertex degree)
+	function assortativity_degree(edges::DataFrame;
+									nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}} = nothing,
+									graph_type::Symbol = :directed,
+									weighted::Bool = hasproperty(edges, :weight),
+									normalized::Bool = true)
+		"""
+		Args:
+			edges::DataFrame:
+				Edge list with at least :src and :dst columns (string-like ids).
+				Multi-edges are aggregated via `_aggregate_multi_edges`.
+			nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}}:
+				Optional node universe. When provided, ensures a fixed set
+				and ordering of nodes (including isolates).
+			graph_type::Symbol:
+				:directed   → use out-degree at tail, in-degree at head
+				:undirected → treat each undirected edge as two directed edges
+			weighted::Bool:
+				If true, treat graph as weighted:
+					- Multi-edges are aggregated by summing weights (or counts
+					  when no :weight column exists).
+					- `_graph_to_sparse_matrix` uses the resulting :weight.
+				If false, treat graph as binary:
+					- Multi-edges are aggregated by presence (maximum over edges).
+					- `_graph_to_sparse_matrix` ignores any :weight and uses ones.
+			normalized::Bool:
+				If true (default), return Pearson assortativity coefficient r.
+				If false, return the non-normalized covariance of degree
+				values at the two ends of edges.
+		Returns:
+			Float64:
+				Assortativity coefficient (or covariance) based on vertex degree.
+		Notes:
+			- This is a *value-based* assortativity in the sense of Newman (2003),
+			  where vertex degree is used as the numeric attribute.
+			- For `graph_type = :directed`:
+				- x_e = out-degree of source of edge e
+				- y_e = in-degree of target of edge e
+			- For `graph_type = :undirected`:
+				- The graph is symmetrized via `max.(A, A')` and each undirected
+				  edge {i,j} contributes two directed samples (i→j, j→i).
+			- Self-loops are dropped before computing degrees and edge sequences,
+			  to avoid inflating degree values and correlations.
+			- Degrees are always computed as *binary* degrees (number of neighbors),
+			  even when the input graph is weighted.
+			- If the graph has no edges, or if there is zero variance in degree
+			  at either end, the result is NaN.
+		"""
+		
+		#	Validation
+			@assert hasproperty(edges, :src) && hasproperty(edges, :dst) "edges must have :src and :dst"
+			@assert graph_type in (:directed, :undirected) "graph_type must be :directed or :undirected"
+
+		#	Early return for empty edge set
+			if nrow(edges) == 0
+				return NaN
+			end
+
+		#	Map graph_type to Boolean directed flag
+			directed = (graph_type === :directed)
+
+		#	Choose aggregation function for multi-edges
+			agg_func = weighted ? sum : maximum
+
+		#	Aggregate multi-edges before building adjacency
+			clean_edges = _aggregate_multi_edges(edges; agg_func = agg_func)
+
+		#	Build base adjacency matrix (numeric, aggregated)
+			adj_base, node_map, idx_to_node = _graph_to_sparse_matrix(
+				clean_edges;
+				nodes    = nodes,
+				weighted = weighted    # semantics already decided via agg_func
+			)
+
+		#	Prepare effective adjacency based on directed/weighted semantics
+			A_eff = adj_base
+
+			if !weighted && !directed
+				#	Case 1: Unweighted Undirected
+					if !_is_symmetric(A_eff)  # Check actual symmetry
+						A_eff = max.(A_eff, A_eff')
+					end
+					A_eff = _binarize_matrix(A_eff; directed=false)
+
+			elseif !weighted && directed
+				#	Case 2: Unweighted Directed
+					A_eff = _binarize_matrix(A_eff; directed=true)
+
+			elseif weighted && !directed
+				#	Case 3: Weighted Undirected
+					if _is_binary_matrix(A_eff; directed=false)
+						throw(ArgumentError("weighted=true not allowed on binary matrix (undirected)"))
+					end
+					if !_is_symmetric(A_eff)  # Check actual symmetry
+						A_eff = 0.5 .* (A_eff + A_eff')
+					end
+
+			else
+				#	Case 4: Weighted Directed
+					if _is_binary_matrix(A_eff; directed=true)
+						throw(ArgumentError("weighted=true not allowed on binary matrix (directed)"))
+					end
+					#	No transformation needed for weighted directed
+			end
+
+		#	Extract degree-based edge sequences (degrees treated as binary)
+			seqs = _degree_edge_sequences(A_eff, graph_type)
+			x = seqs.x
+			y = seqs.y
+
+		#	Compute assortativity
+			return _assortativity_from_sequences(x, y; normalized = normalized)
+	end
+	@doc raw"""
+		**Description**
+		Computes the degree assortativity of a network in the sense of Newman (2002, 2003),
+		using vertex degree as a numeric attribute. The coefficient is positive when
+		nodes with similar degrees tend to connect (assortative mixing), and negative
+		when high-degree nodes tend to connect to low-degree nodes (disassortative mixing).
+
+		**Usage**
+		`assortativity_degree(edges;
+							nodes=nothing,
+							graph_type=:directed,
+							weighted=hasproperty(edges, :weight),
+							normalized=true)`
+
+		**Arguments**
+		- `edges::DataFrame`:
+		Edge list with at least `:src` and `:dst` columns (node ids as strings or symbols).
+		Multi-edges are aggregated via `_aggregate_multi_edges` before building the adjacency.
+		- `nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}}`:
+		Optional node universe. When provided, it defines the node ordering and includes
+		isolates even if they do not appear in `edges`.
+		- `graph_type::Symbol`:
+		- `:directed`   → treat graph as directed, using out-degree at the tail and
+			in-degree at the head of each edge.
+		- `:undirected` → treat graph as undirected. The adjacency is symmetrized,
+			with different rules for unweighted vs weighted graphs (see Details).
+		- `weighted::Bool`:
+		- `true` (default when `edges` has a `:weight` column): treat the graph as weighted.
+			Multi-edges are aggregated by summing weights (or counts if no `:weight` exists),
+			and `_graph_to_sparse_matrix` uses the resulting `:weight`.
+		- `false`: treat the graph as binary. Multi-edges are aggregated by presence
+			(maximum over edges), and the adjacency is built with unit weights.
+		- `normalized::Bool`:
+		- `true` (default): return the **Pearson correlation** of degrees at the two
+			ends of edges.
+		- `false`: return the **covariance** of degrees at the two ends of edges
+			(non-normalized value-based assortativity).
+
+		**Details**
+		Internally, the edge list is first aggregated using `_aggregate_multi_edges`.
+		The resulting adjacency matrix is then transformed according to four cases:
+
+		1. **Unweighted undirected (`weighted=false`, `graph_type=:undirected`)**  
+		The adjacency is symmetrized via `max.(A, A')`, then binarized.
+		2. **Unweighted directed (`weighted=false`, `graph_type=:directed`)**  
+		The adjacency is binarized but not symmetrized.
+		3. **Weighted undirected (`weighted=true`, `graph_type=:undirected`)**  
+		If the matrix is binary, an error is thrown (weights are required).  
+		Otherwise, the matrix is symmetrized via `0.5 * (A + A')`.
+		4. **Weighted directed (`weighted=true`, `graph_type=:directed`)**  
+		If the matrix is binary, an error is thrown; otherwise, the matrix
+		is left as-is.
+
+		After this, degree sequences are constructed:
+
+		- For a directed graph, let `k_out(i)` be the out-degree of node `i` and
+		`k_in(j)` the in-degree of node `j`. For each edge `e = i → j`, we create a
+		sample pair `(x_e, y_e) = (k_out(i), k_in(j))`.
+		- For an undirected graph, the adjacency is (again) treated symmetrically,
+		and each undirected edge `{i, j}` contributes two samples:
+		`(k(i), k(j))` and `(k(j), k(i))`, where `k(i)` is the (binary) degree of node `i`.
+
+		Degrees are always treated as binary counts of neighbors, independent of
+		underlying edge weights.
+
+		**Value**
+		A single `Float64`:
+		- Normalized mode (`normalized=true`): Pearson degree assortativity `r`, in
+		the range `[-1, 1]` (up to numerical error) whenever variance is non-zero.
+		- Non-normalized mode (`normalized=false`): covariance of degree values at the
+		two ends of edges.
+		- `NaN` if there are no edges, or if the variance of degree at either end is zero.
+
+		**References**
+		- Newman, M. E. (2002). Assortative mixing in networks. Physical review letters, 89(20), 208701.
+		- Newman, M. E. (2003). Mixing patterns in networks. Physical review E, 67(2), 026126.
+
+		**Examples**
+		```julia
+		using DataFrames
+
+		#	Simple undirected triangle with an attached leaf
+		src = ["n1","n2","n2","n3","n3","n1","n3","n4"]
+		dst = ["n2","n1","n3","n2","n1","n3","n4","n3"]
+		edges = DataFrame(; src, dst)
+
+		#	Degree assortativity, treating graph as undirected and binary
+		r_und = assortativity_degree(edges; graph_type = :undirected, weighted = false)
+
+		#	Degree assortativity, treating edges as directed and binary
+		r_dir = assortativity_degree(edges; graph_type = :directed, weighted = false)
+
+		println("Undirected degree assortativity: ", r_und)
+		println("Directed degree assortativity: ", r_dir)
+		```
+
+		**See Also**
+		`triad_census`, `component_statistics`, `core_decomposition`
+	""" assortativity_degree
 
 ############################
 #   FEATURE CONSTRUCTORS   #
@@ -8603,6 +9488,8 @@ module Large_Graph_Similarity
            recommend_L,
 		   triad_census,
 		   component_statistics,
-		   reciprocity
+		   link_statistics,
+		   reciprocity,
+		   assortativity_degree
 		   
 end # module julia_env

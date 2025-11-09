@@ -482,3 +482,13 @@ suppressPackageStartupMessages({
 # Exporting for Comparison Tests
   directory <- c("D:/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data")
   readr::write_csv(reach_index, file=paste0(directory,"/","Balikatan_AllComm_2Reach_Counts.csv"))
+  
+############################
+#   DEGREE ASSORTATIVITY   #
+############################
+
+#	Degree Assortativity: Undirected/Binary (-0.3470896)
+  igraph::assortativity_degree(simplify(all_comm, remove.loops = TRUE), directed=FALSE)
+  
+#	Degree Assortativity: Undirected/Binary (-0.1653042)
+  igraph::assortativity_degree(simplify(all_comm, remove.loops = TRUE), directed=TRUE)

@@ -3184,6 +3184,10 @@
 #   GLOBAL MEASURES   #
 #######################
 
+#	Construct Nodes File for Comparison Tests
+	nodes = agents[:,(1:2)]
+	rename!(nodes, ["id", "label"])
+
 #	CALCULATE GLOBAL MEASURES
 
 #   Global Reciprocity (Fraction of Reciprocated Edges): 0.004
@@ -3191,11 +3195,22 @@
 	squartini_reciprocity = reciprocity(agent_agent_all_com.edges, weighted=true, mode=:dyad_based, weighted_method=:squartini)
 	arc_reciprocity = reciprocity(agent_agent_all_com.edges, weighted=true, mode=:arc_based)
 
+#	Degree Assortativity: Undirected/Binary vs. Directed/Binary
+	igaph_values = string("iGraph Undirected Degree Assortativity: -0.3470896", ", iGraph Directed Degree Assortativity:  -0.1653042")
+	r_und = assortativity_degree(agent_agent_all_com.edges; graph_type = :undirected, weighted = false)
+	r_dir = assortativity_degree(agent_agent_all_com.edges; graph_type = :directed, weighted = true)
+	print(string("Undirected Degree Assortativity: ", r_und, ", Directed Degree Assortativity: ", r_dir))
+
+#	Link Statistics
+	link_statistics(agent_agent_all_com.edges; nodes = nodes, graph_type = :undirected, weighted = false)
+	link_statistics(agent_agent_all_com.edges; nodes = nodes, graph_type = :undirected, weighted = true)
+	link_statistics(agent_agent_all_com.edges; nodes = nodes, graph_type = :directed, weighted = false)
+	link_statistics(agent_agent_all_com.edges; nodes = nodes, graph_type = :directed, weighted = true)
+
 #	CONDUCT TESTS
 
 #	Reciprocity Tests
 	test_reciprocity_methods()
-
 
 ########################
 #   DIAGNOSTIC TESTS   #
