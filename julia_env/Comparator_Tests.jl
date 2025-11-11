@@ -675,11 +675,11 @@ using Large_Graph_Similarity
         #   NODE-LEVEL MESURES
 
         #   Calculating Normalized Total Degree
-            total_deg_norm = total_degree(symmetric_edgelist; weighted=true, normalize=false, drop_self_loops=false,
+            total_deg_norm = total_degree(symmetric_edgelist; directed=false, weighted=true, normalize=true, drop_self_loops=false,
 								          count_self_loops_once=true, agg_func = maximum, n=nrow(ni))
 
         #   COME BACK HERE!! 
-        #   Normalization appears incorrect. Checking. 
+        #   Complete Node-Level Measures
 
 
 

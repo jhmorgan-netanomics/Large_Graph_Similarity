@@ -1230,40 +1230,59 @@ THE SOFTWARE.
 	""" out_degree
 
 #	Total Degree
-	function total_degree(edges::DataFrame; weighted::Bool = true, normalize::Bool = false,
-                          agg_func::Function = sum, ignore_direction::Bool = false, drop_self_loops::Bool = false,
-						  count_self_loops_once::Bool = true, n::Union{Nothing,Int} = nothing, atol::Float64 = 1e-12)
+	function total_degree(edges::DataFrame;
+						weighted::Bool = true,
+						normalize::Bool = false,
+						agg_func::Function = sum,
+						directed::Bool = true,
+						drop_self_loops::Bool = false,
+						count_self_loops_once::Bool = true,
+						n::Union{Nothing,Int} = nothing,
+						atol::Float64 = 1e-12)
 		"""
 		Args:
-			edges::DataFrame: Edge list with :src, :dst, and optionally :weight columns. 
-			weighted::Bool: Use edge weights if available (default = true).
-			normalize::Bool: If true, returns Freeman-normalized total-degree (default = false).
-			agg_func::Function: Function to aggregate multi-edges (default = sum).
-			ignore_direction::Bool: If true, treat as undirected for the total metric (i.e., pass directed=false to 
-									freeman_degree_normalization when normalize=true).
-			drop_self_loops::Bool: If true, exclude self-loops (u→u) entirely (default = false). Only respected when normalize=false.
-			count_self_loops_once::Bool: When not dropping loops and directed, count each loop once (default = true). 
-										Only respected when normalize=false.
-			n::Union{Nothing,Int}: Optional graph order for normalization (handles isolates). Passed directly to freeman_degree_normalization 
-								   when normalize=true.
-			atol::Float64: Tolerance for symmetry tests (default = 1e-12). Passed through to
-			               freeman_degree_normalization when normalize=true.
+			edges::DataFrame:
+				Edge list with :src, :dst, and optionally :weight columns.
+			weighted::Bool:
+				Use edge weights if available (default = true).
+			normalize::Bool:
+				If true, returns Freeman-normalized total-degree (default = false).
+			agg_func::Function:
+				Function to aggregate multi-edges (default = sum).
+			directed::Bool:
+				Treat graph as directed (true) or undirected (false).
+				When false and normalize=true, calls freeman_degree_normalization
+				with directed=false (undirected Freeman degree).
+			drop_self_loops::Bool:
+				If true, exclude self-loops (u→u) entirely (default = false).
+				Only respected when normalize=false.
+			count_self_loops_once::Bool:
+				When not dropping loops and directed, count each loop once
+				(default = true). Only respected when normalize=false.
+			n::Union{Nothing,Int}:
+				Optional graph order for normalization (handles isolates).
+				Passed directly to freeman_degree_normalization when normalize=true.
+			atol::Float64:
+				Tolerance for symmetry tests (default = 1e-12). Passed through to
+				freeman_degree_normalization when normalize=true.
 		Returns:
-			DataFrame Columns: 
-				:node → node ID (same type/order as produced by _edgelist_to_sparse_matrix) 
-				:total_degree → unnormalized degree/strength, or Freeman-normalized value
+			DataFrame:
+				Columns:
+					:node         → node ID (same type/order as produced by _edgelist_to_sparse_matrix)
+					:total_degree → unnormalized degree/strength, or Freeman-normalized value
 		Notes:
 			- When normalize == false, this function computes total degree/strength directly
-			  from a sparse adjacency, respecting ignore_direction, drop_self_loops, and
+			  from a sparse adjacency, respecting directed, drop_self_loops, and
 			  count_self_loops_once.
 			- When normalize == true, this function delegates the computation to
-			  freeman_degree_normalization(edges; mode = :all, directed = !ignore_direction, ...)
+			  freeman_degree_normalization(edges; mode = :all, directed = directed, ...)
 			  and simply renames the :freeman_degree column to :total_degree.
 			- In normalized mode, drop_self_loops and count_self_loops_once are not
 			  applied; loop handling follows freeman_degree_normalization's Freeman-style
 			  conventions. If you need custom loop handling, call freeman_degree_normalization
 			  directly on a pre-processed edge list.
 		"""
+
 		#	Validation
 			if !hasproperty(edges, :src) || !hasproperty(edges, :dst)
 				throw(ArgumentError("edges DataFrame must have :src and :dst columns"))
@@ -1285,7 +1304,7 @@ THE SOFTWARE.
 					freeman_df = freeman_degree_normalization(
 						edges;
 						mode      = :all,
-						directed  = !ignore_direction,   # ignore_direction=true ⇒ treat as undirected
+						directed  = directed,
 						bipartite = false,
 						types     = nothing,
 						weighted  = weighted,
@@ -1302,6 +1321,7 @@ THE SOFTWARE.
 			end
 
 		#	Unnormalized path: compute directly from adjacency
+
 		#	Aggregate multi-edges
 			clean_edges = _aggregate_multi_edges(edges; agg_func = agg_func)
 
@@ -1309,8 +1329,8 @@ THE SOFTWARE.
 			adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted = weighted)
 			n_adj = size(adj, 1)
 
-		#	Optional symmetrization (for undirected / ignore_direction)
-			if ignore_direction
+		#	Optional symmetrization for undirected case
+			if !directed
 				adj = max.(adj, adj')
 			end
 
@@ -1324,23 +1344,24 @@ THE SOFTWARE.
 			end
 
 		#	Compute total degree / strength (unnormalized)
-			if ignore_direction
+			if !directed
 				#	Undirected total degree: row or column sums are identical when adj is symmetric
 					total_deg_values = vec(sum(adj, dims = 1))
 			else
-				in_deg  = vec(sum(adj, dims = 1))
-				out_deg = vec(sum(adj, dims = 2))
+				#	Directed: in + out, with configurable loop counting
+					in_deg  = vec(sum(adj, dims = 1))
+					out_deg = vec(sum(adj, dims = 2))
 
-				if drop_self_loops
-					#	Self-loops already removed above; just sum in + out
-						total_deg_values = in_deg .+ out_deg
-				elseif count_self_loops_once
-					#	Freeman-style: loops counted once via (in + out − diag)
-						total_deg_values = (in_deg .+ out_deg) .- collect(diag(adj))
-				else
-					#	Pure graph-theoretic: loop contributes twice (in and out)
-						total_deg_values = in_deg .+ out_deg
-				end
+					if drop_self_loops
+						#	Self-loops already removed above; just sum in + out
+							total_deg_values = in_deg .+ out_deg
+					elseif count_self_loops_once
+						#	Freeman-style: loops counted once via (in + out − diag)
+							total_deg_values = (in_deg .+ out_deg) .- collect(diag(adj))
+					else
+						#	Pure graph-theoretic: loop contributes twice (in and out)
+							total_deg_values = in_deg .+ out_deg
+					end
 			end
 
 		#	Assembling Result
