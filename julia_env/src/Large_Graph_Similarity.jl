@@ -1025,13 +1025,16 @@ THE SOFTWARE.
 	function in_degree(edges::DataFrame; 
 					weighted::Bool=true, 
 					normalize::Bool=false,
-					agg_func::Function=sum)
+					agg_func::Function=sum,
+					n::Union{Nothing,Int} = nothing)
 		"""
 		Args:
 			edges::DataFrame: edge list with src, dst, and optionally weight columns
 			weighted::Bool: use edge weights if available (default = true)
 			normalize::Bool: if true, returns Freeman-normalized in-degree via freeman_degree_normalization (default = false)
 			agg_func::Function: function to aggregate multi-edges (default = sum)
+			n::Union{Nothing,Int}: Optional graph order for normalization (handles isolates). Passed directly to freeman_degree_normalization 
+								   when normalize=true.
 		Returns:
 			DataFrame: columns [node, in_degree]
 		Notes:
@@ -1054,7 +1057,8 @@ THE SOFTWARE.
 
 		#	Normalized path: delegate to Freeman with mode=:in
 			if normalize
-				df = freeman_degree_normalization(clean_edges; mode=:in, directed=true, bipartite=false, weighted=weighted, agg_func=agg_func)
+				df = freeman_degree_normalization(clean_edges; mode=:in, directed=true, bipartite=false, weighted=weighted, agg_func=agg_func,
+												  n = n)
 				rename!(df, :freeman_degree => :in_degree)
 				return df
 			end
@@ -1076,6 +1080,8 @@ THE SOFTWARE.
 		- `weighted::Bool`: Use edge weights if available (default: `true`)
 		- `normalize::Bool`: Apply Freeman normalization if `true` (default: `false`)
 		- `agg_func::Function`: Function to aggregate multi-edges (default: `sum`)
+		- `n::Union{Nothing,Int}`: Optional graph order for normalization (handles isolates). Passed directly to freeman_degree_normalization 
+								   when normalize=true.
 
 		**Returns**
 		`DataFrame` with columns:
@@ -1123,13 +1129,16 @@ THE SOFTWARE.
 	function out_degree(edges::DataFrame; 
 						weighted::Bool=true, 
 						normalize::Bool=false,
-						agg_func::Function=sum)
+						agg_func::Function=sum, 
+						n::Union{Nothing,Int} = nothing)
 		"""
 		Args:
 			edges::DataFrame: edge list with src, dst, and optionally weight columns
 			weighted::Bool: use edge weights if available (default = true)
 			normalize::Bool: if true, returns Freeman-normalized out-degree via freeman_degree_normalization (default = false)
 			agg_func::Function: function to aggregate multi-edges (default = sum)
+			n::Union{Nothing,Int}: Optional graph order for normalization (handles isolates). Passed directly to freeman_degree_normalization 
+			                       when normalize=true.
 		Returns:
 			DataFrame: columns [node, out_degree]
 		Notes:
@@ -1152,7 +1161,8 @@ THE SOFTWARE.
 
 		#	Normalized path: delegate to Freeman with mode=:out
 			if normalize
-				df = freeman_degree_normalization(clean_edges; mode=:out, directed=true, bipartite=false, weighted=weighted, agg_func=agg_func)
+				df = freeman_degree_normalization(clean_edges; mode=:out, directed=true, bipartite=false, weighted=weighted, agg_func=agg_func,
+												  n = n)
 				rename!(df, :freeman_degree => :out_degree)
 				return df
 			end
@@ -1174,6 +1184,8 @@ THE SOFTWARE.
 		- `weighted::Bool`: Use edge weights if available (default: `true`)
 		- `normalize::Bool`: Apply Freeman normalization if `true` (default: `false`)
 		- `agg_func::Function`: Function to aggregate multi-edges (default: `sum`)
+		- `n::Union{Nothing,Int}`: Optional graph order for normalization (handles isolates). Passed directly to freeman_degree_normalization 
+								   when normalize=true.
 
 		**Returns**
 		`DataFrame` with columns:
@@ -1218,113 +1230,120 @@ THE SOFTWARE.
 	""" out_degree
 
 #	Total Degree
-	function total_degree(edges::DataFrame; 
-						weighted::Bool=true, 
-						normalize::Bool=false,
-						agg_func::Function=sum,
-						ignore_direction::Bool=false,
-						drop_self_loops::Bool=false,
-						count_self_loops_once::Bool=true,
-						atol::Float64=1e-12)
+	function total_degree(edges::DataFrame; weighted::Bool = true, normalize::Bool = false,
+                          agg_func::Function = sum, ignore_direction::Bool = false, drop_self_loops::Bool = false,
+						  count_self_loops_once::Bool = true, n::Union{Nothing,Int} = nothing, atol::Float64 = 1e-12)
 		"""
 		Args:
-			edges::DataFrame: edge list with src, dst, and optionally weight columns
-			weighted::Bool: use edge weights if available (default = true)
-			normalize::Bool: if true, returns Freeman-normalized total-degree (default = false)
-			agg_func::Function: function to aggregate multi-edges (default = sum)
-			ignore_direction::Bool: if true, treat as undirected for the total metric
-			drop_self_loops::Bool: if true, exclude self-loops (u→u) entirely (default = false)
-			count_self_loops_once::Bool: when not dropping loops and directed, count each loop once (default = true)
-			atol::Float64: tolerance for symmetry tests (default = 1e-12)
+			edges::DataFrame: Edge list with :src, :dst, and optionally :weight columns. 
+			weighted::Bool: Use edge weights if available (default = true).
+			normalize::Bool: If true, returns Freeman-normalized total-degree (default = false).
+			agg_func::Function: Function to aggregate multi-edges (default = sum).
+			ignore_direction::Bool: If true, treat as undirected for the total metric (i.e., pass directed=false to 
+									freeman_degree_normalization when normalize=true).
+			drop_self_loops::Bool: If true, exclude self-loops (u→u) entirely (default = false). Only respected when normalize=false.
+			count_self_loops_once::Bool: When not dropping loops and directed, count each loop once (default = true). 
+										Only respected when normalize=false.
+			n::Union{Nothing,Int}: Optional graph order for normalization (handles isolates). Passed directly to freeman_degree_normalization 
+								   when normalize=true.
+			atol::Float64: Tolerance for symmetry tests (default = 1e-12). Passed through to
+			               freeman_degree_normalization when normalize=true.
 		Returns:
-			DataFrame: columns [node, total_degree]
+			DataFrame Columns: 
+				:node → node ID (same type/order as produced by _edgelist_to_sparse_matrix) 
+				:total_degree → unnormalized degree/strength, or Freeman-normalized value
 		Notes:
-			- Order of operations:
-			1) Build sparse adjacency (weighted or unweighted)
-			2) Symmetrize if ignore_direction=true (A ← max(A, A'))
-			3) If drop_self_loops=true, zero the diagonal once
-			4) Compute totals
-			- Self-loop behavior:
-			* By default (count_self_loops_once=true), a self-loop contributes its weight once
-				to total-degree (consistent with Freeman's numerator row + col − diag and ORA outputs)
-			* If drop_self_loops=true, loops contribute nothing
-			* If count_self_loops_once=false, each self-loop contributes twice (once to in-degree,
-				once to out-degree), matching pure graph-theoretic totals
-			- When normalize=true, applies Freeman's :all normalization on the prepared matrix
+			- When normalize == false, this function computes total degree/strength directly
+			  from a sparse adjacency, respecting ignore_direction, drop_self_loops, and
+			  count_self_loops_once.
+			- When normalize == true, this function delegates the computation to
+			  freeman_degree_normalization(edges; mode = :all, directed = !ignore_direction, ...)
+			  and simply renames the :freeman_degree column to :total_degree.
+			- In normalized mode, drop_self_loops and count_self_loops_once are not
+			  applied; loop handling follows freeman_degree_normalization's Freeman-style
+			  conventions. If you need custom loop handling, call freeman_degree_normalization
+			  directly on a pre-processed edge list.
 		"""
-
 		#	Validation
 			if !hasproperty(edges, :src) || !hasproperty(edges, :dst)
-				throw(ArgumentError("edges DataFrame must have src and dst columns"))
+				throw(ArgumentError("edges DataFrame must have :src and :dst columns"))
 			end
 
-		#	Handle empty edge list
+		#	Early return for empty edge list
 			if nrow(edges) == 0
-				return DataFrame(node=[], total_degree=Float64[])
+				return DataFrame(node = Any[], total_degree = Float64[])
 			end
 
+		#	Normalized path: delegate to freeman_degree_normalization
+			if normalize
+				#	Loop-handling flags are not applied in normalized mode
+					if drop_self_loops || !count_self_loops_once
+						throw(ArgumentError("total_degree: drop_self_loops and count_self_loops_once are not supported when normalize=true; pre-process edges and call freeman_degree_normalization directly if needed."))
+					end
+
+				#	Call Freeman helper explicitly
+					freeman_df = freeman_degree_normalization(
+						edges;
+						mode      = :all,
+						directed  = !ignore_direction,   # ignore_direction=true ⇒ treat as undirected
+						bipartite = false,
+						types     = nothing,
+						weighted  = weighted,
+						agg_func  = agg_func,
+						n         = n,
+						atol      = atol
+					)
+
+				#	Rename column to align with total_degree API
+					rename!(freeman_df, :freeman_degree => :total_degree)
+
+				#	Assembling Result
+					return freeman_df
+			end
+
+		#	Unnormalized path: compute directly from adjacency
 		#	Aggregate multi-edges
-			clean_edges = _aggregate_multi_edges(edges; agg_func=agg_func)
+			clean_edges = _aggregate_multi_edges(edges; agg_func = agg_func)
 
 		#	Build sparse adjacency + node order
-			adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=weighted)
-			n = size(adj, 1)
+			adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted = weighted)
+			n_adj = size(adj, 1)
 
-		#	Optional symmetrization
+		#	Optional symmetrization (for undirected / ignore_direction)
 			if ignore_direction
 				adj = max.(adj, adj')
 			end
 
-		#	Drop self-loops once
+		#	Drop self-loops once (before any degree computation)
 			if drop_self_loops
 				adj = copy(adj)
-				for i in 1:n
+				for i in 1:n_adj
 					adj[i, i] = 0.0
 				end
 				dropzeros!(adj)
 			end
 
-		#	Unnormalized path
-			if !normalize
-				if ignore_direction
-					total_deg_values = vec(sum(adj, dims=1))
-				else
-					in_deg  = vec(sum(adj, dims=1))
-					out_deg = vec(sum(adj, dims=2))
-					if drop_self_loops
-						total_deg_values = in_deg .+ out_deg
-					elseif count_self_loops_once
-						total_deg_values = (in_deg .+ out_deg) .- collect(diag(adj))
-					else
-						total_deg_values = in_deg .+ out_deg
-					end
-				end
-				return DataFrame(node = idx_to_node, total_degree = total_deg_values)
-			end
-
-		#	Normalized path
-			row_sums = vec(sum(adj, dims=2))
-			col_sums = vec(sum(adj, dims=1))
-			diag_vec = collect(diag(adj))
-			numerator = row_sums .+ col_sums .- diag_vec
-
-			is_sym = ignore_direction ? true : _is_symmetric(adj; directed=true, atol=atol)
-
-			if weighted
-				nz = nonzeros(adj)
-				V = (length(nz) > 0) ? maximum(nz) : 1.0
+		#	Compute total degree / strength (unnormalized)
+			if ignore_direction
+				#	Undirected total degree: row or column sums are identical when adj is symmetric
+					total_deg_values = vec(sum(adj, dims = 1))
 			else
-				V = 1.0
+				in_deg  = vec(sum(adj, dims = 1))
+				out_deg = vec(sum(adj, dims = 2))
+
+				if drop_self_loops
+					#	Self-loops already removed above; just sum in + out
+						total_deg_values = in_deg .+ out_deg
+				elseif count_self_loops_once
+					#	Freeman-style: loops counted once via (in + out − diag)
+						total_deg_values = (in_deg .+ out_deg) .- collect(diag(adj))
+				else
+					#	Pure graph-theoretic: loop contributes twice (in and out)
+						total_deg_values = in_deg .+ out_deg
+				end
 			end
 
-			N = n
-			denom = is_sym ? (V * (N - 1)) : (2 * V * (N - 1))
-			if denom == 0.0
-				return DataFrame(node = idx_to_node, total_degree = zeros(Float64, n))
-			end
-
-			total_deg_values = numerator ./ denom
-
+		#	Assembling Result
 			return DataFrame(node = idx_to_node, total_degree = total_deg_values)
 	end
 	@doc raw"""
@@ -1492,34 +1511,36 @@ THE SOFTWARE.
 		- `eigenvector_centrality`: Related authority measure
 	""" degree_ratio
 
-#	Freeman Degree Normalization (edges → sparse; uni/bipartite; directed/undirected)
+#	Freeman Degree Normalization
 	function freeman_degree_normalization(edges::DataFrame;
-	                                      mode::Symbol = :all,
-	                                      directed::Bool = true,
-	                                      bipartite::Bool = false,
-	                                      types::Union{Nothing,AbstractVector{Bool}} = nothing,
-	                                      weighted::Bool = true,
-	                                      agg_func::Function = sum,
-	                                      atol::Float64 = 1e-12)
+										mode::Symbol = :all,
+										directed::Bool = true,
+										bipartite::Bool = false,
+										types::Union{Nothing,AbstractVector{Bool}} = nothing,
+										weighted::Bool = true,
+										agg_func::Function = sum,
+										n::Union{Nothing,Int} = nothing,
+										atol::Float64 = 1e-12)
 		"""
 		Args:
 			edges::DataFrame: edge list with :src, :dst, and optional :weight
 			mode::Symbol: :all | :out | :in (default = :all)
 			directed::Bool: treat network as directed (default = true)
-			bipartite::Bool: indicate bipartite network; requires `types` (default = false)
+			bipartite::Bool: indicate bipartite network; requires types (default = false)
 			types::Union{Nothing,AbstractVector{Bool}}: node-mode flags aligned to node order (true = first mode)
 			weighted::Bool: use edge weights if available (default = true)
 			agg_func::Function: aggregation for parallel edges (default = sum)
-			atol::Float64: tolerance for symmetry test when `directed=true` (default = 1e-12)
+			atol::Float64: tolerance for symmetry test when directed=true (default = 1e-12)
+			n::Union{Nothing,Int}: explicit node count for normalization; if nothing, derive from adjacency (default = nothing)
 		Returns:
 			DataFrame: columns [node, freeman_degree]
 		Notes:
-			Builds a (possibly weighted) sparse adjacency via existing helpers, then applies
-			Freeman-style normalization *aligned to your R/Python reference*:
-			- mode=:all → symmetric:   divide by V*(N−1); asymmetric: divide by 2*V*(N−1)
-			- mode=:out → symmetric:   divide by V*(N−1); asymmetric: divide by V*N
-			- mode=:in  → symmetric:   divide by V*(N−1); asymmetric: divide by V*N
-			where N is the number of columns of A (second mode in bipartite; n in unimodal).
+			- Applies Freeman (1979) degree centrality normalization
+			- For directed: denominators use (n-1) not n per Freeman's formulation
+			- Self-loops excluded from in/out degree per standard practice
+			- Weighted networks scale by V (max edge weight)
+			- If n supplied, uses it for normalization (allows including isolates in denominator)
+			- If n not supplied, uses number of nodes in adjacency matrix (connected nodes only)
 		"""
 
 		#	Validation
@@ -1530,137 +1551,193 @@ THE SOFTWARE.
 				throw(ArgumentError("mode must be :all, :out, or :in"))
 			end
 			if nrow(edges) == 0
-				return DataFrame(node=Any[], freeman_degree=Float64[])
+				return DataFrame(node = Any[], freeman_degree = Float64[])
 			end
 
 		#	Aggregate multi-edges via existing helper
-			clean_edges = _aggregate_multi_edges(edges; agg_func=agg_func)
+			clean_edges = _aggregate_multi_edges(edges; agg_func = agg_func)
 
-		#	Build sparse adjacency and node order via existing helper
-			adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=weighted)
+		#	Build sparse adjacency and node order
+			adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted = weighted)
 
 		#	Compute marginals and diagonal
-			row_sums = vec(sum(adj, dims=2))               # out-strength
-			col_sums = vec(sum(adj, dims=1))               # in-strength
-			diagonal = collect(diag(adj))                  # self-loop weights as dense vector
+			row_sums = vec(sum(adj, dims = 2))      # out-strength/degree
+			col_sums = vec(sum(adj, dims = 1))      # in-strength/degree
+			diagonal = collect(diag(adj))           # self-loop weights
 
-		#	Determine V (max edge weight if weighted; else 1.0)
+		#	Determine V (max edge weight for normalization)
 			V = (weighted && hasproperty(clean_edges, :weight) && !isempty(clean_edges.weight)) ?
-			    maximum(clean_edges.weight) : 1.0
+				maximum(clean_edges.weight) : 1.0
 
-		#	Symmetry detection (undirected or directed-but-symmetric)
-			is_sym = _is_symmetric(adj; directed=directed, atol=atol)
+		#	Determine N (use explicit n if provided, otherwise adjacency size)
+			adj_n = size(adj, 1)
+			N = isnothing(n) ? adj_n : n
+			R = N  # default for unimodal
 
-		#	Determine N & R (bipartite or unimodal)
-			n = size(adj, 1)
+			#	Validate explicit n if provided
+			if !isnothing(n) && n < adj_n
+				throw(ArgumentError("Supplied n ($n) cannot be less than number of connected nodes ($adj_n)"))
+			end
 
-		#	Initialize defaults (unimodal)
-			N = n
-			R = n
-
-		#	Override for bipartite if requested
 			if bipartite
 				if types === nothing
-					throw(ArgumentError("bipartite=true requires a `types::Vector{Bool}`"))
+					throw(ArgumentError("bipartite=true requires a types::Vector{Bool}"))
 				end
-				if length(types) != n
-					throw(ArgumentError("length(types) must equal number of nodes ($n)"))
+				if length(types) != adj_n
+					throw(ArgumentError("length(types) must equal number of nodes in adjacency ($adj_n)"))
 				end
 				first_mode, second_mode = _bipartite_counts(types)
 				R = first_mode
-				N = second_mode
+				#	For bipartite, N should be second mode size unless explicitly overridden
+				if isnothing(n)
+					N = second_mode
+				end
 			end
 
-		#	Edge cases: insufficient neighbors
+		#	Edge case: insufficient neighbors
 			if N ≤ 1
-				return DataFrame(node = idx_to_node, freeman_degree = zeros(Float64, n))
+				return DataFrame(node = idx_to_node, freeman_degree = zeros(Float64, adj_n))
 			end
 
-		#	Apply denominators by mode (match R/Python reference exactly)
-			numerator = zeros(Float64, n)
+		#	Initialize
+			numerator = zeros(Float64, adj_n)
 			denom = 0.0
-			if mode == :all
-				#	Total-degree numerator
-					numerator .= row_sums .+ col_sums .- diagonal
-				#	Denominator by symmetry
-					denom = is_sym ? (V * (N - 1)) : (2 * V * (N - 1))
-			elseif mode == :out
-				#	Out-degree numerator
-					numerator .= row_sums
-				#	Symmetric → V*(N−1); Asymmetric (directed) → V*N
-					denom = is_sym ? (V * (N - 1)) : (V * N)
+
+		#	Compute numerator and denominator based on network type
+			if !directed
+				#	UNDIRECTED CASE
+				#	For undirected: C_D(i) = degree(i) / (V * (N - 1))
+					is_sym_undirected = issymmetric(adj)
+					
+					#	Raw total from both directions
+					deg_raw = row_sums .+ col_sums .- diagonal
+					
+					#	Convert to actual degree (divide by 2 if symmetric storage)
+					degree = is_sym_undirected ? (deg_raw ./ 2) : deg_raw
+					
+					#	All modes equivalent for undirected
+					numerator .= degree
+					denom = V * (N - 1)
+
 			else
-				#	In-degree numerator
-					numerator .= col_sums
-				#	Symmetric → V*(N−1); Asymmetric (directed) → V*N
-					denom = is_sym ? (V * (N - 1)) : (V * N)
+				#	DIRECTED CASE
+				#	Check if empirically symmetric
+					is_sym = _is_symmetric(adj; directed = directed, atol = atol)
+
+					if mode == :all
+						#	Total-degree: in + out - self-loops
+							numerator .= row_sums .+ col_sums .- diagonal
+						#	Freeman: normalize by 2(n-1) for directed, (n-1) for symmetric
+							denom = is_sym ? (V * (N - 1)) : (2 * V * (N - 1))
+
+					elseif mode == :out
+						#	Out-degree (exclude self-loops per Freeman)
+							numerator .= row_sums .- diagonal
+						#	Freeman: always normalize by (n-1) for directed
+							denom = V * (N - 1)
+
+					else  # mode == :in
+						#	In-degree (exclude self-loops per Freeman)
+							numerator .= col_sums .- diagonal
+						#	Freeman: always normalize by (n-1) for directed
+							denom = V * (N - 1)
+					end
 			end
 
 		#	Protect against zero denominator
 			if denom == 0.0
-				return DataFrame(node = idx_to_node, freeman_degree = zeros(Float64, n))
+				return DataFrame(node = idx_to_node, freeman_degree = zeros(Float64, adj_n))
 			end
 
 		#	Compute normalized scores
 			scores = numerator ./ denom
 
-		#	Assembling Result
+		#	Assembling result
 			return DataFrame(node = idx_to_node, freeman_degree = scores)
 	end
 	@doc raw"""
-	**Description**
-	Compute Freeman-normalized degree centrality for an edge list (supports weighted/unweighted, directed/undirected, and optional bipartite via `types`), aligned to the R/Python reference you provided.
+		freeman_degree_normalization(edges::DataFrame; mode=:all, n=nothing, ...) -> DataFrame
 
-	**Usage**
-	`freeman_degree_normalization(edges::DataFrame; mode::Symbol=:all, directed::Bool=true, bipartite::Bool=false, types::Union{Nothing,AbstractVector{Bool}}=nothing, weighted::Bool=true, agg_func::Function=sum, atol::Float64=1e-12)`
+		Compute Freeman-normalized degree centrality for nodes in a network.
 
-	**Details**
-	Let `A` be the (possibly weighted) adjacency matrix. The function:
-	- Builds `A` from `edges` (uses weights if present).
-	- Determines whether the graph is **symmetric** (undirected or directed-but-symmetric).
-	- Handles bipartite graphs via `types` and sets `N` and `R` as the sizes of the two modes; otherwise `N = R = ncol(A)`.
-	- Sets `V` to the **maximum edge weight** if weighted, else `V = 1`.
+		**Arguments**
+		- `edges::DataFrame`: Edge list with `:src` and `:dst` columns, optionally `:weight`
+		- `mode::Symbol`: `:all` (total), `:out` (out-degree), or `:in` (in-degree)
+		- `directed::Bool`: Treat as directed network (default: `true`)
+		- `bipartite::Bool`: Indicate bipartite network (default: `false`)
+		- `types::Union{Nothing,Vector{Bool}}`: Node types for bipartite (true = first mode)
+		- `weighted::Bool`: Use edge weights (default: `true`)
+		- `agg_func::Function`: Aggregate parallel edges (default: `sum`)
+		- `atol::Float64`: Tolerance for symmetry detection (default: `1e-12`)
+		- `n::Union{Nothing,Int}`: **Explicit node count for normalization** (default: `nothing`)
+			- If provided: Uses this value in denominator (allows including isolates)
+			- If `nothing`: Uses number of connected nodes from adjacency matrix
 
-	**Normalization denominators (Freeman convention, matching R/Python):**
-	- **Mode `:all`**: numerator = `rowSums(A) + colSums(A) − diag(A)`.  
-	Symmetric → divide by `V*(N−1)`; Asymmetric → divide by `2*V*(N−1)`.
-	- **Mode `:out`**: numerator = `rowSums(A)`.  
-	Symmetric → divide by `V*(N−1)`; Asymmetric → divide by `V*N`.
-	- **Mode `:in`**: numerator = `colSums(A)`.  
-	Symmetric → divide by `V*(N−1)`; Asymmetric → divide by `V*N`.
+		**Returns**
+		`DataFrame` with columns:
+		- `:node`: Node identifier
+		- `:freeman_degree`: Normalized degree ∈ [0,1]
 
-	For bipartite inputs, `N` is the **second-mode** size (number of columns of `A`); normalization uses this `N` for the target mode’s denominator.
+		**Details**
+		
+		Implements Freeman's (1979) degree centrality normalization to enable comparison
+		across networks of different sizes (Wasserman & Faust, 1994, p. 178-180).
+		
+		**Node Count Behavior:**
+		
+		The `n` parameter controls normalization:
+		- `n = nothing`: Uses only connected nodes (default behavior)
+		- `n = 100`: Normalizes as if network has 100 nodes total
+		
+		This affects absolute values but preserves rank ordering:
+		```julia
+			# 3 connected nodes
+			freeman_degree_normalization(edges)  # n=3, denominator uses 2
+			# Node with degree 2 → normalized = 1.0
+			
+			# Same network, but specify n=10 (7 implicit isolates)
+			freeman_degree_normalization(edges; n=10)  # denominator uses 9
+			# Same node → normalized ≈ 0.22
+		```
 
-	**Edge Cases**
-	If `N ≤ 1` or the denominator is zero, returns zeros.
+		**Normalization Formulas:**
+		
+		For **directed networks**:
+		- In-degree: C'_D(i) = d_in(i) / [(n-1) × V]
+		- Out-degree: C'_D(i) = d_out(i) / [(n-1) × V]
+		- Total: C'_D(i) = [d_in(i) + d_out(i)] / [2(n-1) × V]
+		
+		For **undirected networks**:
+		- Degree: C'_D(i) = d(i) / [(n-1) × V]
+		
+		Where:
+		- n = total nodes (explicit via parameter or derived from edges)
+		- V = maximum edge weight (1 for binary networks)
+		- Self-loops excluded from in/out calculations
 
-	**Value**
-	A `DataFrame` with:
-	- `node`: Node identifiers (same order as produced by `_edgelist_to_sparse_matrix`).
-	- `freeman_degree::Vector{Float64}`: Normalized degree centrality scores.
+		**Examples**
+		```julia
+			# Binary directed network
+			edges = DataFrame(src=["A","B","C"], dst=["B","C","A"])
+			
+			# Using connected nodes only
+			freeman_degree_normalization(edges; mode=:out)
+			# n=3, each node normalized by (3-1)=2 → 0.5
+			
+			# Including isolates in calculation
+			freeman_degree_normalization(edges; mode=:out, n=10)
+			# n=10, each node normalized by (10-1)=9 → 0.111
+		```
+		**References**
+		- Freeman, L. C. (1979). Centrality in social networks: Conceptual clarification. 
+		*Social Networks*, 1(3), 215-239.
+		- Wasserman, S., & Faust, K. (1994). *Social Network Analysis: Methods and Applications*. 
+		Cambridge University Press.
 
-	**Examples**
-	```julia
-	using DataFrames, SparseArrays
-
-	#	Undirected, unweighted triangle
-		edges = DataFrame(src=[1,2,3], dst=[2,3,1])
-		scores = freeman_degree_normalization(edges; mode=:all, directed=false)
-		@show scores
-
-	#	Directed, weighted (in/out use V*(N−1) if symmetric, V*N if asymmetric)
-		edges_w = DataFrame(src=[1,1,2], dst=[2,3,3], weight=[2.0, 1.0, 1.5])
-		scores_out = freeman_degree_normalization(edges_w; mode=:out, directed=true, weighted=true)
-		@show scores_out
-
-	#	Bipartite example (types must align with node order from helper)
-		edges_bi = DataFrame(src=["A","B","C","B"], dst=["D","D","E","E"])
-		types = [true,true,true,false,false]
-		scores_in = freeman_degree_normalization(edges_bi; mode=:in, directed=false, bipartite=true, types=types)
-		@show scores_in
-
-	**References**
-	Freeman, L. C. (1978). Centrality in social networks conceptual clarification. Social Networks, 1(3), 215–239.
+		**See Also**
+		- `in_degree`: Raw in-degree calculation
+		- `out_degree`: Raw out-degree calculation
+		- `total_degree`: Raw total degree calculation
 	""" freeman_degree_normalization
 
 #   LOCAL STRUCTURE
@@ -2521,21 +2598,20 @@ THE SOFTWARE.
 	- `normalization`: Method used
 
 	**Examples**
-```julia
-	# Weighted network with varied reciprocity
-	edges = DataFrame(
-		src = ["A", "B", "C", "D", "E"],
-		dst = ["B", "A", "D", "C", "F"],
-		weight = [5, 4, 1, 1, 6]
-	)
-	
-	# Raw local reciprocity
-	local_rec = local_weighted_reciprocity(edges)
-	
-	# With rank normalization
-	local_rec_ranked = local_weighted_reciprocity(edges; normalize=:rank)
-```
-
+	```julia
+		# Weighted network with varied reciprocity
+		edges = DataFrame(
+			src = ["A", "B", "C", "D", "E"],
+			dst = ["B", "A", "D", "C", "F"],
+			weight = [5, 4, 1, 1, 6]
+		)
+		
+		# Raw local reciprocity
+		local_rec = local_weighted_reciprocity(edges)
+		
+		# With rank normalization
+		local_rec_ranked = local_weighted_reciprocity(edges; normalize=:rank)
+	```
 	**See Also**
 	`reciprocity` (global measure)
 
@@ -3407,19 +3483,18 @@ THE SOFTWARE.
 	Returns a `Float64` modularity score in range [-1, 1], where higher values indicate better community structure.
 
 	**Examples**
-```julia
-	using SparseArrays
-	
-	#	Simple unweighted graph
-		adj = sparse([1,2,3], [2,3,1], ones(3), 3, 3)
-		membership = [1, 1, 2]
-		Q = calculate_modularity(adj, membership; weighted=false)
-	
-	#	Weighted directed graph
-		adj = sparse([1,2], [2,3], [0.5, 1.0], 3, 3)
-		Q = calculate_modularity(adj, membership; directed=true)
-```
-
+	```julia
+		using SparseArrays
+		
+		#	Simple unweighted graph
+			adj = sparse([1,2,3], [2,3,1], ones(3), 3, 3)
+			membership = [1, 1, 2]
+			Q = calculate_modularity(adj, membership; weighted=false)
+		
+		#	Weighted directed graph
+			adj = sparse([1,2], [2,3], [0.5, 1.0], 3, 3)
+			Q = calculate_modularity(adj, membership; directed=true)
+	```
 	**References**
 	Newman & Girvan (2004). "Finding and evaluating community structure in networks." Phys Rev E 69:026113
 	""" calculate_modularity
@@ -3933,25 +4008,24 @@ THE SOFTWARE.
 	- `node_names::Vector`: Original node identifiers
 
 	**Examples**
-```julia
-	# Undirected unweighted (default)
-	result = leiden_community_detection(edges)
-	
-	# Directed weighted with isolates
-	result = leiden_community_detection(edges;
-	                                   nodes=node_df,
-	                                   weighted=true,
-	                                   directed=true,
-	                                   resolution=0.8,
-	                                   n_runs=10,
-	                                   seed=42)
-	
-	# Multiple runs for robustness
-	result = leiden_community_detection(edges;
-	                                   n_runs=10,
-	                                   weighted=true)
-```
-
+	```julia
+		# Undirected unweighted (default)
+		result = leiden_community_detection(edges)
+		
+		# Directed weighted with isolates
+		result = leiden_community_detection(edges;
+										nodes=node_df,
+										weighted=true,
+										directed=true,
+										resolution=0.8,
+										n_runs=10,
+										seed=42)
+		
+		# Multiple runs for robustness
+		result = leiden_community_detection(edges;
+										n_runs=10,
+										weighted=true)
+	```
 	**References**
 	Traag VA, Waltman L, van Eck NJ (2019) Scientific Reports 9(1):5233
 	""" leiden_community_detection
@@ -4320,24 +4394,23 @@ THE SOFTWARE.
 	- `node_names::Vector`: Original node identifiers
 
 	**Examples**
-```julia
-	# Full parameter sweep
-	result = champ_community_detection(edges;
-	                                   resolution_range=(0.3, 2.0),
-	                                   n_resolutions=30,
-	                                   weighted=true)
-	
-	# Directed graph analysis
-	result = champ_community_detection(edges;
-	                                   directed=true,
-	                                   weighted=true)
-	
-	# Single resolution
-	result = champ_community_detection(edges;
-	                                   resolution=1.0,
-	                                   n_runs_per_gamma=20)
-```
-
+	```julia
+		# Full parameter sweep
+		result = champ_community_detection(edges;
+										resolution_range=(0.3, 2.0),
+										n_resolutions=30,
+										weighted=true)
+		
+		# Directed graph analysis
+		result = champ_community_detection(edges;
+										directed=true,
+										weighted=true)
+		
+		# Single resolution
+		result = champ_community_detection(edges;
+										resolution=1.0,
+										n_runs_per_gamma=20)
+	```
 	**References**
 	1. Weir WH et al. (2017) Algorithms 10(3):93. doi:10.3390/a10030093
 	2. github.com/wweir827/CHAMP
@@ -5222,23 +5295,22 @@ THE SOFTWARE.
 	- `n_communities::Int`: Number of detected communities
 
 	**Examples**
-```julia
-	# Basic usage with automatic community detection
-	result = modularity_vitality(edges)
-	
-	# CHAMP sweep for optimal resolution
-	result = modularity_vitality(edges; 
-	                            resolution_sweep=true,
-	                            weighted=true,
-	                            directed=true)
-	
-	# User-provided partition
-	membership = DataFrame(node=node_ids, community=labels)
-	result = modularity_vitality(edges; 
-	                            provided_membership=membership,
-	                            weighted=true)
-```
-
+	```julia
+		# Basic usage with automatic community detection
+		result = modularity_vitality(edges)
+		
+		# CHAMP sweep for optimal resolution
+		result = modularity_vitality(edges; 
+									resolution_sweep=true,
+									weighted=true,
+									directed=true)
+		
+		# User-provided partition
+		membership = DataFrame(node=node_ids, community=labels)
+		result = modularity_vitality(edges; 
+									provided_membership=membership,
+									weighted=true)
+	```
 	**References**
 	Magelinski T, Bartulovic M, Carley KM (2021). Measuring node contribution to community 
 	structure with modularity vitality. IEEE Transactions on Network Science and Engineering 
@@ -6405,28 +6477,27 @@ THE SOFTWARE.
 	Self-loops are excluded from the traversal.
 
 	**Examples**
-```julia
-	# Simple directed graph
-	edges = DataFrame(src=["A","A","B"], dst=["B","C","C"])
-	
-	# 2-hop out-reach from each node
-	hop_reach_k(edges, k=2, mode="out")
-	# A reaches {A,B,C} → 3
-	# B reaches {B,C} → 2  
-	# C reaches {C} → 1
-	
-	# 1-hop in-reach (who can reach each node in 1 step)
-	hop_reach_k(edges, k=1, mode="in")
-	# A reaches {A} → 1
-	# B reaches {A,B} → 2
-	# C reaches {A,B,C} → 3
-	
-	# Include isolates
-	nodes = ["A","B","C","D"]
-	hop_reach_k(edges, nodes=nodes, k=2)
-	# D reaches only {D} → 1
-```
-
+	```julia
+		# Simple directed graph
+		edges = DataFrame(src=["A","A","B"], dst=["B","C","C"])
+		
+		# 2-hop out-reach from each node
+		hop_reach_k(edges, k=2, mode="out")
+		# A reaches {A,B,C} → 3
+		# B reaches {B,C} → 2  
+		# C reaches {C} → 1
+		
+		# 1-hop in-reach (who can reach each node in 1 step)
+		hop_reach_k(edges, k=1, mode="in")
+		# A reaches {A} → 1
+		# B reaches {A,B} → 2
+		# C reaches {A,B,C} → 3
+		
+		# Include isolates
+		nodes = ["A","B","C","D"]
+		hop_reach_k(edges, nodes=nodes, k=2)
+		# D reaches only {D} → 1
+	```
 	**See Also**
 	- `_k_hop_reach_counts`: Internal implementation using sparse matrices
 	- `_graph_to_sparse_matrix`: Graph conversion utility
@@ -6456,18 +6527,21 @@ THE SOFTWARE.
 				(node_stats::DataFrame, group_stats::DataFrame)
 			Notes:
 				- Self-loops contribute 1 (or w) to in-degree and out-degree,
-				  but only 1 (or w) to total degree/strength.
+				but only 1 (or w) to total degree/strength.
 				- In-group / between-group measures computed per node and aggregated
-				  per community; E/I index uses group-level internal/external ties.
+				per community; E/I index uses group-level internal/external ties.
 		"""
 
-		#	Basic checks
+		#   Basic checks
 			n = size(adj, 1)
 			@assert size(adj, 2) == n "adj must be square"
 			@assert length(node_ids) == n "node_ids length must match adj size"
 			@assert length(membership) == n "membership length must match adj size"
 
-		#	Node-level degree (binary) and strength (weighted)
+		#   For undirected graphs, ensure adjacency is symmetric for safe i<j logic
+			adj_eff = directed ? adj : sparse(max.(adj, adj'))
+
+		#   Node-level degree (binary) and strength (weighted)
 			in_deg    = zeros(Int,     n)
 			out_deg   = zeros(Int,     n)
 			in_str    = zeros(Float64, n)
@@ -6475,7 +6549,7 @@ THE SOFTWARE.
 			loop_bin  = zeros(Int,     n)
 			loop_w    = zeros(Float64, n)
 
-		#	In-group node-level measures
+		#   In-group node-level measures
 			ing_in_deg   = zeros(Int,     n)
 			ing_out_deg  = zeros(Int,     n)
 			ing_in_str   = zeros(Float64, n)
@@ -6483,38 +6557,38 @@ THE SOFTWARE.
 			ing_loop_bin = zeros(Int,     n)      # self-loop in-group
 			ing_loop_w   = zeros(Float64, n)
 
-		#	Group-level internal / external tie sums (for E/I index)
+		#   Group-level internal / external tie sums (for E/I index)
 			gids = sort!(unique(membership))
 			gids = filter(!=(0), gids)          # drop "no group"
 			group_internal = Dict{Int,Float64}(g => 0.0 for g in gids)
 			group_external = Dict{Int,Float64}(g => 0.0 for g in gids)
 
-		#	Handles for iteration
-			rows = rowvals(adj)
-			vals = nonzeros(adj)
+		#   Handles for iteration (use adj_eff)
+			rows = rowvals(adj_eff)
+			vals = nonzeros(adj_eff)
 
-		#	Iterate over edges
+		#   Iterate over edges
 			if directed
-				#	Directed: process each entry A[i,j] as edge i → j
+				#   Directed: process each entry A[i,j] as edge i → j
 					@inbounds for j in 1:n
-						for idx in nzrange(adj, j)
+						for idx in nzrange(adj_eff, j)
 							i = rows[idx]
 							w = vals[idx]
 							bw = weighted ? w : (w != 0.0 ? 1.0 : 0.0)
 
-							#	Self-loop bookkeeping
+							#   Self-loop bookkeeping
 								if i == j
 									loop_bin[i] += 1
 									loop_w[i]   += w
 								end
 
-							#	Node-level degree / strength
+							#   Node-level degree / strength
 								out_deg[i]  += 1
 								in_deg[j]   += 1
 								out_str[i]  += w
 								in_str[j]   += w
 
-							#	Group-level logic (skip if either node unlabeled)
+							#   Group-level logic (skip if either node unlabeled)
 								gi = membership[i]
 								gj = membership[j]
 								if gi == 0 && gj == 0
@@ -6522,7 +6596,7 @@ THE SOFTWARE.
 								end
 
 								if gi == gj && gi != 0
-									#	In-group tie
+									#   In-group tie
 									ing_out_deg[i] += 1
 									ing_in_deg[j]  += 1
 									ing_out_str[i] += w
@@ -6533,10 +6607,10 @@ THE SOFTWARE.
 										ing_loop_w[i]   += w
 									end
 
-									#	Group internal: count tie once for E/I
+									#   Group internal: count tie once for E/I
 										group_internal[gi] += bw
 								else
-									#	Between-group tie: count for each endpoint in a labeled group
+									#   Between-group tie: count for each endpoint in a labeled group
 										if gi != 0
 											group_external[gi] += bw
 										end
@@ -6547,19 +6621,19 @@ THE SOFTWARE.
 						end
 					end
 			else
-				#	Undirected: process each undirected tie once (i < j), loops once (i == j)
+				#   Undirected: process each undirected tie once (i < j), loops once (i == j)
 					@inbounds for j in 1:n
-						for idx in nzrange(adj, j)
+						for idx in nzrange(adj_eff, j)
 							i = rows[idx]
 							w = vals[idx]
 							bw = weighted ? w : (w != 0.0 ? 1.0 : 0.0)
 
 							if i == j
-								#	self-loop: once
+								#   self-loop: once
 									loop_bin[i] += 1
 									loop_w[i]   += w
 
-								#	degree/strength: counts once for the node
+								#   degree/strength: counts once for the node
 									out_deg[i]  += 1
 									out_str[i]  += w
 
@@ -6572,7 +6646,7 @@ THE SOFTWARE.
 										group_internal[gi] += bw
 									end
 							elseif i < j
-								#	Edge between distinct nodes: count once, add to both endpoints
+								#   Edge between distinct nodes: count once, add to both endpoints
 									out_deg[i]  += 1
 									out_deg[j]  += 1
 									out_str[i]  += w
@@ -6586,14 +6660,14 @@ THE SOFTWARE.
 									end
 
 									if gi == gj && gi != 0
-										#	in-group internal undirected tie
+										#   in-group internal undirected tie
 										ing_out_deg[i] += 1
 										ing_out_deg[j] += 1
 										ing_out_str[i] += w
 										ing_out_str[j] += w
 										group_internal[gi] += bw
 									else
-										#	between groups: each endpoint group gets external credit
+										#   between groups: each endpoint group gets external credit
 											if gi != 0
 												group_external[gi] += bw
 											end
@@ -6606,7 +6680,7 @@ THE SOFTWARE.
 					end
 			end
 
-		#	Total degree / strength (self-loop counted ONCE)
+		#   Total degree / strength (self-loop counted ONCE)
 			if directed
 				total_deg = in_deg .+ out_deg .- loop_bin
 				total_str = in_str .+ out_str .- loop_w
@@ -6614,7 +6688,7 @@ THE SOFTWARE.
 				ing_total_deg = ing_in_deg .+ ing_out_deg .- ing_loop_bin
 				ing_total_str = ing_in_str .+ ing_out_str .- ing_loop_w
 			else
-				#	We stored undirected degree in out_deg / out_str
+				#   We stored undirected degree in out_deg / out_str
 				total_deg = copy(out_deg)
 				total_str = copy(out_str)
 
@@ -6622,7 +6696,7 @@ THE SOFTWARE.
 				ing_total_str = copy(ing_out_str)
 			end
 
-		#	Between-group node-level measures
+		#   Between-group node-level measures
 			between_in_deg   = in_deg  .- ing_in_deg
 			between_out_deg  = out_deg .- ing_out_deg
 			between_tot_deg  = total_deg .- ing_total_deg
@@ -6631,7 +6705,7 @@ THE SOFTWARE.
 			between_out_str  = out_str .- ing_out_str
 			between_tot_str  = total_str .- ing_total_str
 
-		#	Assemble node-level DataFrame (full set; user wrapper can prune)
+		#   Assemble node-level DataFrame (full set; user wrapper can prune)
 			node_stats = DataFrame(
 				node                    = node_ids,
 				community               = membership,
@@ -6661,7 +6735,7 @@ THE SOFTWARE.
 				total_strength_between  = between_tot_str
 			)
 
-		#	Group-level E/I index & totals
+		#   Group-level E/I index & totals
 			group_rows = NamedTuple[]
 			for g in gids
 				internal = get(group_internal, g, 0.0)
@@ -6681,7 +6755,7 @@ THE SOFTWARE.
 			end
 			group_stats = DataFrame(group_rows)
 
-		#	Return full results; caller controls which columns to keep
+		#   Return full results; caller controls which columns to keep
 			return (node_stats = node_stats, group_stats = group_stats)
 	end
 
@@ -7180,7 +7254,7 @@ THE SOFTWARE.
 		return ["003","012","102","021D","021U","021C","111D","111U","030T","030C","201","120D","120U","120C","210","300"]
 	end
 
-#	Helper Triad Census: Build the 4×4×4 lookup table (RSiena mapping)
+#	Helper Triad Census: Build the 4×4×4 lookup table
 	function _dl_lookup()
 		"""
 		Args:
@@ -8129,7 +8203,7 @@ THE SOFTWARE.
 	`_triad_census_bm_from_edges`, `_triad_census_layered`
 	""" triad_census
 
-#	Helper: Weakly connected components (undirected view)
+#	Component Statistics Helper: Weakly connected components (undirected view)
 	function _weak_components(adj::SparseMatrixCSC{<:Real,Int})
 		"""
 		Args:
@@ -8194,7 +8268,7 @@ THE SOFTWARE.
 			return (membership = membership, sizes = sizes)
 	end
 
-#	Helper: Directed neighbor lists (out & in, loopless)
+#	Component Statistics Helper: Directed neighbor lists (out & in, loopless)
 	function _directed_neighbors(adj::SparseMatrixCSC{<:Real,Int})
 		"""
 		Args:
@@ -8228,7 +8302,7 @@ THE SOFTWARE.
 			return (out_neighbors = out_neighbors, in_neighbors = in_neighbors)
 	end
 
-#	Helper: Strongly connected components (directed)
+#	Component Statistics Helper: Strongly connected components (directed)
 	function _strong_components(adj::SparseMatrixCSC{<:Real,Int})
 		"""
 		Args:
@@ -8314,7 +8388,7 @@ THE SOFTWARE.
 			return (membership = membership, sizes = sizes)
 	end
 
-#	Component statistics (weak & strong, plus bow-tie fractions)
+#	Component Statistics (weak & strong, plus bow-tie fractions)
 	function component_statistics(edges::DataFrame;
 								nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}}=nothing,
 								graph_type::Symbol = :directed)
@@ -9052,17 +9126,16 @@ THE SOFTWARE.
 	A `Float64` between 0 and 1 representing reciprocity.
 
 	**Examples**
-```julia
-	# Arc-based (default)
-	edges = DataFrame(src=["A","B","C"], dst=["B","A","D"])
-	rec = reciprocity(edges)  # 2/3 (2 of 3 arcs have reverse)
-	
-	# Dyad-based with weighted network
-	wedges = DataFrame(src=["A","B","C"], dst=["B","A","D"], weight=[3,3,2])
-	rec_sq = reciprocity(wedges; weighted=true, mode=:dyad_based)  # Squartini
-	rec_ora = reciprocity(wedges; weighted=true, mode=:dyad_based, weighted_method=:ora_mutual)
-```
-
+	```julia
+		# Arc-based (default)
+		edges = DataFrame(src=["A","B","C"], dst=["B","A","D"])
+		rec = reciprocity(edges)  # 2/3 (2 of 3 arcs have reverse)
+		
+		# Dyad-based with weighted network
+		wedges = DataFrame(src=["A","B","C"], dst=["B","A","D"], weight=[3,3,2])
+		rec_sq = reciprocity(wedges; weighted=true, mode=:dyad_based)  # Squartini
+		rec_ora = reciprocity(wedges; weighted=true, mode=:dyad_based, weighted_method=:ora_mutual)
+	```
 	**References**
 	- Squartini T et al. (2013). "Reciprocity of weighted networks." Scientific Reports 3:2729.
 	- Wasserman S & Faust K (1994). Social Network Analysis: Methods and Applications.

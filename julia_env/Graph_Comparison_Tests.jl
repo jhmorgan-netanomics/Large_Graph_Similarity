@@ -1,6 +1,6 @@
-#Test Script for the Large Graph Comparison Functions
+#Test Script of Large_Graph_Similarity's Network Measures
 #Jonathan H. Morgan
-#22 October 2025
+#22 October - 9 November 2025
 
 #   Pulling-In BEND_2022 & Activating Local Environment
     cd("/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity")
