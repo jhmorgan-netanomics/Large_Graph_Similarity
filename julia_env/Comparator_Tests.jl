@@ -466,6 +466,7 @@ using Large_Graph_Similarity
     provided_membership = nothing
     edges = deepcopy(balikatan_arcs)
     weighted = false
+    resolution_sweep = true
     n_resolutions = 15
     n_runs_per_gamma = 5
     n_iterations_per_run = 10
@@ -527,11 +528,13 @@ using Large_Graph_Similarity
 
             degree_assortativity = assortativity_degree(symmetric_edgelist; graph_type = :undirected, weighted = false)
             transitivity = global_clustering_coefficient(symmetric_edgelist; directed=false, weighted=false, method=:transitivity, drop_self_loops=true)
+            global_local_clustering_coeff = global_clustering_coefficient(symmetric_edgelist; directed=false, weighted=false, method=:average, drop_self_loops=true)
 
         #   Constructing Global Measure Index
-            global_measures = [component_stat_names; link_stats_df.link_group; "degree_assortativity"; "transitivity"; "density"]
-            global_values = string.([component_stat_values; link_stats_df.values; round(degree_assortativity, digits=6); transitivity;  
-                                     round(link_stats.density[1], digits=6)])
+            global_measures = [component_stat_names; link_stats_df.link_group; "degree assortativity"; "transitivity"; 
+                               "local clustering coefficient"; "density"]
+            global_values = string.([component_stat_values; link_stats_df.values; round(degree_assortativity, digits=6); round(transitivity, digits=6);  
+                                    round(global_local_clustering_coeff,digits=6) ; round(link_stats.density[1], digits=6)])
             global_stats_df = DataFrame(measure=global_measures, value = global_values)
 
         #   MESO-LEVEL MEASURES
@@ -674,13 +677,20 @@ using Large_Graph_Similarity
 
         #   NODE-LEVEL MESURES
 
-        #   Calculating Normalized Total Degree
-            total_deg_norm = total_degree(symmetric_edgelist; directed=false, weighted=true, normalize=true, drop_self_loops=false,
+        #   Calculating Normalized Total Degree (Dropping Self-Loops to Be Consistent with a N-1 Normalization)
+            total_deg_norm = total_degree(symmetric_edgelist; directed=false, weighted=true, normalize=true, drop_self_loops=true,
 								          count_self_loops_once=true, agg_func = maximum, n=nrow(ni))
+            rename!(total_deg_norm, ["node", "total_degree_normalized"])
+            leftjoin!(node_stats, total_deg_norm, on=:node)
+           
+        #   Transforming Missing Values Introduced by Nodes with Only Self-Loops into zeros
+            node_stats.total_degree_normalized = coalesce.(node_stats.total_degree_normalized, 0)
+            node_stats.total_degree_normalized = convert.(Float64, node_stats.total_degree_normalized)
 
-        #   COME BACK HERE!! 
-        #   Complete Node-Level Measures
-
+        #   Calculating Node-Level Local Clustering
+        #   This meaures does not assume symmetry. ORA looks at all ties in and out of the ego node, even in the Undirected Case.
+            strogatz_local_clustering = local_clustering_coefficient(symmetric_edgelist; directed=false, weighted=false,
+                                                                     method = :density, density_mode=:ego_nodes)   
 
 
 
@@ -689,4 +699,175 @@ using Large_Graph_Similarity
 ######################################
 #   COMPARATOR FUNCTION ASSESSMENT   #
 ######################################
+
+
+#############
+#   TESTS   #
+#############
+
+#   Debug the actual computation
+    function debug_local_clustering(edges; top_n=10)
+        #   Prepare edges exactly as the function does
+            clean_edges = _aggregate_multi_edges(edges; agg_func = maximum)
+            edges_canonical = DataFrame(
+                src = min.(clean_edges.src, clean_edges.dst),
+                dst = max.(clean_edges.src, clean_edges.dst)
+            )
+            edges_simple = unique(edges_canonical)
+            edges_bidirectional = vcat(
+                edges_simple,
+                DataFrame(src = edges_simple.dst, dst = edges_simple.src)
+            )
+            
+            A, _, idx_to_node = _edgelist_to_sparse_matrix(edges_bidirectional; weighted = false)
+            A = max.(A, A')
+            A = spzeros(Float64, size(A)...) .+ (A .> 0)
+            
+            n = size(A, 1)
+            results = []
+            
+            for i in 1:n
+                neighbors = findall(!iszero, A[i, :])
+                k_i = length(neighbors)
+                
+                if k_i >= 2
+                    A_sub = A[neighbors, neighbors]
+                    E_i = sum(A_sub) / 2.0
+                    max_E_i = k_i * (k_i - 1) / 2.0
+                    C_i = E_i / max_E_i
+                    
+                    node_name = idx_to_node isa DataFrame ? idx_to_node.id[i] : idx_to_node[i]
+                    push!(results, (node=node_name, degree=k_i, clustering=C_i))
+                end
+            end
+        
+        #   Sort by degree and show top nodes
+            sort!(results, by=x->x.degree, rev=true)
+            
+            println("Top $top_n nodes by degree:")
+            for (i, r) in enumerate(results[1:min(top_n, length(results))])
+                println("  $(r.node): degree=$(r.degree), clustering=$(round(r.clustering, digits=3))")
+            end
+            
+            println("\nDegree distribution of nodes with k≥2:")
+            deg_counts = countmap([r.degree for r in results])
+            for (d, count) in sort(collect(deg_counts))
+                println("  Degree $d: $count nodes")
+            end
+            
+            println("\nAverage clustering: ", mean([r.clustering for r in results]))
+            return results
+    end
+
+    results = debug_local_clustering(symmetric_edgelist)
+
+#   Debug the actual computation
+    function debug_local_clustering(edges; top_n=10)
+        #   Prepare edges exactly as the function does
+            clean_edges = _aggregate_multi_edges(edges; agg_func = maximum)
+            edges_canonical = DataFrame(
+                src = min.(clean_edges.src, clean_edges.dst),
+                dst = max.(clean_edges.src, clean_edges.dst)
+            )
+            edges_simple = unique(edges_canonical)
+            edges_bidirectional = vcat(
+                edges_simple,
+                DataFrame(src = edges_simple.dst, dst = edges_simple.src)
+            )
+            
+            A, _, idx_to_node = _edgelist_to_sparse_matrix(edges_bidirectional; weighted = false)
+            A = max.(A, A')
+            A = spzeros(Float64, size(A)...) .+ (A .> 0)
+            
+            n = size(A, 1)
+            results = []
+            
+            for i in 1:n
+                neighbors = findall(!iszero, A[i, :])
+                k_i = length(neighbors)
+                
+                if k_i >= 2
+                    A_sub = A[neighbors, neighbors]
+                    E_i = sum(A_sub) / 2.0
+                    max_E_i = k_i * (k_i - 1) / 2.0
+                    C_i = E_i / max_E_i
+                    
+                    node_name = idx_to_node isa DataFrame ? idx_to_node.id[i] : idx_to_node[i]
+                    push!(results, (node=node_name, degree=k_i, clustering=C_i))
+                end
+            end
+        
+        #   Sort by degree and show top nodes
+            sort!(results, by=x->x.degree, rev=true)
+            
+            println("Top $top_n nodes by degree:")
+            for (i, r) in enumerate(results[1:min(top_n, length(results))])
+                println("  $(r.node): degree=$(r.degree), clustering=$(round(r.clustering, digits=3))")
+            end
+            
+            println("\nDegree distribution of nodes with k≥2:")
+            deg_counts = countmap([r.degree for r in results])
+            for (d, count) in sort(collect(deg_counts))
+                println("  Degree $d: $count nodes")
+            end
+            
+            println("\nAverage clustering: ", mean([r.clustering for r in results]))
+            return results
+    end
+
+    results = debug_local_clustering(symmetric_edgelist)
+
+    edges = deepcopy(symmetric_edgelist)
+    function debug_ego_network(edges::DataFrame, ego;
+                            directed::Bool=true)
+        """
+        Args:
+            edges::DataFrame: edge list with :src and :dst columns
+            ego: node id for which to extract the ego network
+            directed::Bool: if true, keep edge directions; if false, treat as undirected
+        Returns:
+            NamedTuple with:
+                - ego::Any
+                - nodes::Vector: [ego; neighbors...] (ego is first)
+                - ego_edges::DataFrame: all edges with endpoints in ego ∪ neighbors
+                - neighbor_edges::DataFrame: edges only among neighbors (no ego)
+        Notes:
+            - Neighbors are defined as the union of in- and out-neighbors of ego.
+            - For directed=false, the edge list is treated as undirected when
+            determining neighbors, but ego_edges keeps the original rows.
+        """
+
+        #   Validation
+            if !hasproperty(edges, :src) || !hasproperty(edges, :dst)
+                throw(ArgumentError("edges DataFrame must have :src and :dst columns"))
+            end
+
+        #   Determine neighbors (weak neighborhood: in ∪ out)
+            ego_edges = filter(row -> row.src == ego  || row.dst == ego, edges)
+
+        #   Isolating Unique Number of Nodes
+            ego_nodes = sort(unique((ego_edges.src; ego_edges.dst)))
+            ego_neighbors = ego_nodes[(ego_nodes .!= ego)]
+
+        #   Isolating Neighbor Edges
+            neighbor_edges = filter(row -> (row.src in ego_neighbors) && (row.dst in ego_neighbors), edges)
+            ego_network = [ego_edges; neighbor_edges]
+
+        #   Calculate Undirected Ego Network Clustering Coefficient
+            k = length(ego_neighbors)
+            e = nrow(ego_network)
+
+            ego_numerator = 2*e
+            ego_denominator = k*(k-1)    
+            ego_numerator/ego_denominator
+
+
+        #   Calculating 
+
+
+      
+    end
+
+    ego_info = debug_ego_network(symmetric_edgelist, 25930421; directed=true)
+
 

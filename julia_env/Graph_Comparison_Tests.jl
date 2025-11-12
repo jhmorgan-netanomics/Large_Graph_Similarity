@@ -2601,11 +2601,13 @@
       				       weight = [1.0, 5.0, 2.0, 3.0, 1.0, 4.0, 1.0])
 
 #	Local Clustering
-	strogatz_local_clustering = local_clustering_coefficient(agent_agent_all_com.edges, directed=true, weighted=false)
+	strogatz_local_clustering = local_clustering_coefficient(agent_agent_all_com.edges, directed=true, weighted=false, 
+																	 include_neighbor_selfloops=true)
 	leftjoin!(strogatz_local_clustering, ora_local_clustering, on=:node)
-	strogatz_local_clustering = strogatz_local_clustering[:,[1,3,4,2]]
+	strogatz_local_clustering = strogatz_local_clustering[:,[1,4,5,3]]
 	strogatz_local_clustering[!,3] = convert.(Float64, strogatz_local_clustering[:,3])
-	strogatz_local_clustering.delta = strogatz_local_clustering[:,3] .- strogatz_local_clustering[:,4] 
+	strogatz_local_clustering.delta = strogatz_local_clustering[:,4] .- strogatz_local_clustering[:,3] 
+	mean(strogatz_local_clustering.delta)
 
 #	Weighted Directed Clustering
 	julia_results = weighted_clustering_coefficient(test_edges; directed=true, agg_func=sum)
