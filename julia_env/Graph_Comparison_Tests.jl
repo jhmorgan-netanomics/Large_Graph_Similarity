@@ -2600,14 +2600,14 @@
 	test_edges = DataFrame(src = ["A","A","B","B","C","D","E"], dst = ["B","C","C","D","A","A","B"],
       				       weight = [1.0, 5.0, 2.0, 3.0, 1.0, 4.0, 1.0])
 
-#	Local Clustering
-	strogatz_local_clustering = local_clustering_coefficient(agent_agent_all_com.edges, directed=true, weighted=false, 
-																	 include_neighbor_selfloops=true)
-	leftjoin!(strogatz_local_clustering, ora_local_clustering, on=:node)
-	strogatz_local_clustering = strogatz_local_clustering[:,[1,4,5,3]]
-	strogatz_local_clustering[!,3] = convert.(Float64, strogatz_local_clustering[:,3])
-	strogatz_local_clustering.delta = strogatz_local_clustering[:,4] .- strogatz_local_clustering[:,3] 
-	mean(strogatz_local_clustering.delta)
+#	Local Clustering Density (ORA Comparison)
+	local_clustering_density = local_clustering_coefficient(agent_agent_all_com.edges, method=:local_density, directed=true, weighted=false)
+	leftjoin!(local_clustering_density, ora_local_clustering, on=:node)
+	local_density_clustering = local_clustering_density[:,[1,4,5,3]]
+	local_density_clustering[!,3] = convert.(Float64, local_density_clustering[:,3])
+	local_density_clustering.delta = local_density_clustering[:,4] .- local_density_clustering[:,3] 
+	mean(local_density_clustering.delta)
+	maximum(local_density_clustering.delta)
 
 #	Weighted Directed Clustering
 	julia_results = weighted_clustering_coefficient(test_edges; directed=true, agg_func=sum)

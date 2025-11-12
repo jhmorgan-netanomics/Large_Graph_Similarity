@@ -688,9 +688,8 @@ using Large_Graph_Similarity
             node_stats.total_degree_normalized = convert.(Float64, node_stats.total_degree_normalized)
 
         #   Calculating Node-Level Local Clustering
-        #   This meaures does not assume symmetry. ORA looks at all ties in and out of the ego node, even in the Undirected Case.
-            strogatz_local_clustering = local_clustering_coefficient(symmetric_edgelist; directed=false, weighted=false,
-                                                                     method = :density, density_mode=:ego_nodes)   
+            local_density_clustering = local_clustering_coefficient(symmetric_edgelist;  directed=false, weighted=false, method=:local_density)   
+                                        
 
 
 

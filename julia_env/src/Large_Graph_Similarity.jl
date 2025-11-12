@@ -2124,386 +2124,373 @@ THE SOFTWARE.
 			return (triangle_count, Float64(max_triangles))
 	end
 
-#	Local Clustering Coefficient and Ego Density (Node Level)
-    function local_clustering_coefficient(edges::DataFrame;
-                                            directed::Bool=true,
-                                            weighted::Bool=false,
-                                            method::Symbol=:density,
-                                            agg_func::Function=Base.sum,
-                                            include_neighbor_selfloops::Bool=false,
-                                            density_mode::Symbol=:neighbors,
-                                            run_ora_ego_25930421_test::Bool=false)
+#	Local Clustering Coefficient & Ego Density (Node Level)
+	function local_clustering_coefficient(edges::DataFrame;
+										directed::Bool = true,
+										weighted::Bool = false,
+										method::Symbol = :local_clustering,
+										agg_func::Function = Base.sum,
+										include_selfloops::Union{Bool,Nothing} = nothing,
+										run_ora_ego_25930421_test::Bool = false)
+		"""
+		Args:
+			edges::DataFrame: Edge list with :src, :dst, (optional) :weight
+			directed::Bool: Treat network as directed (default = true)
+			weighted::Bool: Use weights where present (default = false → binary)
+			method::Symbol: :local_clustering | :local_density | :local_transitivity
+			agg_func::Function: Aggregation for multi-edges (default = sum)
+			include_selfloops::Union{Bool,Nothing}: Include self-loops in alter numerator
+				- nothing → defaults to true for :local_density, false otherwise
+				- true/false → explicit override
+			run_ora_ego_25930421_test::Bool: Optional debug hook (non-failing)
+		Returns:
+			DataFrame with columns:
+				- node: Node identifiers
+				- ego_density: Ego+alters density (loop-excluded denominator)
+				- local_clustering_coefficient: Selected clustering measure
+		Notes:
+			- Classic :local_clustering uses k(k-1) denominator, excludes loops
+			- ORA-style :local_density uses combinations with replacement when loops included
+			- Undirected networks use unordered pair counting
+		"""
 
-        #	Validation
-            if !hasproperty(edges, :src) || !hasproperty(edges, :dst)
-                throw(ArgumentError("edges DataFrame must have :src and :dst columns"))
-            end
-            if !(method in (:density, :transitivity))
-                throw(ArgumentError("method must be :density or :transitivity"))
-            end
-            if !(density_mode in (:neighbors, :ego_nodes))
-                throw(ArgumentError("density_mode must be :neighbors or :ego_nodes"))
-            end
-            if run_ora_ego_25930421_test &&
-            !(method == :density && !directed && !weighted)
-                throw(ArgumentError("run_ora_ego_25930421_test=true is only valid for method=:density, directed=false, weighted=false"))
-            end
+		#	Validation
+			if !hasproperty(edges, :src) || !hasproperty(edges, :dst)
+				throw(ArgumentError("edges DataFrame must have :src and :dst columns"))
+			end
+			if !(method in (:local_clustering, :local_density, :local_transitivity))
+				throw(ArgumentError("method must be :local_clustering, :local_density, or :local_transitivity"))
+			end
+			if run_ora_ego_25930421_test && !(method in (:local_clustering, :local_density) && !directed && !weighted)
+				throw(ArgumentError("run_ora_ego_25930421_test=true requires undirected binary with clustering/density method"))
+			end
 
-        #	Handle empty input
-            if nrow(edges) == 0
-                return DataFrame(node=[], ego_density=Float64[], local_clustering_coefficient=Float64[])
-            end
+		#	Set method-appropriate defaults for self-loop inclusion
+			if isnothing(include_selfloops)
+				include_selfloops = (method == :local_density)
+			end
 
-        #	Aggregate multi-edges (per direction; does NOT merge (u,v) with (v,u))
-            clean_edges = _aggregate_multi_edges(edges; agg_func=agg_func)
+		#	Handle empty input
+			if nrow(edges) == 0
+				return DataFrame(node=[], ego_density=Float64[], local_clustering_coefficient=Float64[])
+			end
 
-        #	ORA-style undirected, binary path (edge-list based, expand to directed arcs)
-            if method == :density && !directed && !weighted
-                T = promote_type(eltype(clean_edges.src), eltype(clean_edges.dst))
+		#	Aggregate multi-edges
+			clean_edges = _aggregate_multi_edges(edges; agg_func=agg_func)
 
-            #	Neighbor sets from undirected ties
-                neighbors = Dict{T, Set{T}}()
-                all_nodes = Set{T}()
+		#	Undirected binary path (edge-list based, unordered counting)
+			if method in (:local_clustering, :local_density) && !directed && !weighted
+				T = promote_type(eltype(clean_edges.src), eltype(clean_edges.dst))
 
-                for row in eachrow(clean_edges)
-                    s = T(row.src)
-                    d = T(row.dst)
+			#	Build neighbor sets (self-loops don't create neighbor relations)
+				neighbors = Dict{T, Set{T}}()
+				all_nodes = Set{T}()
+				for row in eachrow(clean_edges)
+					s = T(row.src); d = T(row.dst)
+					push!(all_nodes, s); push!(all_nodes, d)
+					if s != d
+						if !haskey(neighbors, s); neighbors[s] = Set{T}(); end
+						if !haskey(neighbors, d); neighbors[d] = Set{T}(); end
+						push!(neighbors[s], d); push!(neighbors[d], s)
+					end
+				end
+				nodes_vec = sort(collect(all_nodes))
+				n_nodes = length(nodes_vec)
 
-                    #	Skip self-loops for neighbor discovery
-                        if s == d
-                            push!(all_nodes, s)
-                            continue
-                        end
+			#	Build unordered edge sets
+				undirected_pairs = Set{Tuple{T,T}}()  # canonical form: (min,max)
+				loop_nodes = Set{T}()
+				for row in eachrow(clean_edges)
+					s = T(row.src); d = T(row.dst)
+					if s == d
+						push!(loop_nodes, s)
+					else
+						a, b = ifelse(s < d, (s,d), (d,s))
+						push!(undirected_pairs, (a,b))
+					end
+				end
 
-                    #	Add nodes
-                        push!(all_nodes, s)
-                        push!(all_nodes, d)
+			#	Initialize results
+				ego_density = zeros(Float64, n_nodes)
+				local_cc = zeros(Float64, n_nodes)
 
-                    #	Undirected neighbor relation
-                        if !haskey(neighbors, s)
-                            neighbors[s] = Set{T}()
-                        end
-                        if !haskey(neighbors, d)
-                            neighbors[d] = Set{T}()
-                        end
-                        push!(neighbors[s], d)
-                        push!(neighbors[d], s)
-                end
+			#	Test tracking
+				test_ego_str = "25930421"
+				test_alter_edges = nothing
+				test_ego_edges = nothing
 
-                nodes_vec = sort(collect(all_nodes))
-                n_nodes = length(nodes_vec)
+			#	Process each ego
+				for (idx, ego) in enumerate(nodes_vec)
+					if !haskey(neighbors, ego)
+						continue
+					end
 
-            #	Expand undirected ties to directed arcs (include self-loops)
-                srcs = T[]
-                dsts = T[]
-                for row in eachrow(clean_edges)
-                    s = T(row.src)
-                    d = T(row.dst)
+					#	Get alters
+						alters = collect(neighbors[ego])
+						k = length(alters)
+						if k < 1
+							continue
+						end
+						ego_nodes = Set{T}([ego; alters...])
+						n_ego = length(ego_nodes)  # = k+1
 
-                    #	Each undirected tie ⇒ 2 arcs; for self-loops, both arcs are (s,s)
-                        push!(srcs, s); push!(dsts, d)
-                        push!(srcs, d); push!(dsts, s)
-                end
-                expanded_edges = DataFrame(src = srcs, dst = dsts)
+					#	Count ego-network edges (excluding loops)
+						E_ego = 0
+						for (a,b) in undirected_pairs
+							if a in ego_nodes && b in ego_nodes
+								E_ego += 1
+							end
+						end
+						den_ego = n_ego * (n_ego - 1) ÷ 2
+						ego_density[idx] = (den_ego > 0) ? (E_ego / den_ego) : 0.0
 
-            #	Result arrays
-                ego_density = zeros(Float64, n_nodes)
-                local_cc = zeros(Float64, n_nodes)
+					#	Count alter-only edges and loops
+						alter_set = Set{T}(alters)
+						E_alter = 0
+						for (a,b) in undirected_pairs
+							if (a in alter_set) && (b in alter_set)
+								E_alter += 1
+							end
+						end
+						L_alter = count(in(alter_set), loop_nodes)
 
-            #	Test-case tracking (for ORA parity)
-                test_ego_raw = 25930421
-                test_ego_str = string(test_ego_raw)
-                test_alter_arcs = nothing
-                test_ego_arcs = nothing
+					#	Compute local coefficient
+						if method == :local_clustering
+							#	Classic Watts-Strogatz: no loops
+								den = k * (k - 1) ÷ 2
+								num = E_alter
+						else  # :local_density
+							#	ORA-style with optional loops
+								if include_selfloops
+									den = (k * (k + 1)) ÷ 2  # Combinations with replacement
+									num = E_alter + L_alter
+								else
+									den = k * (k - 1) ÷ 2
+									num = E_alter
+								end
+						end
+						local_cc[idx] = (den > 0) ? (num / den) : 0.0
 
-            #	Iterate over nodes
-                for (idx, ego) in enumerate(nodes_vec)
-                    if !haskey(neighbors, ego)
-                        continue
-                    end
+					#	Test capture
+						if run_ora_ego_25930421_test && string(ego) == test_ego_str
+							test_alter_edges = E_alter + (include_selfloops ? L_alter : 0)
+							test_ego_edges = E_ego
+						end
+				end
 
-                    #	Alter set
-                        alters_set = neighbors[ego]
-                        k = length(alters_set)
-                        if k < 2
-                            continue
-                        end
-                        alters = collect(alters_set)
+			#	Test reporting (non-fatal)
+				if run_ora_ego_25930421_test
+					if test_alter_edges === nothing || test_ego_edges === nothing
+						@warn "Test note: ego 25930421 not found in this graph"
+					else
+						@info "Test note: ego 25930421 alter_num=$(test_alter_edges), ego_num=$(test_ego_edges)"
+					end
+				end
 
-                    #	Nodes in ego-network (ego + alters)
-                        ego_nodes = Set([ego; alters...])
+			#	Return results
+				return DataFrame(
+					node = nodes_vec,
+					ego_density = ego_density,
+					local_clustering_coefficient = local_cc
+				)
+			end
 
-                    #	Extract arcs in ego-network (ego + alters), ignoring self-loops
-                        ego_edges = filter(r -> (r.src in ego_nodes && r.dst in ego_nodes && r.src != r.dst),
-                                            eachrow(expanded_edges))
-                        ego_arc_count = length(ego_edges)
+		#	Directed/weighted/transitivity path (matrix-based)
+			adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=weighted)
+			n = length(idx_to_node)
+			ego_density = zeros(Float64, n)
+			local_cc = zeros(Float64, n)
 
-                    #	Extract arcs in alter-only subgraph
-                    #	neighbors mode: ignore self-loops (classic clustering)
-                    #	ego_nodes mode: include self-loops (ORA-style behavior)
-                        alter_edges = if density_mode == :neighbors
-                            filter(r -> (r.src in alters_set && r.dst in alters_set && r.src != r.dst),
-                                eachrow(expanded_edges))
-                        else
-                            filter(r -> (r.src in alters_set && r.dst in alters_set),
-                                eachrow(expanded_edges))
-                        end
-                        alter_arc_count = length(alter_edges)
+			for i in 1:n
+				if method == :local_transitivity
+					#	Triangle-based clustering
+						triangles, max_triangles = _count_triangles_directed(adj, i)
+						local_cc[i] = (max_triangles > 0) ? (triangles / max_triangles) : 0.0
+						ego_density[i] = 0.0
 
-                    #	Ego network density (directed arcs) always normalized by n_ego
-                        n_ego = length(ego_nodes)
-                        max_ego_arcs = n_ego * (n_ego - 1)
-                        ego_density[idx] = (max_ego_arcs > 0) ? (ego_arc_count / max_ego_arcs) : 0.0
+				else
+					#	Extract ego subnet
+						_, ego_subnet = _extract_ego_network(adj, i; directed=directed)
+						if size(ego_subnet, 1) <= 1
+							continue
+						end
+						k_ego = size(ego_subnet, 1)
+						neighbor_indices = 2:k_ego
+						neighbor_subnet = ego_subnet[neighbor_indices, neighbor_indices]
+						k = length(neighbor_indices)
 
-                    #	Local clustering coefficient (directed alter subnet)
-                        max_alter_arcs = if density_mode == :neighbors
-                            k * (k - 1)
-                        elseif density_mode == :ego_nodes
-                            n_ego * (n_ego - 1)
-                        else
-                            throw(ArgumentError("density_mode must be :neighbors or :ego_nodes"))
-                        end
-                        local_cc[idx] = (max_alter_arcs > 0) ? (alter_arc_count / max_alter_arcs) : 0.0
+					#	Count alter edges
+						if directed
+							#	Directed: diagonal handling depends on method and include_selfloops
+								if method == :local_clustering || !include_selfloops
+									neighbor_nodiag = copy(neighbor_subnet)
+									for d in 1:k; neighbor_nodiag[d,d] = 0; end
+									edge_sum = weighted ? Base.sum(neighbor_nodiag) : nnz(neighbor_nodiag)
+								else
+									edge_sum = weighted ? Base.sum(neighbor_subnet) : nnz(neighbor_subnet)
+								end
+						else
+							#	Undirected: count unordered pairs via upper triangle
+								if method == :local_density && include_selfloops
+									loops = 0
+									for d in 1:k
+										loops += (neighbor_subnet[d,d] != 0)
+									end
+									edges = nnz(triu(neighbor_subnet, 1))
+									edge_sum = edges + loops
+								else
+									edge_sum = nnz(triu(neighbor_subnet, 1))
+								end
+						end
 
-                    #	Record counts for ORA test ego, if present (string-based comparison)
-                        if run_ora_ego_25930421_test && string(ego) == test_ego_str
-                            test_alter_arcs = alter_arc_count
-                            test_ego_arcs = ego_arc_count
-                        end
-                end
+					#	Compute denominator
+						if directed
+							if method == :local_clustering
+								max_edges = k * (k - 1)  # Simple digraph
+							else  # :local_density
+								max_edges = include_selfloops ? (k * k) : (k * (k - 1))  # Pseudodigraph vs simple
+							end
+						else  # Undirected
+							if method == :local_clustering
+								max_edges = k * (k - 1) ÷ 2  # C(k,2)
+							else  # :local_density
+								max_edges = include_selfloops ? (k * (k + 1) ÷ 2) : (k * (k - 1) ÷ 2)
+							end
+						end
+						local_cc[i] = (max_edges > 0) ? (edge_sum / max_edges) : 0.0
 
-            #	Test-case validation (ego 25930421)
-                if run_ora_ego_25930421_test
-                    if test_alter_arcs === nothing || test_ego_arcs === nothing
-                        error("local_clustering_coefficient test failed: ego $test_ego_raw not found or has no neighbors in ORA-style path.")
-                    end
+					#	Compute ego density
+						if directed
+							ego_sum = weighted ? Base.sum(ego_subnet) : nnz(ego_subnet)
+							ego_max = k_ego * (k_ego - 1)
+							ego_density[i] = (ego_max > 0) ? (ego_sum / ego_max) : 0.0
+						else
+							ego_edges = nnz(triu(ego_subnet, 1))
+							den_ego = k_ego * (k_ego - 1) ÷ 2
+							ego_density[i] = (den_ego > 0) ? (ego_edges / den_ego) : 0.0
+						end
+				end
+			end
 
-                    #	These expectations are for the expanded directed arc counts
-                    #	when starting from the ORA symmetrized, binarized input.
-                    #	Expected approximate values:
-                    #		alter_arcs ≈ 816 (from 408 undirected ties)
-                    #		ego_arcs   ≈ 1166 (from 583 undirected non-self ties)
-                    #	We do not enforce exact equality here because slight differences
-                    #	in loop handling or symmetrization can shift counts, but we
-                    #	require that they are not trivially small.
-                    if (test_alter_arcs < 400) || (test_ego_arcs < 500)
-                        error("local_clustering_coefficient test failed for ego $test_ego_raw: alter_arcs=$(test_alter_arcs), ego_arcs=$(test_ego_arcs). Expected counts near 816 and 1166 respectively. Check symmetrization/binarization.")
-                    end
-                end
-
-            #	Result assembly for ORA-style path
-                return DataFrame(
-                    node = nodes_vec,
-                    ego_density = ego_density,
-                    local_clustering_coefficient = local_cc
-                )
-            end
-
-        #	Directed / weighted / transitivity path (sparse-matrix based)
-            adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=weighted)
-            n = length(idx_to_node)
-            ego_density = zeros(Float64, n)
-            local_cc = zeros(Float64, n)
-
-            for i in 1:n
-                if method == :density
-                    #	Ego network: ego_subnet has ego at index 1; neighbors at 2:end
-                        _, ego_subnet = _extract_ego_network(adj, i; directed=directed)
-
-                    #	No neighbors (1×1 ego_subnet)
-                        if size(ego_subnet, 1) <= 1
-                            continue
-                        end
-
-                    #	Ego size
-                        k_ego = size(ego_subnet, 1)
-
-                    #	Neighbor block (exclude ego row/col)
-                        neighbor_block_indices = 2:size(ego_subnet, 1)
-                        neighbor_subnet = ego_subnet[neighbor_block_indices, neighbor_block_indices]
-                        k = size(neighbor_subnet, 1)
-
-                    #	Numerator for local clustering (neighbor-only block)
-                        if include_neighbor_selfloops
-                            edge_sum = weighted ? Base.sum(neighbor_subnet) : nnz(neighbor_subnet)
-                            max_edges = if density_mode == :neighbors
-                                directed ? (k * k) : (k * (k + 1) / 2)
-                            elseif density_mode == :ego_nodes
-                                directed ? (k_ego * k_ego) : (k_ego * (k_ego + 1) / 2)
-                            else
-                                throw(ArgumentError("density_mode must be :neighbors or :ego_nodes"))
-                            end
-                        else
-                            neighbor_subnet_nodiag = copy(neighbor_subnet)
-                            for d in 1:k
-                                neighbor_subnet_nodiag[d, d] = 0
-                            end
-                            edge_sum = weighted ? Base.sum(neighbor_subnet_nodiag) : nnz(neighbor_subnet_nodiag)
-                            max_edges = if density_mode == :neighbors
-                                directed ? (k * (k - 1)) : (k * (k - 1) / 2)
-                            elseif density_mode == :ego_nodes
-                                directed ? (k_ego * (k_ego - 1)) : (k_ego * (k_ego - 1) / 2)
-                            else
-                                throw(ArgumentError("density_mode must be :neighbors or :ego_nodes"))
-                            end
-                        end
-
-                        local_cc[i] = (max_edges > 0) ? (edge_sum / max_edges) : 0.0
-
-                    #	Ego network density (ego + neighbors) — always n_ego-based
-                        ego_sum = weighted ? Base.sum(ego_subnet) : nnz(ego_subnet)
-                        ego_max = directed ? (k_ego * (k_ego - 1)) : (k_ego * (k_ego - 1) / 2)
-                        ego_density[i] = (ego_max > 0) ? (ego_sum / ego_max) : 0.0
-
-                else
-                    #	Triangle-based local clustering (directed variant assumed by helper)
-                        triangles, max_triangles = _count_triangles_directed(adj, i)
-                        local_cc[i] = (max_triangles > 0) ? (triangles / max_triangles) : 0.0
-
-                    #	Ego density not defined for :transitivity; leave as 0.0 or NaN if preferred
-                        ego_density[i] = 0.0
-                end
-            end
-
-        #	Result
-            return DataFrame(
-                node = idx_to_node,
-                ego_density = ego_density,
-                local_clustering_coefficient = local_cc
-            )
-    end
+		#	Return results
+			return DataFrame(
+				node = idx_to_node,
+				ego_density = ego_density,
+				local_clustering_coefficient = local_cc
+			)
+	end
 	@doc raw"""
-	**Description**
-	Compute two local ego-centric measures for each node in an edge list:
+		local_clustering_coefficient(edges::DataFrame; method=:local_clustering, ...) -> DataFrame
 
-	- **Ego Density**: Density of the ego network (ego + its neighbors + all links among them).
-	- **Local Clustering Coefficient**: Density of the alter network (ego removed; only alters and links between alters),
-	  with a configurable denominator based on either the number of neighbors (`k`) or the ego-network size (`n_ego`),
-	  or a triangle-based variant when `method = :transitivity`.
+		Compute local clustering coefficients for nodes using three distinct methods.
 
-	These measures support comparison with ORA-style ego and alter network statistics.
+		**Arguments**
+		- `edges::DataFrame`: Edge list with `:src`, `:dst`, optional `:weight`
+		- `directed::Bool`: Treat as directed network (default: `true`)
+		- `weighted::Bool`: Use edge weights (default: `false`)
+		- `method::Symbol`: Calculation method
+			- `:local_clustering`: Classic Watts-Strogatz clustering
+			- `:local_density`: ORA-style clustering coefficient density  
+			- `:local_transitivity`: Triangle-based clustering
+		- `agg_func::Function`: Multi-edge aggregation (default: `sum`)
+		- `include_selfloops::Union{Bool,Nothing}`: Include self-loops in calculations
+			- `nothing`: Method-specific defaults (true for density, false for clustering)
+			- `true`/`false`: Explicit override
+		- `run_ora_ego_25930421_test::Bool`: Run validation test (default: `false`)
 
-	**Usage**
-	`local_clustering_coefficient(edges::DataFrame;
-								directed::Bool=true,
-								weighted::Bool=false,
-								method::Symbol=:density,
-								agg_func::Function=sum,
-								include_neighbor_selfloops::Bool=false,
-								density_mode::Symbol=:neighbors,
-								run_ora_ego_25930421_test::Bool=false)`
+		**Returns**
+		`DataFrame` with columns:
+		- `:node`: Node identifier
+		- `:ego_density`: Density of ego network (ego + alters, loop-excluded)
+		- `:local_clustering_coefficient`: Clustering by selected method
 
-	**Arguments**
-	- `edges::DataFrame`: Edge list with `:src`, `:dst`, and optional `:weight` columns.
-	- `directed::Bool`: Treat graph as directed (`true`, default) or undirected (`false`).
-	- `weighted::Bool`: Use `:weight` values when present (`true`) or treat edges as binary (`false`, default).
-	- `method::Symbol`:
-	  - `:density`: Ego/alter density-based clustering (default).
-	  - `:transitivity`: Triangle-based local clustering (directed variant).
-	- `agg_func::Function`: Aggregation function for parallel edges when building the adjacency
-	  (default `sum` via `Base.sum`).
-	- `include_neighbor_selfloops::Bool`:
-	  - `true`: Include self-loops in the neighbor block numerator and allow them in the denominators:
-	    - Directed (neighbors mode): `k*k`  (alter block)
-	    - Directed (ego_nodes mode): `N_ego*N_ego`
-	    - Undirected (neighbors mode): `k*(k+1)/2`
-	    - Undirected (ego_nodes mode): `N_ego*(N_ego+1)/2`
-	  - `false`: Exclude self-loops and use classic no-self-loop denominators:
-	    - Directed (neighbors mode): `k*(k-1)`
-	    - Directed (ego_nodes mode): `N_ego*(N_ego-1)`
-	    - Undirected (neighbors mode): `k*(k-1)/2`
-	    - Undirected (ego_nodes mode): `N_ego*(N_ego-1)/2`
-	- `density_mode::Symbol`:
-	  - `:neighbors`: Normalize the alter-density numerator by the size of the alter set, `k`.
-	  - `:ego_nodes`: Normalize the alter-density numerator by the ego-network size, `N_ego` (ego + alters).
-	    This reproduces the observed ORA behavior where alter density is computed using `N_ego` in the denominator.
-	- `run_ora_ego_25930421_test::Bool`: If `true`, run a self-check on ego `25930421` using the ORA-style,
-	  undirected edge-list path. The function throws an error if the alter-arc or ego-arc counts are trivially
-	  small relative to the expected values (≈816 alter arcs, ≈1166 ego arcs), reporting both counts. This is
-	  intended for validating parity with a known ORA case.
+		**Methods**
 
-	**Details**
-	For `method = :density`, the function proceeds as follows for each node:
+		**1. Classic Local Clustering** (`:local_clustering`)
+		
+		The Watts-Strogatz (1998) clustering coefficient measuring density among a node's neighbors:
+		- Numerator: Edges between alters (excluding self-loops)
+		- Denominator: Maximum possible edges between alters
+			- Directed: k(k-1)
+			- Undirected: k(k-1)/2
+		- Where k = number of neighbors (degree)
+		- Always excludes self-loops to ensure values ∈ [0,1]
 
-	1. Extract the ego network:
-	   - Ego node.
-	   - All neighbors (nodes adjacent to ego).
-	   - All edges among these nodes.
-	2. Build:
-	   - `ego_subnet`: adjacency of ego + alters.
-	   - `alter_subnet`: adjacency of alters-only (ego removed).
-	3. Compute:
-	   - `ego_density` as the density of `ego_subnet` using `N_ego` in the denominator.
-	   - `local_clustering_coefficient` as the density of `alter_subnet` with numerator restricted to alter–alter
-	     edges, and denominator controlled by `density_mode` and `include_neighbor_selfloops`:
-	     - neighbors mode: denominator based on `k` (size of alter set).
-	     - ego_nodes mode: denominator based on `N_ego` (ego + alters).
+		**2. ORA Clustering Coefficient Density** (`:local_density`)
+		
+		Following ORA's implementation that includes self-loops in ego network density:
+		- Numerator: Edges between alters (including self-loops when `include_selfloops=true`)
+		- Denominator represents all possible ties among alters including self-ties:
+			- Directed: k² (all ordered pairs including self-pairs)
+			- Undirected: k(k+1)/2 (combinations with replacement)
+		
+		For undirected networks, the denominator k(k+1)/2 equals the number of unordered
+		pairs among k alters with replacement (i.e., C(k,2) + k self-pairs). This is
+		algebraically equivalent to n(n-1)/2 when expressed with n = k+1 (ego included).
 
-	For undirected graphs, the classic density formulas (neighbors mode, no self-loops) are:
-	- Ego density: `2 * E_ego / (N_ego * (N_ego - 1))`
-	- Local clustering: `2 * e_i / (k_i * (k_i - 1))`
+		**3. Local Transitivity** (`:local_transitivity`)
+		
+		Triangle-based clustering measuring the fraction of closed triangles:
+		- Counts triangles passing through the node
+		- Returns ratio of closed to total triangles
+		- Sets ego_density to 0 (not applicable for this method)
 
-	For directed graphs, the corresponding formulas are:
-	- Ego density: `E_ego / (N_ego * (N_ego - 1))`
-	- Local clustering: `e_i / (k_i * (k_i - 1))`
+		**Formulas**
 
-	The `include_neighbor_selfloops` and `density_mode` flags generalize these denominators to cases where
-	self-loops are counted and to ORA-style normalization by `N_ego`.
+		Classic Clustering (`:local_clustering`):
+	```
+		C_i = e_i / [k_i(k_i - 1)/d]
+	```
+		where e_i = edges between node i's neighbors, k_i = degree of node i,
+		d = 1 for directed, 2 for undirected
 
-	For `method = :transitivity`, the function delegates to a triangle-counting helper and returns
-	triangle-based local clustering coefficients. In this case, `ego_density` is set to `0.0` (or could be set
-	to `NaN` if desired) because there is no natural triangle-based analogue of ego network density.
+		ORA Clustering Density (`:local_density`) with loops:
+	```
+		Directed:   C_i = e_i / k_i²
+		Undirected: C_i = e_i / [k_i(k_i + 1)/2]
+	```
+		where e_i includes self-loops among alters when `include_selfloops=true`
 
-	**Value**
-	A `DataFrame` with columns:
-	- `node`: Node identifiers (matching the `:src`/`:dst` domain of the input).
-	- `ego_density::Float64`: Ego network density for each node (or `0.0` when `method = :transitivity`).
-	- `local_clustering_coefficient::Float64`: Local clustering coefficient for each node, either
-	  alter-density-based (`:density`) or triangle-based (`:transitivity`).
+		The undirected formula with loops corresponds to ORA's implementation where
+		each undirected edge {u,v} is internally represented as reciprocal arcs (u→v, v→u),
+		and the denominator becomes the combinations with replacement C(k+r-1,r) with r=2.
 
-	**Examples**
+		**Examples**
 	```julia
-	using DataFrames
-
-	#	Simple directed edge list
-	edges = DataFrame(
-		src = [1, 1, 2, 2, 3],
-		dst = [2, 3, 3, 4, 1]
-	)
-
-	#	Ego / alter density-based clustering (directed, neighbors mode)
-	local_stats = local_clustering_coefficient(edges; directed = true,
-	                                           method = :density,
-	                                           density_mode = :neighbors)
-
-	#	Undirected ORA-style variant (ego_nodes mode for ORA parity)
-	local_stats_ora = local_clustering_coefficient(edges; directed = false,
-	                                               method = :density,
-	                                               weighted = false,
-	                                               density_mode = :ego_nodes)
-
-	#	Triangle-based clustering (directed, ego_density = 0.0)
-	local_stats_tri = local_clustering_coefficient(edges; directed = true,
-	                                               method = :transitivity)
-
-	#	Run the 25930421 parity test (only meaningful on the matching dataset)
-	# local_stats_test = local_clustering_coefficient(edges_full;
-	#                                                 directed = false,
-	#                                                 weighted = false,
-	#                                                 method = :density,
-	#                                                 density_mode = :ego_nodes,
-	#                                                 run_ora_ego_25930421_test = true)
+		# Classic Watts-Strogatz clustering
+		results = local_clustering_coefficient(edges; method=:local_clustering)
+		
+		# ORA-style with self-loops included
+		results = local_clustering_coefficient(edges; method=:local_density)
+		
+		# Triangle-based transitivity
+		results = local_clustering_coefficient(edges; method=:local_transitivity)
+		
+		# Exclude self-loops from ORA-style density
+		results = local_clustering_coefficient(edges; 
+			method=:local_density, 
+			include_selfloops=false)
 	```
 
-	**See Also**
-	global_clustering_coefficient, weighted_clustering_coefficient
+		**References**
+		- Watts, D.J. & Strogatz, S.H. (1998). Collective dynamics of 'small-world' networks.
+		*Nature*, 393(6684), 440-442.
+		- Wasserman, S. & Faust, K. (1994). *Social Network Analysis: Methods and Applications*.
+		Cambridge University Press.
+		- Marsden, P.V. (2002). Egocentric and sociocentric measures of network centrality.
+		*Social Networks*, 24(4), 407-422.
 
-	**References**
+		**Notes**
+		- The ORA implementation's use of combinations with replacement (k+1 choose 2) for
+		undirected networks with loops provides a mathematically consistent framework
+		for comparing density across different network types
+		- The equivalence k(k+1)/2 = C(k,2) + k reflects that we're counting k self-pairs
+		plus C(k,2) distinct pairs among k alters
 
-	Watts DJ, Strogatz SH (1998). “Collective dynamics of ‘small-world’ networks.”
-	Nature 393(6684): 440–442.
+		**See Also**
+		- `global_clustering_coefficient`: Network-level clustering measures
+		- `weighted_clustering_coefficient`: Extensions for weighted networks
 	""" local_clustering_coefficient
-
 #	Global Clustering Coefficient (Network Level)
 	function global_clustering_coefficient(edges::DataFrame;
 	                                      directed::Bool = true,
