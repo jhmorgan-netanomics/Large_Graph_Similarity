@@ -2491,6 +2491,7 @@ THE SOFTWARE.
 		- `global_clustering_coefficient`: Network-level clustering measures
 		- `weighted_clustering_coefficient`: Extensions for weighted networks
 	""" local_clustering_coefficient
+
 #	Global Clustering Coefficient (Network Level)
 	function global_clustering_coefficient(edges::DataFrame;
 	                                      directed::Bool = true,
