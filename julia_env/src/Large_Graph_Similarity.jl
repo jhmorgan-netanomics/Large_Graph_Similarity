@@ -10120,6 +10120,94 @@ THE SOFTWARE.
 #   FEATURE CONSTRUCTORS   #
 ############################
 
+#	Helper for Comparator Function: Skewness about the mean (central moment)
+    function skew_about_mean(x; corrected::Bool = true)
+        """
+        Args:
+            x: AbstractVector (numbers; `missing` allowed → skipped)
+            corrected::Bool: If true, return Fisher's bias-corrected skewness (default).
+                             If false, return population (moment) skewness m3 / m2^(3/2).
+        Returns:
+            Float64: skewness about the mean (NaN if undefined).
+        Notes:
+            Population (moment) skewness:
+                m2 = mean((x - μ)^2), m3 = mean((x - μ)^3), skew = m3 / m2^(3/2).
+            Fisher correction (n > 2):
+                G1 = sqrt(n*(n-1)) / (n-2) * skew.
+        """
+
+        #	Validation & preprocessing (drop missings)
+            xv = collect(skipmissing(x))
+            n = length(xv)
+            if n == 0
+                return NaN
+            end
+            μ = mean(xv)
+
+        #	Central moments m2, m3 (with /n convention)
+            δ = @. (xv - μ)
+            m2 = mean(@. δ^2)
+            if m2 == 0.0
+                return 0.0   # all identical values ⇒ zero skew
+            end
+            m3 = mean(@. δ^3)
+            skew = m3 / (m2^(3/2))
+
+        #	Optional Fisher correction
+            if corrected
+                if n < 3
+                    return NaN
+                end
+                return sqrt(n*(n-1)) / (n-2) * skew
+            else
+                return skew
+            end
+    end
+
+#	Helper for the Comparator Function: Excess kurtosis about the mean (central moment)
+    function kurtosis_about_mean(x; corrected::Bool = true)
+        """
+        Args:
+            x: AbstractVector (numbers; `missing` allowed → skipped)
+            corrected::Bool: If true, return Fisher's bias-corrected **excess** kurtosis (default).
+                             If false, return population **excess** kurtosis: m4/m2^2 - 3.
+        Returns:
+            Float64: excess kurtosis about the mean (NaN if undefined).
+        Notes:
+            Population (moment) excess kurtosis:
+                m2 = mean((x - μ)^2), m4 = mean((x - μ)^4), g2 = m4/m2^2 - 3.
+            Fisher correction (n > 3):
+                G2 = ((n-1)/((n-2)*(n-3))) * ((n+1)*g2 + 6).
+        """
+
+        #	Validation & preprocessing (drop missings)
+            xv = collect(skipmissing(x))
+            n = length(xv)
+            if n == 0
+                return NaN
+            end
+            μ = mean(xv)
+
+        #	Central moments m2, m4 (with /n convention)
+            δ = @. (xv - μ)
+            m2 = mean(@. δ^2)
+            if m2 == 0.0
+                return -3.0  # all identical values ⇒ variance 0 ⇒ excess kurtosis of a point mass
+            end
+            m4 = mean(@. δ^4)
+            g2 = m4/(m2^2) - 3.0   # population **excess** kurtosis
+
+        #	Optional Fisher correction
+            if corrected
+                if n < 4
+                    return NaN
+                end
+                return ((n-1)/((n-2)*(n-3))) * ((n+1)*g2 + 6)
+            else
+                return g2
+            end
+    end
+
 #	Helper: Undirected Binary Network Constructor for Comparisons
     function undirected_binary_constructor(edges::DataFrame, 
                                         nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}};
@@ -10489,7 +10577,279 @@ THE SOFTWARE.
             end
 
         #	Return comprehensive statistics at all levels
-            return global_stats_df, triads_ud, node_stats
+            return global_measures, triads_ud, node_stats
+    end
+
+#	Helper: Symmetric Binary Feature Builder for Network Comparator
+    function symmetric_binary_feature_builder(global_stats::DataFrame, 
+                                            triad_census_counts::DataFrame, 
+                                            node_measures::DataFrame)
+        """
+        Helper function for network_comparator() that builds standardized feature vector from network statistics.
+        
+        Args:
+            global_stats::DataFrame: Global network measures from undirected_binary_constructor
+            triad_census_counts::DataFrame: Triad census with columns [:triad, :count, :proportion]
+            node_measures::DataFrame: Node-level statistics including community assignments
+        Returns:
+            DataFrame: Feature vector with columns [:type, :measure, :value]
+        Notes:
+            - Transforms raw statistics into normalized features
+            - Groups features by type for interpretability
+            - Pre-allocates arrays for efficiency
+            - 2-K Undirected Reach is normalized by N(N-1), where 1 indicates that all nodes are reachable within 2 steps.
+        """
+
+        #	Input validation
+            @assert hasproperty(global_stats, :measure) && hasproperty(global_stats, :value) "global_stats needs :measure and :value"
+            @assert hasproperty(triad_census_counts, :triad) && hasproperty(triad_census_counts, :proportion) "triad_census needs :triad and :proportion"
+            @assert hasproperty(node_measures, :node) "node_measures needs :node column"
+
+        #	Deep copy inputs to prevent mutation
+            global_stats = deepcopy(global_stats)
+            triad_census_counts = deepcopy(triad_census_counts)
+            node_measures = deepcopy(node_measures)
+
+        #	========== GLOBAL NETWORK MEASURES ==========
+
+        #	Prepare global stats with row ordering
+            global_stats.measure = string.(global_stats.measure)
+            global_stats.Obs_ID = 1:nrow(global_stats)
+            global_stats = select(global_stats, :Obs_ID, :measure, :value)
+
+        #	Extract key values for normalization
+            graph_size = parse(Int64, global_stats[global_stats.measure .== "num_nodes", :value][1])
+            num_wcc = parse(Int64, global_stats[global_stats.measure .== "num_wcc", :value][1])
+
+        #	Process component size proportions
+            size_measures = ["largest_wcc", "second_largest_wcc", "min_wcc_size", "largest_scc", "second_largest_scc"]
+            size_idx = findall(in(size_measures), global_stats.measure)
+            
+            size_features = DataFrame(
+                Obs_ID = global_stats.Obs_ID[size_idx],
+                measure = global_stats.measure[size_idx] .* "_proportion",
+                value = round.(parse.(Int64, global_stats.value[size_idx]) ./ graph_size, digits=6)
+            )
+
+        #	Process WCC type proportions
+            type_measures = ["num_isolates", "num_dyads", "num_triads", "num_groups"]
+            type_idx = findall(in(type_measures), global_stats.measure)
+            
+            type_features = DataFrame(
+                Obs_ID = global_stats.Obs_ID[type_idx],
+                measure = global_stats.measure[type_idx] .* "_proportion",
+                value = round.(parse.(Int64, global_stats.value[type_idx]) ./ num_wcc, digits=6)
+            )
+
+        #	Retain raw component measures
+            kept_measures = ["num_nodes", "num_edges", "num_scc", "bow_tie_scc_fraction", 
+                            "bow_tie_in_fraction", "bow_tie_out_fraction"]
+            kept_idx = findall(in(kept_measures), global_stats.measure)
+            
+            kept_features = DataFrame(
+                Obs_ID = global_stats.Obs_ID[kept_idx],
+                measure = global_stats.measure[kept_idx],
+                value = parse.(Float64, global_stats.value[kept_idx])
+            )
+
+        #	Combine component features
+            component_features = vcat(kept_features, size_features, type_features)
+            component_features.type .= "Component Measure"
+
+        #	========== LINK STATISTICS ==========
+
+        #	Process link measures with robust parsing
+            link_types = ["all_links", "nonself_links", "self_loops"]
+            link_idx = findall(in(link_types), global_stats.measure)
+            
+            #	Pre-allocate result array (6 stats per type, not 7)
+                n_link_features = length(link_types) * 6  
+                link_data = Vector{NamedTuple{(:Obs_ID, :type, :measure, :value), Tuple{Int, String, String, Float64}}}(undef, n_link_features)
+                
+            #	Process each link type
+                feature_idx = 1
+                prefixes = Dict("all_links" => "all_link_", 
+                            "nonself_links" => "non_self_", 
+                            "self_loops" => "self_loops_")
+                
+                stat_names = ["count", "min", "max", "mean", "std", "sum"]
+                
+                for (i, mkey) in enumerate(link_types)
+                    row_idx = link_idx[i]
+                    vstr = global_stats.value[row_idx]
+                    obsid = global_stats.Obs_ID[row_idx]
+                    
+                    #	Use regex to extract numeric values robustly
+                        numbers = Float64[]
+                        for m in eachmatch(r"=\s*([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)", vstr)
+                            push!(numbers, parse(Float64, m.captures[1]))
+                        end
+                        
+                    #	Take first 6 values (excluding density which appears at end)
+                        numbers = numbers[1:min(6, length(numbers))]
+                        
+                    #	Ensure we have 6 values
+                        if length(numbers) < 6
+                            @warn "Expected 6 values for $mkey, got $(length(numbers))"
+                            resize!(numbers, 6)
+                            numbers[length(numbers)+1:6] .= NaN
+                        end
+                        
+                    #	Store in pre-allocated array
+                        for (j, stat_name) in enumerate(stat_names)
+                            link_data[feature_idx] = (
+                                Obs_ID = obsid,
+                                type = "Link Measure",
+                                measure = prefixes[mkey] * stat_name,
+                                value = numbers[j]
+                            )
+                            feature_idx += 1
+                        end
+                end
+                
+                link_features = DataFrame(link_data)
+
+        #	Normalize non-self and self-loop counts to proportions
+            num_edges = component_features[component_features.measure .== "num_edges", :value][1]
+            
+            for (count_name, prop_name) in [("non_self_count", "non_self_proportion"), 
+                                            ("self_loops_count", "self_loops_proportion")]
+                idx = findfirst(==(count_name), link_features.measure)
+                if !isnothing(idx)
+                    link_features.value[idx] = link_features.value[idx] / num_edges
+                    link_features.measure[idx] = prop_name
+                end
+            end
+            
+            #	Remove redundant all_link_count
+                filter!(row -> row.measure != "all_link_count", link_features)
+
+        #	========== GLOBAL NETWORK METRICS ==========
+
+        #	Process remaining global measures (including single density)
+            global_measures = ["degree assortativity", "transitivity", "local clustering coefficient", 
+                               "density", "resolution", "modularity"]
+            global_idx = findall(in(global_measures), global_stats.measure)
+            
+            global_features = DataFrame(
+                Obs_ID = global_stats.Obs_ID[global_idx],
+                type = fill("Global Network Measure", length(global_idx)),
+                measure = global_stats.measure[global_idx],
+                value = parse.(Float64, global_stats.value[global_idx])
+            )
+
+        #	Combine all global-level features
+            global_all = vcat(component_features, link_features, global_features)
+            sort!(global_all, :Obs_ID)
+            select!(global_all, Not(:Obs_ID))
+
+        #	========== TRIAD CENSUS ==========
+
+        #	Create triad census features
+            triad_features = DataFrame(
+                type = fill("Triad Census", nrow(triad_census_counts)),
+                measure = triad_census_counts.triad,
+                value = triad_census_counts.proportion
+            )
+
+        #	========== K-CORE DECOMPOSITION ==========
+
+        #	Compute k-core membership distribution
+            n_nodes = nrow(node_measures)
+            k_core_groups = combine(
+                groupby(node_measures, :k_core_all),
+                nrow => :count
+            )
+            sort!(k_core_groups, :k_core_all)
+            
+            k_core_features = DataFrame(
+                type = fill("K-Core Decomposition", nrow(k_core_groups)),
+                measure = "k_core_all_" .* string.(k_core_groups.k_core_all),
+                value = round.(k_core_groups.count ./ n_nodes, digits=6)
+            )
+
+        #	========== COMMUNITY STRUCTURE ==========
+
+        #	Compute community size distribution
+            community_groups = combine(
+                groupby(node_measures, :community),
+                nrow => :count
+            )
+            sort!(community_groups, :count, rev=true)
+            
+            community_features = DataFrame(
+                type = fill("Community Structure", nrow(community_groups)),
+                measure = "Community_" .* string.(1:nrow(community_groups)),
+                value = round.(community_groups.count ./ n_nodes, digits=6)
+            )
+
+        #	========== NODE-LEVEL AGGREGATES ==========
+
+        #	Normalize 2-step reach per node (undirected): proportion of nodes reachable within 2 steps
+        #	(so 1.0 means the node can reach every other node within two hops)
+            full_n = parse(Int64,global_stats.value[1])
+            if hasproperty(node_measures, :undirected_reach_2)
+                #	Guard against n_nodes ≤ 1
+                    den = full_n * (full_n-1)
+                    node_measures.undirected_reach_2_normalized = node_measures.undirected_reach_2 ./ den
+            end
+
+        #	Define measures and their types
+            node_measures_config = [
+                ("total_degree_normalized", "Degree Measures"),
+                ("in_group_ratio", "Degree Measures"),
+                ("undirected_reach_2_normalized", "Local Reach"),
+                ("ego_density", "Local Structure"),
+                ("density_clustering_coefficient", "Local Structure"),
+                ("modularity_vitality_hub", "Influence"),
+                ("modularity_vitality_bridge", "Influence")
+            ]
+            
+        #	Pre-allocate node features array
+            n_node_features = length(node_measures_config) * 5  # 5 stats per measure
+            node_data = Vector{NamedTuple{(:type, :measure, :value), Tuple{String, String, Float64}}}(undef, n_node_features)
+            
+        #	Compute aggregate statistics efficiently
+            feature_idx = 1
+            for (col_name, feat_type) in node_measures_config
+                if hasproperty(node_measures, Symbol(col_name))
+                    col_data = node_measures[!, col_name]
+                    
+                    #	Compute statistics
+                        stats = (
+                            mean = mean(col_data),
+                            median = median(col_data),
+                            std = std(col_data),
+                            skew = skew_about_mean(col_data),
+                            kurtosis = kurtosis_about_mean(col_data)
+                        )
+                        
+                    #	Store in pre-allocated array
+                        for (stat_name, stat_value) in pairs(stats)
+                            node_data[feature_idx] = (
+                                type = feat_type,
+                                measure = col_name * "_" * string(stat_name),
+                                value = round(stat_value, digits=6)
+                            )
+                            feature_idx += 1
+                        end
+                end
+            end
+            
+            node_features = DataFrame(node_data[1:feature_idx-1])
+
+        #	========== COMBINE ALL FEATURES ==========
+
+        #	Combine all feature DataFrames
+            feature_vector = vcat(
+                global_all,
+                triad_features,
+                k_core_features,
+                community_features,
+                node_features
+            )
+            
+            return feature_vector
     end
 
 ####################################
