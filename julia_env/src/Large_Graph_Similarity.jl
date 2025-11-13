@@ -9051,8 +9051,7 @@ THE SOFTWARE.
 					end
 
 				#	Bow-tie regions relative to giant SCC
-					if n == 0 || isempty(ssizes)
-						bt_scc_size = 0
+					if n == 0 || isempty(ssizes) || largest_scc == 0
 						bt_in_size = 0
 						bt_out_size = 0
 					else
@@ -9121,8 +9120,7 @@ THE SOFTWARE.
 								end
 							end
 
-						#	Region sizes
-							bt_scc_size = count(in_scc)
+						#	Region sizes (excluding SCC nodes)
 							bt_in_size = 0
 							bt_out_size = 0
 
@@ -9144,7 +9142,6 @@ THE SOFTWARE.
 					largest_scc = 0
 					second_largest_scc = 0
 
-					bt_scc_size = 0
 					bt_in_size = 0
 					bt_out_size = 0
 			end
@@ -9155,7 +9152,7 @@ THE SOFTWARE.
 				bt_in_frac = 0.0
 				bt_out_frac = 0.0
 			else
-				bt_scc_frac = bt_scc_size / n
+				bt_scc_frac = largest_scc / n  # Use largest_scc directly
 				bt_in_frac = bt_in_size / n
 				bt_out_frac = bt_out_size / n
 			end
@@ -9175,7 +9172,6 @@ THE SOFTWARE.
 				num_dyads = num_dyads,
 				num_triads = num_triads,
 				num_groups = num_groups,
-				bow_tie_scc_size = bt_scc_size,
 				bow_tie_in_size = bt_in_size,
 				bow_tie_out_size = bt_out_size,
 				bow_tie_scc_fraction = bt_scc_frac,
@@ -9197,7 +9193,7 @@ THE SOFTWARE.
 		- `graph_type::Symbol`: `:directed` (default) or `:undirected`
 
 		**Returns**
-		`NamedTuple` with 19 fields:
+		`NamedTuple` with 18 fields:
 		- `num_nodes`: Total number of nodes in universe
 		- `num_edges`: Number of edges in input
 		- `num_wcc`: Number of weakly connected components
@@ -9205,16 +9201,15 @@ THE SOFTWARE.
 		- `largest_wcc`: Size of largest weak component
 		- `second_largest_wcc`: Size of second largest weak component
 		- `min_wcc_size`: Size of smallest weak component
-		- `largest_scc`: Size of largest SCC
+		- `largest_scc`: Size of largest SCC (also used as giant SCC for bow-tie)
 		- `second_largest_scc`: Size of second largest SCC
 		- `num_isolates`: Number of weak components of size 1
 		- `num_dyads`: Number of weak components of size 2
 		- `num_triads`: Number of weak components of size 3
 		- `num_groups`: Number of weak components with size ≥ 4
-		- `bow_tie_scc_size`: Size of giant SCC
-		- `bow_tie_in_size`: Number of nodes in IN region
-		- `bow_tie_out_size`: Number of nodes in OUT region
-		- `bow_tie_scc_fraction`: `bow_tie_scc_size / num_nodes`
+		- `bow_tie_in_size`: Number of nodes in IN region (can reach giant SCC)
+		- `bow_tie_out_size`: Number of nodes in OUT region (reachable from giant SCC)
+		- `bow_tie_scc_fraction`: `largest_scc / num_nodes`
 		- `bow_tie_in_fraction`: `bow_tie_in_size / num_nodes`
 		- `bow_tie_out_fraction`: `bow_tie_out_size / num_nodes`
 
@@ -9229,8 +9224,8 @@ THE SOFTWARE.
 
 		**Bow-tie Structure** (directed graphs):
 		
-		The bow-tie model partitions directed graphs into regions relative to the giant SCC:
-		- **SCC**: The largest strongly connected component (giant SCC)
+		The bow-tie model partitions directed graphs into regions relative to the largest SCC:
+		- **SCC**: The largest strongly connected component
 		- **IN**: Nodes that can reach the SCC but aren't in it
 		- **OUT**: Nodes reachable from the SCC but not in it
 		- **Tendrils/Disconnected**: Remaining nodes (not explicitly reported)
@@ -9241,6 +9236,7 @@ THE SOFTWARE.
 		- Multi-edges are collapsed to single edges
 		- Edge weights are ignored (binary connectivity only)
 		- Self-loops do not affect component structure
+		- The largest SCC serves as the giant component for bow-tie analysis
 		- Easily converted to DataFrame: `DataFrame(component_statistics(edges))`
 
 		**Examples**

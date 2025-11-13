@@ -835,15 +835,108 @@ using Large_Graph_Similarity
 ########################################################################
 
 #   Generating Undirected/Binary Graph Design Matrices from which to Create Feature Vectors
-    global_stats, triad_census, node_measures = undirected_binary_constructor(balikatan_arcs, nodes; directed=false, weighted=false, 
-                                                                              resolution_sweep=true)
+    global_stats, triad_census_counts, node_measures = undirected_binary_constructor(balikatan_arcs, nodes; directed=false, weighted=false, 
+                                                                                     resolution_sweep=true)
 
     global_stats, triad_census_counts, node_measures = undirected_binary_constructor(balikatan_arcs, nodes; directed=false, weighted=false, 
                                                                                      resolution=1.0)
 
 #   Generated Undirected/Unweighted Feature Vector
+    function symmetric_binary_feature_builder(global_stats::DataFrame, triad_census_counts::DataFrame, node_measures::DataFrame)
+        
 
-#   START BACK HERE!!!!
+        #	========== GLOBAL NETWORK MEASURES ==========
+
+        #   Make all the Global Measure Names Strings to Ease Processing & Adding Row Indicator for Ordering Later
+            global_stats.measure = string.(global_stats.measure)
+            global_stats.Obs_ID = [1:1:nrow(global_stats);]
+            global_stats = global_stats[:,[3,1,2]]
+
+
+        #   Calculate Component Size Proportions
+            graph_size = parse.(Int64, global_stats[(global_stats.measure .== "num_nodes"),3])[1]
+            component_measures = ["largest_wcc", "second_largest_wcc", "min_wcc_size", "largest_scc", "second_largest_scc"]
+            size_measure_to_normalize = subset(global_stats, :measure => ByRow(in(component_measures))) 
+            size_measure_to_normalize.proportion = parse.(Int64, size_measure_to_normalize.value) ./ graph_size
+            size_measure_to_normalize.proportion = round.(size_measure_to_normalize.proportion, digits=6)
+
+        #   Calculate WCC Component Type Proportions
+            wcc_component_number =  parse.(Int64, global_stats[(global_stats.measure .== "num_wcc"),3])[1]  
+            component_measures = ["num_isolates", "num_dyads", "num_triads", "num_groups"]
+            type_measure_to_normalize = subset(global_stats, :measure => ByRow(in(component_measures))) 
+            type_measure_to_normalize.proportion =  parse.(Int64, type_measure_to_normalize.value) ./ wcc_component_number
+            type_measure_to_normalize.proportion = round.(type_measure_to_normalize.proportion, digits=6)
+
+        #   Revise Normalized Component Feature Names
+            size_measure_to_normalize.measure = string.(size_measure_to_normalize.measure,"_proportion")
+            type_measure_to_normalize.measure = string.(type_measure_to_normalize.measure,"_proportion")
+
+        #   Isolating Features that Will Retain their Raw Values
+            component_measures = ["num_nodes", "num_edges", "num_scc", "bow_tie_scc_fraction", "bow_tie_in_fraction", "bow_tie_out_fraction"]
+            kept_component_measures = subset(global_stats, :measure => ByRow(in(component_measures))) 
+
+        #   Constructing Component Features Index
+            size_measure_to_normalize = size_measure_to_normalize[:,[1:2; 4]]
+            type_measure_to_normalize = type_measure_to_normalize[:,[1:2; 4]]
+            normalized_component_measures =  [size_measure_to_normalize; type_measure_to_normalize]
+            rename!(normalized_component_measures, ["Obs_ID", "measure", "value"])
+            component_features = [kept_component_measures; normalized_component_measures]
+            insertcols!(component_features, 2, :type => vec(fill("Component Measure", 1, nrow( component_features))))
+
+        #   Isolating Link Stats
+            link_measures = ["all_links", "nonself_links", "self_loops"]
+            link_measure_to_normalize = subset(global_stats, :measure => ByRow(in(link_measures))) 
+
+        #   Constructing Link Stats Feature Index
+            all_links_str = link_measure_to_normalize[link_measure_to_normalize.measure .== "all_links", 3][1]
+            tokens = split(all_links_str, ",")
+
+            link_val_names = String.(strip.(first.(split.(tokens, "="))))
+            link_val_names[1] = "count"  # enforce "count" label
+
+            _to_do = [("all_links",      "all_link_"), ("nonself_links",  "non_self_"), ("self_loops",     "self_loops_")]
+
+            dfs = DataFrame[]
+            for (mkey, prefix) in _to_do
+                #   Pull the value string and Obs_ID for this measure
+                    vstr = link_measure_to_normalize[link_measure_to_normalize.measure .== mkey, 3][1]
+                    obsid = link_measure_to_normalize[link_measure_to_normalize.measure .== mkey, :Obs_ID][1]
+
+                #   Split into "key = val" chunks and extract just the number after '='
+                    parts = split(vstr, ",")
+                    nums = Vector{Float64}(undef, length(parts))
+                    @inbounds for i in eachindex(parts)
+                        m = match(r"=\s*([+-]?\d+(?:\.\d+)?)", parts[i])
+                        nums[i] = m === nothing ? NaN : parse(Float64, m.captures[1])
+                    end
+
+                #   Assemble this block
+                    df = DataFrame(measure = String.(link_val_names), value = nums)
+                    df.measure = string.(prefix, df.measure)
+                    insertcols!(df, 1, :Obs_ID => fill(obsid, nrow(df)))
+
+                    push!(dfs, df)
+            end
+
+            link_features = vcat(dfs...)
+
+        #   Normalize Counts
+
+        #   COME BACK HERE!!!!
+
+
+
+
+      
+
+
+
+        #    19  all_links                     (count = 3114, min = 1.0, max = …
+        #    20  nonself_links                 (count = 3073, min = 1.0, max = …
+        #    21  self_loops                    (count = 41, min = 1.0, max = 1.…
+
+
+    end
 
 ######################################
 #   COMPARATOR FUNCTION ASSESSMENT   #
