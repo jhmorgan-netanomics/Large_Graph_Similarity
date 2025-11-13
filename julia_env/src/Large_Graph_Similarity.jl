@@ -8983,7 +8983,7 @@ THE SOFTWARE.
 
 #	Component Statistics (weak & strong, plus bow-tie fractions)
 	function component_statistics(edges::DataFrame;
-								nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}}=nothing,
+								nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}} = nothing,
 								graph_type::Symbol = :directed)
 		"""
 		Args:
@@ -9011,62 +9011,63 @@ THE SOFTWARE.
 			num_edges = nrow(edges)
 
 		#	Weak components (always)
-			wres   = _weak_components(adj)
+			wres = _weak_components(adj)
 			wsizes = wres.sizes
 
-			num_wcc      = length(wsizes)
+			num_wcc = length(wsizes)
 			num_isolates = count(==(1), wsizes)
-			num_dyads    = count(==(2), wsizes)
-			num_triads   = count(==(3), wsizes)
+			num_dyads = count(==(2), wsizes)
+			num_triads = count(==(3), wsizes)
+
+		#	Weak component size statistics
+			if isempty(wsizes)
+				largest_wcc = 0
+				second_largest_wcc = 0
+				min_wcc_size = 0
+			else
+				wsizes_sorted = sort(wsizes; rev=true)
+				largest_wcc = wsizes_sorted[1]
+				second_largest_wcc = length(wsizes_sorted) ≥ 2 ? wsizes_sorted[2] : 0
+				min_wcc_size = minimum(wsizes)
+			end
 
 		#	Groups: components with size ≥ 4
 			num_groups = count(>=(4), wsizes)
 
-			if num_groups > 0
-				group_sizes = filter(>=(4), wsizes)
-				min_group_size = minimum(group_sizes)
-				max_group_size = maximum(group_sizes)
-			else
-				min_group_size = 0
-				max_group_size = 0
-			end
-
 		#	Strong components + bow-tie (for directed graphs)
 			if graph_type == :directed
 				#	SCCs
-					sres   = _strong_components(adj)
+					sres = _strong_components(adj)
 					ssizes = sres.sizes
 					num_scc = length(ssizes)
 
 					if isempty(ssizes)
-						largest_scc        = 0
+						largest_scc = 0
 						second_largest_scc = 0
 					else
 						s_sorted = sort(ssizes; rev=true)
-						largest_scc        = s_sorted[1]
+						largest_scc = s_sorted[1]
 						second_largest_scc = length(s_sorted) ≥ 2 ? s_sorted[2] : 0
 					end
 
 				#	Bow-tie regions relative to giant SCC
 					if n == 0 || isempty(ssizes)
-						bt_scc_size  = 0
-						bt_in_size   = 0
-						bt_out_size  = 0
+						bt_scc_size = 0
+						bt_in_size = 0
+						bt_out_size = 0
 					else
 						#	Find id of largest SCC
 							scc_sizes_by_id = Dict{Int,Int}()
 							@inbounds for (i, cid) in enumerate(sres.membership)
 								scc_sizes_by_id[cid] = get(scc_sizes_by_id, cid, 0) + 1
 							end
-							giant_id, _ = findmax(collect(values(scc_sizes_by_id)))
 							
-						#	findmax gives (value, index in values-vector); we need key for that value.
-						#	simpler: recompute explicitly
+						#	Find giant component ID
 							giant_id = 1
-							best_sz  = -1
+							best_sz = -1
 							for (cid, sz) in scc_sizes_by_id
 								if sz > best_sz
-									best_sz  = sz
+									best_sz = sz
 									giant_id = cid
 								end
 							end
@@ -9080,7 +9081,7 @@ THE SOFTWARE.
 						#	Directed neighbors for reachability
 							neigh = _directed_neighbors(adj)
 							out_neighbors = neigh.out_neighbors
-							in_neighbors  = neigh.in_neighbors
+							in_neighbors = neigh.in_neighbors
 
 						#	Reachable FROM SCC (OUT region)
 							reach_from_scc = falses(n)
@@ -9101,7 +9102,7 @@ THE SOFTWARE.
 								end
 							end
 
-						#	Reachable TO SCC (IN region) via transpose (use in_neighbors as outgoing)
+						#	Reachable TO SCC (IN region) via transpose
 							reach_to_scc = falses(n)
 							empty!(queue)
 							@inbounds for v in 1:n
@@ -9122,7 +9123,7 @@ THE SOFTWARE.
 
 						#	Region sizes
 							bt_scc_size = count(in_scc)
-							bt_in_size  = 0
+							bt_in_size = 0
 							bt_out_size = 0
 
 							@inbounds for v in 1:n
@@ -9138,46 +9139,47 @@ THE SOFTWARE.
 					end
 
 			else
-				#	For undirected graphs: SCC stats mirror weak stats; bow-tie not meaningful.
-					num_scc            = 0
-					largest_scc        = 0
+				#	For undirected graphs: SCC stats mirror weak stats; bow-tie not meaningful
+					num_scc = 0
+					largest_scc = 0
 					second_largest_scc = 0
 
-					bt_scc_size  = 0
-					bt_in_size   = 0
-					bt_out_size  = 0
+					bt_scc_size = 0
+					bt_in_size = 0
+					bt_out_size = 0
 			end
 
 		#	Fractions (guard against n == 0)
 			if n == 0
 				bt_scc_frac = 0.0
-				bt_in_frac  = 0.0
+				bt_in_frac = 0.0
 				bt_out_frac = 0.0
 			else
-				bt_scc_frac = bt_scc_size  / n
-				bt_in_frac  = bt_in_size   / n
-				bt_out_frac = bt_out_size  / n
+				bt_scc_frac = bt_scc_size / n
+				bt_in_frac = bt_in_size / n
+				bt_out_frac = bt_out_size / n
 			end
 
 		#	Return summary as NamedTuple
 			return (
-				num_nodes            = n,
-				num_edges            = num_edges,
-				num_wcc              = num_wcc,
-				num_scc              = num_scc,
-				largest_scc          = largest_scc,
-				second_largest_scc   = second_largest_scc,
-				num_isolates         = num_isolates,
-				num_dyads            = num_dyads,
-				num_triads           = num_triads,
-				num_groups           = num_groups,
-				min_group_size       = min_group_size,
-				max_group_size       = max_group_size,
-				bow_tie_scc_size     = bt_scc_size,
-				bow_tie_in_size      = bt_in_size,
-				bow_tie_out_size     = bt_out_size,
+				num_nodes = n,
+				num_edges = num_edges,
+				num_wcc = num_wcc,
+				num_scc = num_scc,
+				largest_wcc = largest_wcc,
+				second_largest_wcc = second_largest_wcc,
+				min_wcc_size = min_wcc_size,
+				largest_scc = largest_scc,
+				second_largest_scc = second_largest_scc,
+				num_isolates = num_isolates,
+				num_dyads = num_dyads,
+				num_triads = num_triads,
+				num_groups = num_groups,
+				bow_tie_scc_size = bt_scc_size,
+				bow_tie_in_size = bt_in_size,
+				bow_tie_out_size = bt_out_size,
 				bow_tie_scc_fraction = bt_scc_frac,
-				bow_tie_in_fraction  = bt_in_frac,
+				bow_tie_in_fraction = bt_in_frac,
 				bow_tie_out_fraction = bt_out_frac,
 			)
 	end
@@ -9195,19 +9197,20 @@ THE SOFTWARE.
 		- `graph_type::Symbol`: `:directed` (default) or `:undirected`
 
 		**Returns**
-		`NamedTuple` with 18 fields:
+		`NamedTuple` with 19 fields:
 		- `num_nodes`: Total number of nodes in universe
 		- `num_edges`: Number of edges in input
 		- `num_wcc`: Number of weakly connected components
 		- `num_scc`: Number of strongly connected components (directed only)
+		- `largest_wcc`: Size of largest weak component
+		- `second_largest_wcc`: Size of second largest weak component
+		- `min_wcc_size`: Size of smallest weak component
 		- `largest_scc`: Size of largest SCC
 		- `second_largest_scc`: Size of second largest SCC
 		- `num_isolates`: Number of weak components of size 1
 		- `num_dyads`: Number of weak components of size 2
 		- `num_triads`: Number of weak components of size 3
 		- `num_groups`: Number of weak components with size ≥ 4
-		- `min_group_size`: Minimum size among groups (0 if none)
-		- `max_group_size`: Maximum size among groups (0 if none)
 		- `bow_tie_scc_size`: Size of giant SCC
 		- `bow_tie_in_size`: Number of nodes in IN region
 		- `bow_tie_out_size`: Number of nodes in OUT region
