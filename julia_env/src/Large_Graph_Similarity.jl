@@ -7584,8 +7584,22 @@ THE SOFTWARE.
 
 		#	Filter node_stats columns based on graph type
 			if directed && weighted
-				#	Directed + Weighted: keep all columns
-					filtered_node_stats = full_node_stats
+				#	Directed + Weighted: include degree and weighted-degree variants
+					filtered_node_stats = select(full_node_stats,
+						:node, :community,
+						:in_degree, :out_degree, :total_degree,
+						:in_degree_in_group, :out_degree_in_group, :total_degree_in_group,
+						:in_degree_between, :out_degree_between, :total_degree_between,
+						:in_strength => :weighted_in_degree,
+						:out_strength => :weighted_out_degree,
+						:total_strength => :weighted_total_degree,
+						:in_strength_in_group => :weighted_in_degree_in_group,
+						:out_strength_in_group => :weighted_out_degree_in_group,
+						:total_strength_in_group => :weighted_total_degree_in_group,
+						:in_strength_between => :weighted_in_degree_between,
+						:out_strength_between => :weighted_out_degree_between,
+						:total_strength_between => :weighted_total_degree_between
+					)
 					
 			elseif directed && !weighted
 				#	Directed + Binary: exclude strength columns
@@ -7597,12 +7611,15 @@ THE SOFTWARE.
 					)
 					
 			elseif !directed && weighted
-				#	Undirected + Weighted: only total degree/strength columns
+				#	Undirected + Weighted: total degree + weighted total degree variants
 					filtered_node_stats = select(full_node_stats,
 						:node, :community,
-						:total_degree, :total_strength,
-						:total_degree_in_group, :total_strength_in_group,
-						:total_degree_between, :total_strength_between
+						:total_degree,
+						:total_strength => :weighted_total_degree,
+						:total_degree_in_group,
+						:total_strength_in_group => :weighted_total_degree_in_group,
+						:total_degree_between,
+						:total_strength_between => :weighted_total_degree_between
 					)
 					
 			else
@@ -7758,21 +7775,22 @@ THE SOFTWARE.
 			- **Undirected + Binary**: 
 				- `:total_degree`, `:total_degree_in_group`, `:total_degree_between`
 			- **Undirected + Weighted**: 
-				- All undirected binary columns plus:
-				- `:total_strength`, `:total_strength_in_group`, `:total_strength_between`
+				- `:total_degree`, `:weighted_total_degree`
+				- `:total_degree_in_group`, `:weighted_total_degree_in_group`
+				- `:total_degree_between`, `:weighted_total_degree_between`
 			- **Directed + Binary**:
 				- `:in_degree`, `:out_degree`, `:total_degree`
 				- `:in_degree_in_group`, `:out_degree_in_group`, `:total_degree_in_group`
 				- `:in_degree_between`, `:out_degree_between`, `:total_degree_between`
 			- **Directed + Weighted**:
 				- All directed binary columns plus:
-				- `:in_strength`, `:out_strength`, `:total_strength`
-				- `:in_strength_in_group`, `:out_strength_in_group`, `:total_strength_in_group`
-				- `:in_strength_between`, `:out_strength_between`, `:total_strength_between`
+				- `:weighted_in_degree`, `:weighted_out_degree`, `:weighted_total_degree`
+				- `:weighted_in_degree_in_group`, `:weighted_out_degree_in_group`, `:weighted_total_degree_in_group`
+				- `:weighted_in_degree_between`, `:weighted_out_degree_between`, `:weighted_total_degree_between`
 
 		2. **`group_stats::DataFrame`**: Group-level aggregated statistics:
 			- Always: `:group_id`, `:group_size`, `:EI_index`
-			- Additional columns follow same pattern as node_stats but aggregated to group level
+			- Additional columns follow the same pattern as node_stats (degree and, if `weighted=true`, strength/weighted-degree totals) but aggregated to group level.
 
 		3. **`modularity::Float64`**: Modularity of the partition under `resolution_used`
 
@@ -7781,6 +7799,7 @@ THE SOFTWARE.
 		5. **`n_groups::Int`**: Number of groups
 
 		6. **`membership_table::DataFrame`**: Node-level membership with `:node` and `:community`
+
 
 		**Algorithm Details**
 
@@ -7813,7 +7832,7 @@ THE SOFTWARE.
 	```julia
 		# Directed weighted network
 		result = group_statistics(edges; directed=true, weighted=true)
-		result.node_stats    # Node-level with all degree/strength columns
+		result.node_stats    # Node-level with degree + weighted-degree columns
 		result.group_stats   # Group-level aggregates
 		
 		# Detect communities with CHAMP
@@ -7831,6 +7850,7 @@ THE SOFTWARE.
 		- `calculate_modularity`: Modularity computation
 		- `_group_degree_stats_from_adj`: Internal helper for degree calculations
 	""" group_statistics
+
 
 #   GRAPH-LEVEL FEATURES
 
@@ -10209,17 +10229,11 @@ THE SOFTWARE.
     end
 
 #	Helper: Undirected Binary Network Constructor for Comparisons
-    function undirected_binary_constructor(edges::DataFrame, 
-                                        nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}};
-                                        resolution_sweep::Bool = false, 
-                                        resolution::Float64 = 1.0, 
-                                        directed::Bool = false, 
-                                        weighted::Bool = false,
-                                        n_resolutions::Int = 15, 
-                                        n_runs_per_gamma::Int = 5, 
-                                        n_iterations_per_run::Int = 10,
-                                        seed::Union{Int,Nothing} = nothing, 
-                                        provided_membership::Union{Nothing,DataFrame,Vector{Int},Dict} = nothing)
+    function undirected_binary_constructor(edges::DataFrame, nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}};
+                                           resolution_sweep::Bool = false, resolution::Float64 = 1.0, directed::Bool = false, 
+                                           weighted::Bool = false, n_resolutions::Int = 15, n_runs_per_gamma::Int = 5, 
+                                           n_iterations_per_run::Int = 10, seed::Union{Int,Nothing} = nothing, 
+                                           provided_membership::Union{Nothing,DataFrame,Vector{Int},Dict} = nothing)
         """
         Helper function for network_comparator() that constructs undirected binary network and computes comprehensive statistics.
         

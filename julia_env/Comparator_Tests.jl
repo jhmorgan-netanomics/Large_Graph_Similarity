@@ -1204,6 +1204,243 @@ using Large_Graph_Similarity
 #	Constructing Undirected/Binary Feature Vector
     symmeric_binary_feature_vector = symmetric_binary_feature_builder(global_stats, triad_census_counts, node_measures)
 
+#   Generating Undirected/Weighted Graph Design Matrices from which to Create Feature Vectors
+
+    edges = agent_agent_all_com.edges
+    directed = false
+    weighted = true
+    resolution = 1.0
+    provided_membership = nothing
+    resolution_sweep = false
+    n_resolutions = 15
+    n_runs_per_gamma = 5
+    n_iterations_per_run = 10
+    seed = 42
+    function undirected_weighted_constructor(edges::DataFrame, nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}};
+                                             resolution_sweep::Bool = false, resolution::Float64 = 1.0, directed::Bool = false, 
+                                             weighted::Bool = true, n_resolutions::Int = 15, n_runs_per_gamma::Int = 5, 
+                                             n_iterations_per_run::Int = 10, seed::Union{Int,Nothing} = nothing, 
+                                             provided_membership::Union{Nothing,DataFrame,Vector{Int},Dict} = nothing)
+
+        #	========== NETWORK TRANSFORMATION ==========
+
+        #	Create working copy and prepare weights
+            clean_edges = deepcopy(edges) 
+
+        #	Standardize weight column 
+            if weighted
+                #	Ensure weight column exists with proper type
+                    if !hasproperty(clean_edges, :weight)
+                        clean_edges.weight = ones(Float64, nrow(clean_edges))
+                    else
+                        clean_edges.weight = Float64.(clean_edges.weight)
+                    end
+                    agg_func = sum
+            else
+                #	Force binary weights
+                    clean_edges.weight = ones(Float64, nrow(clean_edges))
+                    agg_func = maximum
+            end
+
+        #	Build adjacency matrix
+            adj_base, node_map, idx_to_node = _graph_to_sparse_matrix(
+                clean_edges; 
+                nodes = nodes, 
+                weighted = true
+            )
+
+        #	Preserve node index for community detection
+            ni = deepcopy(idx_to_node)
+
+        #	Symmetrize adjacency (max preserves all connections)
+            adj = max.(adj_base, adj_base')
+
+        #	========== GLOBAL NETWORK MEASURES ==========
+
+        #	Convert symmetrized adjacency back to edge list for function compatibility
+            symmetric_edgelist = _symmetric_sparse_to_undirected_edgelist(
+                adj; 
+                include_diagonal = true, 
+                node_map = node_map
+            )
+
+        #	Component statistics
+            component_stats = component_statistics(symmetric_edgelist, nodes = ni, graph_type = :undirected)
+            component_stat_names = collect(keys(component_stats))      
+            component_stat_values = collect(values(component_stats)) 
+
+        #	Link statistics
+            link_stats = link_statistics(symmetric_edgelist; nodes = ni, graph_type = :undirected, weighted = true)
+            link_stats_tuple = _summarize_link_stats(link_stats)
+            link_stats_df = link_stats_tuple[1]
+
+        #	Global clustering and assortativity
+            degree_assortativity = assortativity_degree(symmetric_edgelist; graph_type = :undirected, weighted = true)
+            
+            transitivity = global_clustering_coefficient(symmetric_edgelist; directed = false, weighted = true, method = :transitivity, 
+                                                        drop_self_loops = true)
+            
+            global_local_clustering_coeff = global_clustering_coefficient(symmetric_edgelist; directed = false, weighted = true, 
+                                                                          method = :average, drop_self_loops = true)
+
+        #	Assemble global statistics DataFrame
+            global_measures = [component_stat_names; link_stats_df.link_group; "degree assortativity"; "transitivity"; 
+                               "local clustering coefficient"; "density"]
+            
+            global_values = string.([component_stat_values; link_stats_df.values; round(degree_assortativity, digits=6); 
+                                    round(transitivity, digits=6); round(global_local_clustering_coeff, digits=6);
+                                    round(link_stats.density[1], digits=6)])
+            
+            global_stats_df = DataFrame(measure = global_measures, value = global_values)
+
+        #	========== MESO-LEVEL (COMMUNITY) MEASURES ==========
+
+        #	Community detection or use provided membership
+            resolution_used = resolution
+            
+            if provided_membership === nothing
+                #	Perform community detection
+                    if resolution_sweep
+                        #	Multi-resolution CHAMP sweep
+                            community_solution = champ_community_detection(
+                                symmetric_edgelist;
+                                resolution = nothing,
+                                resolution_range = (0.5, 1.8),
+                                n_resolutions = n_resolutions,
+                                weighted = weighted,
+                                directed = directed,
+                                n_runs_per_gamma = n_runs_per_gamma,
+                                n_iterations_per_run = n_iterations_per_run,
+                                seed = seed,
+                                show_progress = true
+                            )
+                            resolution_used = community_solution.resolution_used
+                            modularity = community_solution.modularity
+                            
+                        #	Extract partition
+                            if community_solution.node_names isa DataFrame
+                                partition_df = DataFrame(
+                                    node = String.(community_solution.node_names.id), 
+                                    community = community_solution.membership
+                                )
+                            else
+                                partition_df = DataFrame(
+                                    node = String.(community_solution.node_names), 
+                                    community = community_solution.membership
+                                )
+                            end
+                    else
+                        #	Single resolution Leiden
+                            community_solution = leiden_community_detection(
+                                symmetric_edgelist;
+                                resolution = resolution,
+                                n_iterations = n_iterations_per_run,
+                                n_runs = n_runs_per_gamma,
+                                weighted = weighted,
+                                directed = directed,
+                                seed = seed
+                            )
+                            resolution_used = resolution
+                            modularity = community_solution.modularity
+                            
+                        #	Extract partition
+                            if community_solution.node_names isa DataFrame
+                                partition_df = DataFrame(
+                                    node = String.(community_solution.node_names.id), 
+                                    community = community_solution.membership
+                                )
+                            else
+                                partition_df = DataFrame(
+                                    node = String.(community_solution.node_names), 
+                                    community = community_solution.membership
+                                )
+                            end
+                    end	
+            else
+                #	Process user-provided partition
+                    if provided_membership isa DataFrame
+                        #	DataFrame with node and community columns
+                            pm = deepcopy(provided_membership)
+                            rename!(pm, lowercase.(string.(propertynames(pm))))
+                            @assert hasproperty(pm, :node) && hasproperty(pm, :community) "DataFrame needs :node and :community"
+                            partition_df = DataFrame(
+                                node = String.(pm.node),
+                                community = Int.(pm.community)
+                            )
+                            
+                    elseif provided_membership isa Vector
+                        #	Vector aligned to matrix order
+                            @assert length(provided_membership) == length(ni) "Vector length must match node count"
+                            partition_df = DataFrame(
+                                node = String.(ni isa DataFrame ? ni.id : ni),
+                                community = Int.(provided_membership)
+                            )
+                            
+                    elseif provided_membership isa Dict
+                        #	Dictionary mapping node IDs to communities
+                            node_ids = ni isa DataFrame ? String.(ni.id) : String.(ni)
+                            communities = zeros(Int64, length(node_ids))
+                            for i in eachindex(node_ids)
+                                communities[i] = get(provided_membership, node_ids[i], 0)
+                            end
+                            partition_df = DataFrame(
+                                node = node_ids,
+                                community = communities
+                            )
+                    end
+            end
+
+        #	Calculate modularity if using provided membership
+            if !isnothing(provided_membership)
+                #	Build adjacency for connected nodes only
+                    adj_symmetric, node_map_symmetric, idx_to_node_symmetric = _graph_to_sparse_matrix(
+                        symmetric_edgelist; 
+                        weighted = false
+                    )
+
+                #	Align partition to connected nodes
+                    keep_index = DataFrame(
+                        node = idx_to_node_symmetric, 
+                        keep = ones(Int64, length(idx_to_node_symmetric))
+                    )
+                    keep_index = leftjoin!(keep_index, partition_df, on = :node)
+                    keep_index.community = convert.(Int64, keep_index.community)
+
+                #	Calculate modularity
+                    modularity = calculate_modularity(
+                        adj_symmetric, 
+                        keep_index.community, 
+                        γ = resolution
+                    )
+                    resolution_used = resolution
+            end
+            
+        #	Add modularity and resolution to global statistics
+            partition_stats_df = DataFrame(
+                measure = ["resolution", "modularity"], 
+                value = string.(round.([resolution_used, modularity], digits=6))
+            )
+            global_measures = [global_stats_df; partition_stats_df]
+
+        #	Calculate group-level statistics
+            group_statistics_dict = group_statistics(symmetric_edgelist; membership = partition_df, 
+                                                     directed = false, weighted = true)
+
+        #	Extract and enhance node statistics
+            node_stats = group_statistics_dict.node_stats
+            node_stats.in_group_ratio = node_stats.total_degree_in_group ./ node_stats.total_degree
+            node_stats.interal_strength_fraction = node_stats.weighted_total_degree_in_group ./ node_stats.weighted_total_degree
+
+
+    end
+
+#   Need to Add ORA's Weighted Assortativity once Jeff has let me know what he does!!!
+
+#   Normalizing 2k-reach for directed graphs
+#   2k_out/n-1
+#   2k_in/n-1
+
+#   COME BACK HERE!!!
 
 ######################################
 #   COMPARATOR FUNCTION ASSESSMENT   #
