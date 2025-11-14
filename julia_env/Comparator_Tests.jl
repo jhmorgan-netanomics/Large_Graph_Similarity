@@ -1157,57 +1157,44 @@ using Large_Graph_Similarity
             return feature_vector
     end
 
-############################
-#   IMPORT TEST NETWORKS   #
-############################
-
-#   Loading Balikatan_2022_Processed
-    import_directory = "/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data"
-    ora_xml = "Balikatan_2022_Processed.xml"
-    file_location = string(import_directory, "/", ora_xml)
-    balikatan_2022 = load_ora_xml(file_location)
-
-    agents = balikatan_2022.nodesets["Agent"]
-    nodes = agents[:,(1:2)]
-	rename!(nodes, ["id", "label"])
-
-    agent_agent_all_com = balikatan_2022.networks["Agent x Agent - All Communication"]
-    balikatan_arcs = agent_agent_all_com.edges
-
-#   Loading TOTO 2024 Synthetic Network
-  
-
-
-########################################################################
-#   ASSESSMENT OF THE DESIGN MATRICES' CONSTRUCTORS & FEATURE VECTORS  #
-########################################################################
-
-#   Generating Undirected/Binary Graph Design Matrices from which to Create Feature Vectors
-    global_stats, triad_census_counts, node_measures = undirected_binary_constructor(balikatan_arcs, nodes; directed=false, weighted=false, 
-                                                                                     resolution_sweep=true)
-
-    global_stats, triad_census_counts, node_measures = undirected_binary_constructor(balikatan_arcs, nodes; directed=false, weighted=false, 
-                                                                                     resolution=1.0)
-
-#	Constructing Undirected/Binary Feature Vector
-    symmeric_binary_feature_vector = symmetric_binary_feature_builder(global_stats, triad_census_counts, node_measures)
-
-#   Generating Undirected/Weighted Graph Design Matrices from which to Create Feature Vectors
-    edges = agent_agent_all_com.edges
-    directed = false
-    weighted = true
-    resolution = 1.0
-    provided_membership = nothing
-    resolution_sweep = false
-    n_resolutions = 15
-    n_runs_per_gamma = 5
-    n_iterations_per_run = 10
-    seed = 42
-    function undirected_weighted_constructor(edges::DataFrame, nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}};
-                                             resolution_sweep::Bool = false, resolution::Float64 = 1.0, directed::Bool = false, 
-                                             weighted::Bool = true, n_resolutions::Int = 15, n_runs_per_gamma::Int = 5, 
-                                             n_iterations_per_run::Int = 10, seed::Union{Int,Nothing} = nothing, 
-                                             provided_membership::Union{Nothing,DataFrame,Vector{Int},Dict} = nothing)
+#	Helper: Undirected Weighted Network Constructor for Comparisons
+    function undirected_weighted_constructor(edges::DataFrame, 
+                                            nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}};
+                                            resolution_sweep::Bool = false, 
+                                            resolution::Float64 = 1.0, 
+                                            directed::Bool = false, 
+                                            weighted::Bool = true, 
+                                            n_resolutions::Int = 15, 
+                                            n_runs_per_gamma::Int = 5, 
+                                            n_iterations_per_run::Int = 10, 
+                                            seed::Union{Int,Nothing} = nothing, 
+                                            provided_membership::Union{Nothing,DataFrame,Vector{Int},Dict} = nothing)
+        """
+        Helper function for network_comparator() that constructs undirected weighted network and computes comprehensive statistics.
+        
+        Args:
+            edges::DataFrame: Edge list with :src, :dst, optional :weight columns
+            nodes: Node universe (includes isolates if present)
+            resolution_sweep::Bool: Use CHAMP multi-resolution community detection
+            resolution::Float64: Resolution parameter for community detection
+            directed::Bool: Original network directionality (always converted to undirected)
+            weighted::Bool: Whether to use weights (default true)
+            n_resolutions::Int: Number of resolutions for CHAMP sweep
+            n_runs_per_gamma::Int: Leiden runs per resolution
+            n_iterations_per_run::Int: Iterations per Leiden run
+            seed: Random seed for reproducibility
+            provided_membership: Optional pre-computed community assignments
+        Returns:
+            Tuple of three elements:
+                1. global_measures: DataFrame of network-level statistics
+                2. triads_summary: Summary statistics of weighted triad census
+                3. node_stats: DataFrame of node-level metrics including community membership
+        Notes:
+            - Produces undirected weighted network regardless of directed parameter
+            - Symmetrizes via A + A' (preserving original self-loops)
+            - Computes weighted versions of all metrics
+            - Used internally by network_comparator() for weighted comparisons
+        """
 
         #	========== NETWORK TRANSFORMATION ==========
 
@@ -1230,21 +1217,15 @@ using Large_Graph_Similarity
             end
 
         #	Build adjacency matrix
-            adj_base, node_map, idx_to_node = _graph_to_sparse_matrix(
-                clean_edges; 
-                nodes = nodes, 
-                weighted = true
-            )
+            adj_base, node_map, idx_to_node = _graph_to_sparse_matrix(clean_edges; nodes = nodes, weighted = true)
 
         #	Preserve node index for community detection
             ni = deepcopy(idx_to_node)
 
-        #	Symmetrize adjacency:
-        #	- Off-diagonal: sum(i→j, j→i)
-        #	- Diagonal: keep original self-loop weight (already aggregated)
+        #	Symmetrize adjacency preserving self-loop weights
             adj = adj_base + adj_base'
-
-        #	Restore original self-loop weights so they are not doubled
+            
+        #	Restore original self-loop weights (not doubled)
             n = min(size(adj, 1), size(adj, 2))
             @inbounds for i in 1:n
                 adj[i, i] = adj_base[i, i]
@@ -1252,7 +1233,7 @@ using Large_Graph_Similarity
 
         #	========== GLOBAL NETWORK MEASURES ==========
 
-        #	Convert symmetrized adjacency back to edge list for function compatibility
+        #	Convert symmetrized adjacency to edge list
             symmetric_edgelist = _symmetric_sparse_to_undirected_edgelist(adj; include_diagonal = true, node_map = node_map)
 
         #	Component statistics
@@ -1268,29 +1249,38 @@ using Large_Graph_Similarity
         #	Global clustering and assortativity
             degree_assortativity = assortativity_degree(symmetric_edgelist; graph_type = :undirected, weighted = true)
             
-            transitivity = global_clustering_coefficient(symmetric_edgelist; directed = false, weighted = true, method = :transitivity, 
-                                                        drop_self_loops = true)
+            transitivity = global_clustering_coefficient(symmetric_edgelist; directed = false, weighted = true, method = :transitivity, drop_self_loops = true)
             
-            global_local_clustering_coeff = global_clustering_coefficient(symmetric_edgelist; directed = false, weighted = true, 
-                                                                          method = :average, drop_self_loops = true)
+            global_local_clustering_coeff = global_clustering_coefficient(symmetric_edgelist; directed = false, weighted = true, method = :average, drop_self_loops = true)
 
-        #	Assemble global statistics DataFrame
-            global_measures = [component_stat_names; link_stats_df.link_group; "degree assortativity"; "transitivity"; 
-                               "local clustering coefficient"; "density"]
+        #	Assemble global statistics
+            global_measures = [
+                component_stat_names; 
+                link_stats_df.link_group; 
+                "degree assortativity"; 
+                "transitivity"; 
+                "local clustering coefficient"; 
+                "density"
+            ]
             
-            global_values = string.([component_stat_values; link_stats_df.values; round(degree_assortativity, digits=6); 
-                                    round(transitivity, digits=6); round(global_local_clustering_coeff, digits=6);
-                                    round(link_stats.density[1], digits=6)])
+            global_values = string.([
+                component_stat_values; 
+                link_stats_df.values; 
+                round(degree_assortativity, digits=6); 
+                round(transitivity, digits=6); 
+                round(global_local_clustering_coeff, digits=6);
+                round(link_stats.density[1], digits=6)
+            ])
             
             global_stats_df = DataFrame(measure = global_measures, value = global_values)
 
         #	========== MESO-LEVEL (COMMUNITY) MEASURES ==========
 
-        #	Triad census
+        #	Weighted triad census
             triads_w_ud = triad_census(symmetric_edgelist; weighted = true, graph_type = :undirected)
-            triads_summary =  triads_w_ud.summary
+            triads_summary = triads_w_ud.summary
 
-        #	Community detection or use provided membership
+        #	Community detection or process provided membership
             resolution_used = resolution
             
             if provided_membership === nothing
@@ -1387,11 +1377,8 @@ using Large_Graph_Similarity
 
         #	Calculate modularity if using provided membership
             if !isnothing(provided_membership)
-                #	Build adjacency for connected nodes only
-                    adj_symmetric, node_map_symmetric, idx_to_node_symmetric = _graph_to_sparse_matrix(
-                        symmetric_edgelist; 
-                        weighted = false
-                    )
+                #	Build adjacency for connected nodes
+                    adj_symmetric, node_map_symmetric, idx_to_node_symmetric = _graph_to_sparse_matrix(symmetric_edgelist; weighted = false)
 
                 #	Align partition to connected nodes
                     keep_index = DataFrame(
@@ -1402,11 +1389,7 @@ using Large_Graph_Similarity
                     keep_index.community = convert.(Int64, keep_index.community)
 
                 #	Calculate modularity
-                    modularity = calculate_modularity(
-                        adj_symmetric, 
-                        keep_index.community, 
-                        γ = resolution
-                    )
+                    modularity = calculate_modularity(adj_symmetric, keep_index.community, γ = resolution)
                     resolution_used = resolution
             end
             
@@ -1418,13 +1401,12 @@ using Large_Graph_Similarity
             global_measures = [global_stats_df; partition_stats_df]
 
         #	Calculate group-level statistics
-            group_statistics_dict = group_statistics(symmetric_edgelist; membership = partition_df, 
-                                                     directed = false, weighted = true)
+            group_statistics_dict = group_statistics(symmetric_edgelist; membership = partition_df, directed = false, weighted = true)
 
         #	Extract and enhance node statistics
             node_stats = group_statistics_dict.node_stats
             node_stats.in_group_ratio = node_stats.total_degree_in_group ./ node_stats.total_degree
-            node_stats.interal_strength_fraction = node_stats.weighted_total_degree_in_group ./ node_stats.weighted_total_degree
+            node_stats.internal_strength_fraction = node_stats.weighted_total_degree_in_group ./ node_stats.weighted_total_degree
 
         #	========== NODE-LEVEL MEASURES ==========
 
@@ -1440,34 +1422,86 @@ using Large_Graph_Similarity
             leftjoin!(node_stats, all_hop_reach, on = :node)
             node_stats.undirected_reach_2 = convert.(Int64, node_stats.undirected_reach_2)
 
-        #	Normalized degree centrality (Freeman normalization)
-            total_deg_norm = total_degree(symmetric_edgelist; directed = false, weighted = true, 
-                normalize = true, 
-                drop_self_loops = true,
-                count_self_loops_once = true, 
-                agg_func = maximum, 
-                n = nrow(ni)
-            )
+        #	Normalized degree centrality
+            total_deg_norm = total_degree(symmetric_edgelist; directed = false, weighted = true, normalize = true, drop_self_loops = true, count_self_loops_once = true, agg_func = maximum, n = nrow(ni))
             rename!(total_deg_norm, ["node", "total_degree_normalized"])
             leftjoin!(node_stats, total_deg_norm, on = :node)
             
-        #	Handle isolates (nodes with only self-loops get 0 degree)
+        #	Handle isolates
             node_stats.total_degree_normalized = coalesce.(node_stats.total_degree_normalized, 0.0)
             node_stats.total_degree_normalized = convert.(Float64, node_stats.total_degree_normalized)
 
-        #	Local clustering coefficient (ORA-style density version)
+        #	Local clustering coefficient (ORA-style)
             local_density_clustering = local_clustering_coefficient(symmetric_edgelist; directed = false, method = :local_density)   
             rename!(local_density_clustering, ["node", "ego_density", "density_clustering_coefficient"])   
             leftjoin!(node_stats, local_density_clustering, on = :node)     
             node_stats.density_clustering_coefficient = convert.(Float64, node_stats.density_clustering_coefficient) 
 
-        #	Weighted Global Clustering Coefficient: Barrat et al. (2004)
-	        barrat_clustering_coefficients = weighted_clustering_coefficient(symmetric_edgelist; directed=false, agg_func=sum)
+        #	Weighted clustering coefficient (Barrat et al. 2004)
+            barrat_clustering_coefficients = weighted_clustering_coefficient(symmetric_edgelist; directed = false, agg_func = sum)
+            rename!(barrat_clustering_coefficients, ["node", "barrat_weighted_clustering"])
+            barrat_clustering_coefficients.barrat_weighted_clustering = Array(barrat_clustering_coefficients.barrat_weighted_clustering)
+            leftjoin!(node_stats, barrat_clustering_coefficients, on = :node)
+            node_stats.barrat_weighted_clustering = convert.(Float64, node_stats.barrat_weighted_clustering)
 
+        #	Modularity vitality (hub and bridge scores)
+            modularity_scores = modularity_vitality(symmetric_edgelist; directed = false, resolution = resolution_used, weighted = true, resolution_sweep = false, provided_membership = partition_df)
+            leftjoin!(node_stats, modularity_scores.results_df[:,[1,3,4]], on = :node)
+            
+        #	Convert vitality scores to proper type
+            var_names = names(modularity_scores.results_df[:,[3,4]])
+            for i in eachindex(var_names)
+                node_stats[!, var_names[i]] = convert.(Float64, node_stats[:, var_names[i]])
+            end
 
+        #	Return comprehensive statistics at all levels
+            return global_measures, triads_summary, node_stats
     end
 
-#   Need to Add ORA's Weighted Assortativity once Jeff has let me know what he does!!!
+############################
+#   IMPORT TEST NETWORKS   #
+############################
+
+#   Loading Balikatan_2022_Processed
+    import_directory = "/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data"
+    ora_xml = "Balikatan_2022_Processed.xml"
+    file_location = string(import_directory, "/", ora_xml)
+    balikatan_2022 = load_ora_xml(file_location)
+
+    agents = balikatan_2022.nodesets["Agent"]
+    nodes = agents[:,(1:2)]
+	rename!(nodes, ["id", "label"])
+
+    agent_agent_all_com = balikatan_2022.networks["Agent x Agent - All Communication"]
+    balikatan_arcs = agent_agent_all_com.edges
+
+#   Loading TOTO 2024 Synthetic Network
+  
+
+
+########################################################################
+#   ASSESSMENT OF THE DESIGN MATRICES' CONSTRUCTORS & FEATURE VECTORS  #
+########################################################################
+
+#   Generating Undirected/Binary Graph Design Matrices from which to Create Feature Vectors
+    global_stats, triad_census_counts, node_measures = undirected_binary_constructor(balikatan_arcs, nodes; directed=false, 
+                                                                                     weighted=false, resolution_sweep=true)
+
+    global_stats, triad_census_counts, node_measures = undirected_binary_constructor(balikatan_arcs, nodes; directed=false, 
+                                                                                    weighted=false, resolution=1.0)
+
+#	Constructing Undirected/Binary Feature Vector
+    symmeric_binary_feature_vector = symmetric_binary_feature_builder(global_stats, triad_census_counts, node_measures)
+
+#   Generating Undirected/Weighted Graph Design Matrices from which to Create Feature Vectors
+    global_stats, triad_census_counts, node_measures = undirected_weighted_constructor(balikatan_arcs, nodes; directed=false, 
+                                                                                       weighted=false, resolution=1.0)
+
+    global_stats, triad_census_counts, node_measures = undirected_weighted_constructor(balikatan_arcs, nodes; directed=false, 
+                                                                                       weighted=false, resolution_sweep=true)
+
+#	Constructing Undirected/Weighted Feature Vector
+
 
 #   Normalizing 2k-reach for directed graphs
 #   2k_out/n-1
