@@ -2126,17 +2126,15 @@ THE SOFTWARE.
 
 #	Local Clustering Coefficient & Ego Density (Node Level)
 	function local_clustering_coefficient(edges::DataFrame;
-										directed::Bool = true,
-										weighted::Bool = false,
-										method::Symbol = :local_clustering,
-										agg_func::Function = Base.sum,
-										include_selfloops::Union{Bool,Nothing} = nothing,
-										run_ora_ego_25930421_test::Bool = false)
+										  directed::Bool = true,
+										  method::Symbol = :local_clustering,
+										  agg_func::Function = Base.sum,
+										  include_selfloops::Union{Bool,Nothing} = nothing,
+										  run_ora_ego_25930421_test::Bool = false)
 		"""
 		Args:
-			edges::DataFrame: Edge list with :src, :dst, (optional) :weight
+			edges::DataFrame: Edge list with :src, :dst columns
 			directed::Bool: Treat network as directed (default = true)
-			weighted::Bool: Use weights where present (default = false → binary)
 			method::Symbol: :local_clustering | :local_density | :local_transitivity
 			agg_func::Function: Aggregation for multi-edges (default = sum)
 			include_selfloops::Union{Bool,Nothing}: Include self-loops in alter numerator
@@ -2151,7 +2149,7 @@ THE SOFTWARE.
 		Notes:
 			- Classic :local_clustering uses k(k-1) denominator, excludes loops
 			- ORA-style :local_density uses combinations with replacement when loops included
-			- Undirected networks use unordered pair counting
+			- All measures use binary (unweighted) networks
 		"""
 
 		#	Validation
@@ -2161,8 +2159,8 @@ THE SOFTWARE.
 			if !(method in (:local_clustering, :local_density, :local_transitivity))
 				throw(ArgumentError("method must be :local_clustering, :local_density, or :local_transitivity"))
 			end
-			if run_ora_ego_25930421_test && !(method in (:local_clustering, :local_density) && !directed && !weighted)
-				throw(ArgumentError("run_ora_ego_25930421_test=true requires undirected binary with clustering/density method"))
+			if run_ora_ego_25930421_test && !(method in (:local_clustering, :local_density) && !directed)
+				throw(ArgumentError("run_ora_ego_25930421_test=true requires undirected with clustering/density method"))
 			end
 
 		#	Set method-appropriate defaults for self-loop inclusion
@@ -2179,7 +2177,7 @@ THE SOFTWARE.
 			clean_edges = _aggregate_multi_edges(edges; agg_func=agg_func)
 
 		#	Undirected binary path (edge-list based, unordered counting)
-			if method in (:local_clustering, :local_density) && !directed && !weighted
+			if method in (:local_clustering, :local_density) && !directed
 				T = promote_type(eltype(clean_edges.src), eltype(clean_edges.dst))
 
 			#	Build neighbor sets (self-loops don't create neighbor relations)
@@ -2295,8 +2293,8 @@ THE SOFTWARE.
 				)
 			end
 
-		#	Directed/weighted/transitivity path (matrix-based)
-			adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=weighted)
+		#	Directed/transitivity path (matrix-based)
+			adj, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean_edges; weighted=false)
 			n = length(idx_to_node)
 			ego_density = zeros(Float64, n)
 			local_cc = zeros(Float64, n)
@@ -2319,15 +2317,15 @@ THE SOFTWARE.
 						neighbor_subnet = ego_subnet[neighbor_indices, neighbor_indices]
 						k = length(neighbor_indices)
 
-					#	Count alter edges
+					#	Count alter edges (binary only)
 						if directed
 							#	Directed: diagonal handling depends on method and include_selfloops
 								if method == :local_clustering || !include_selfloops
 									neighbor_nodiag = copy(neighbor_subnet)
 									for d in 1:k; neighbor_nodiag[d,d] = 0; end
-									edge_sum = weighted ? Base.sum(neighbor_nodiag) : nnz(neighbor_nodiag)
+									edge_sum = nnz(neighbor_nodiag)
 								else
-									edge_sum = weighted ? Base.sum(neighbor_subnet) : nnz(neighbor_subnet)
+									edge_sum = nnz(neighbor_subnet)
 								end
 						else
 							#	Undirected: count unordered pairs via upper triangle
@@ -2359,9 +2357,9 @@ THE SOFTWARE.
 						end
 						local_cc[i] = (max_edges > 0) ? (edge_sum / max_edges) : 0.0
 
-					#	Compute ego density
+					#	Compute ego density (binary)
 						if directed
-							ego_sum = weighted ? Base.sum(ego_subnet) : nnz(ego_subnet)
+							ego_sum = nnz(ego_subnet)
 							ego_max = k_ego * (k_ego - 1)
 							ego_density[i] = (ego_max > 0) ? (ego_sum / ego_max) : 0.0
 						else
@@ -2385,9 +2383,8 @@ THE SOFTWARE.
 		Compute local clustering coefficients for nodes using three distinct methods.
 
 		**Arguments**
-		- `edges::DataFrame`: Edge list with `:src`, `:dst`, optional `:weight`
+		- `edges::DataFrame`: Edge list with `:src`, `:dst` columns
 		- `directed::Bool`: Treat as directed network (default: `true`)
-		- `weighted::Bool`: Use edge weights (default: `false`)
 		- `method::Symbol`: Calculation method
 			- `:local_clustering`: Classic Watts-Strogatz clustering
 			- `:local_density`: ORA-style clustering coefficient density  
@@ -2415,6 +2412,7 @@ THE SOFTWARE.
 			- Undirected: k(k-1)/2
 		- Where k = number of neighbors (degree)
 		- Always excludes self-loops to ensure values ∈ [0,1]
+		- Uses binary (unweighted) network structure
 
 		**2. ORA Clustering Coefficient Density** (`:local_density`)
 		
@@ -2423,6 +2421,7 @@ THE SOFTWARE.
 		- Denominator represents all possible ties among alters including self-ties:
 			- Directed: k² (all ordered pairs including self-pairs)
 			- Undirected: k(k+1)/2 (combinations with replacement)
+		- Uses binary (unweighted) network structure
 		
 		For undirected networks, the denominator k(k+1)/2 equals the number of unordered
 		pairs among k alters with replacement (i.e., C(k,2) + k self-pairs). This is
@@ -2434,6 +2433,7 @@ THE SOFTWARE.
 		- Counts triangles passing through the node
 		- Returns ratio of closed to total triangles
 		- Sets ego_density to 0 (not applicable for this method)
+		- Uses binary (unweighted) network structure
 
 		**Formulas**
 
@@ -2450,10 +2450,6 @@ THE SOFTWARE.
 		Undirected: C_i = e_i / [k_i(k_i + 1)/2]
 	```
 		where e_i includes self-loops among alters when `include_selfloops=true`
-
-		The undirected formula with loops corresponds to ORA's implementation where
-		each undirected edge {u,v} is internally represented as reciprocal arcs (u→v, v→u),
-		and the denominator becomes the combinations with replacement C(k+r-1,r) with r=2.
 
 		**Examples**
 	```julia
@@ -2481,15 +2477,14 @@ THE SOFTWARE.
 		*Social Networks*, 24(4), 407-422.
 
 		**Notes**
+		- All clustering measures operate on binary (unweighted) network structure
+		- Edge weights, if present, are ignored after multi-edge aggregation
 		- The ORA implementation's use of combinations with replacement (k+1 choose 2) for
 		undirected networks with loops provides a mathematically consistent framework
 		for comparing density across different network types
-		- The equivalence k(k+1)/2 = C(k,2) + k reflects that we're counting k self-pairs
-		plus C(k,2) distinct pairs among k alters
 
 		**See Also**
 		- `global_clustering_coefficient`: Network-level clustering measures
-		- `weighted_clustering_coefficient`: Extensions for weighted networks
 	""" local_clustering_coefficient
 
 #	Global Clustering Coefficient (Network Level)
@@ -8792,11 +8787,138 @@ THE SOFTWARE.
 	- `tau_min::Union{:auto,Float64}`, `tau_max::Union{:auto,Float64}`: Bounds for τ grid. `:auto` chooses `max(ϵ, q₀.₅% of positive weights)` and `max(weight)` respectively.
 
 	**Details**
-	- **Binary path (`weighted=false`)**: Builds a 0/1, loopless adjacency (directed). If `reciprocity_collapse=true`, collapses i↔j to one dyadic tie prior to BM, matching Pajek.
+
+	- **Binary path (`weighted=false`)**:  
+	Builds a 0/1, loopless adjacency.  
+	If `reciprocity_collapse=true` (directed only), mutual arcs i↔j are collapsed to a single undirected tie (`A = max.(A, A')`), reproducing Pajek-style triad semantics.
+
 	- **Layered weighted path (`weighted=true`)**:
-	- For `graph_type=:directed`: thresholds each direction at τ (≥τ → 1), optional reciprocity collapse, then BM (16 classes).
-	- For `graph_type=:undirected`: symmetrizes weights by **sum** (`W + W'`) *before* thresholding at τ, then undirected BM mapped to the 16-class vector (only `{003,102,201,300}` non-zero).
-	- Returns per-τ counts and densities (`count / C(n,3)`), plus AUMC over log₁₀(τ) and peak stats.
+	- **Directed case (`graph_type = :directed`)**:  
+		For each τ, threshold each directed weight (`A[i,j] ≥ τ → 1`).  
+		Optionally apply reciprocity collapse, then run the **16-class directed Batagelj–Mrvar** triad census.
+	- **Undirected case (`graph_type = :undirected`)**:  
+		Symmetrize weights by **sum** (`W + W'`) *before* thresholding, then run the **undirected BM** census (yielding `{003,102,201,300}`), which is mapped to the 16-class vector.
+	- For each τ, the function returns **triad counts** and **densities** (`count / C(n,3)`).  
+		It also computes:
+		- **AUMC_density**: area under the triad-density curve over log₁₀(τ)  
+		- **peak_tau**: τ at which that triad achieves maximum density  
+		- **peak_density**: corresponding maximum density  
+
+	### **Interpreting Layered Weighted Triad Measures**
+
+	Layered BM shows how triadic motifs appear/disappear as edges are filtered by increasing thresholds τ.  
+	Interpretation differs across **graph structures** and **weight distributions**.
+
+	Below, each regime is described for **undirected** and **directed** variants.
+
+	---
+
+	## **1. Sparse Network With Mostly Weak Ties**
+
+	### **Undirected**
+	- Almost all triples are open (003 dominates).  
+	- Most surviving edges have weight ≈ 1; stronger ties are very rare.  
+	- When τ rises even slightly, nearly all edges vanish → triads collapse immediately.
+
+	**Observed behavior**:
+	- `peak_tau` = τ_min for all nonzero triads (even 300).  
+	- `peak_density` ≈ 1 for 003, tiny for 102/201/300.  
+	- `AUMC_density` ≈ 0 except for 003 because structure only exists at τ_min.
+
+	**Interpretation**:  
+	Sparse undirected graphs with weak edges have **no persistent triadic cohesion** across thresholds.
+
+	---
+
+	### **Directed**
+	- Directed edges are sparse, with few reciprocated ties.  
+	- Most triples fall into the directed open classes `{003, 012, 102}`; very few connected triads appear.
+	- As τ increases, almost all arcs disappear immediately because most weights ≈ 1.
+
+	**Observed behavior**:
+	- `peak_tau` = τ_min for most directed classes.  
+	- Triads requiring multiple arcs (e.g., 030T, 030C, 120C, 210, 300) have densities near zero.  
+	- `AUMC_density` extremely small for all but 003-like classes.
+
+	**Interpretation**:  
+	Directed sparse weighted graphs produce **almost no higher-order motif structure**, and thresholding 
+    removes even that structure instantly.
+
+	---
+
+	## **2. Moderate-Density Random(-Like) Network (Erdős–Rényi–style)**
+
+	### **Undirected**
+	- 003 remains the largest class, but now 102 and 201 occur with non-negligible frequency.  
+	- Weight distribution is typically narrow → edges disappear gradually as τ increases.
+
+	**Observed behavior**:
+	- `peak_tau` may lie *inside* the τ range, not only at τ_min.  
+	- `AUMC_density` becomes informative:  
+	- High for 003  
+	- Moderate for 102/201  
+	- Detectable for 300  
+	- The triad-density curves resemble smooth functions of p(τ).
+
+	**Interpretation**:  
+	Reflects **probabilistic triad formation** typical of random graphs: transitivity is low but not negligible.
+
+	---
+
+	### **Directed**
+	- Directed G(n,p) has a wide mix of small triads: `{012, 102, 021D/U/C}`, some 111*, occasional 030*, rare 300.  
+	- Narrow weight distribution again gives gradual edge loss as τ increases.
+
+	**Observed behavior**:
+	- `peak_tau` varies by motif; classes requiring more arcs peak at lower τ.  
+	- `AUMC_density` reflects relative baseline motif frequencies of a random digraph:  
+	- High for 003 and 012  
+	- Moderate for asymmetrical classes like 021*  
+	- Lower for transitive triads (e.g., 030T, 120C, 300)
+
+	**Interpretation**:  
+	Directed random-like networks exhibit a **broad diversity of motifs**, but thresholding reduces them smoothly.
+
+	---
+
+	## **3. Highly Clustered / Small-World / Community-Structured Network**
+
+	### **Undirected**
+	- Local clustering is strong; triangles persist even under stringent thresholding.  
+	- High-weight edges tend to cluster together structurally.
+
+	**Observed behavior**:
+	- `peak_tau` for 300 (triangles) is **shifted upward** → strong ties form cohesive triads.  
+	- 102 and 201 may peak at mid-range τ values.  
+	- `AUMC_density` for 300 rises significantly, indicating multi-scale transitivity.
+
+	**Interpretation**:  
+	Small-world or clustered weighted networks exhibit **robust triadic cohesion over multiple scales**.
+
+	---
+
+	### **Directed**
+	- Directed clustering manifests through transitive triads (030T), feed-forward loops, reciprocated triangles, and hierarchical motifs.  
+	- Heavy reciprocal or feed-forward ties create persistent directed triads even as τ increases.
+
+	**Observed behavior**:
+	- `peak_tau` for 030T or 300 can occur well above τ_min.  
+	- `{120D, 120U, 120C, 210}` show elevated `AUMC_density` if the network has hierarchical structure.  
+	- Reciprocal motifs (111D/U, 201) persist longer when reciprocated edges are strong.
+
+	**Interpretation**:  
+	Directed small-world or community-structured networks maintain **triadic directionality** (hierarchy, reciprocity, feed-forward loops) at higher thresholds, producing richer spectra in the layered analysis.
+
+	---
+
+	### **Summary**
+
+	Layered BM triad census provides a **multi-resolution signature** of triadic structure.  
+	- **Sparse networks**: structure collapses immediately; peaks at τ_min.  
+	- **Random networks**: structure decays smoothly; peaks inside τ-range.  
+	- **Clustered networks**: transitive and reciprocated triads persist up the τ-scale; peaks at interior or high τ.
+
+	The directed variants reveal additional transitivity, feed-forward structure, and reciprocity patterns unavailable in undirected form.
 
 	**Value**
 	- If `weighted=false`: `DataFrame(triad, count)` with the 16 Davis–Leinhardt classes.
@@ -9923,7 +10045,106 @@ THE SOFTWARE.
 			return cov_xy / sqrt(var_x * var_y)
 	end
 
-#	Degree Assortativity (Newman 2002/2003, value-based on vertex degree)
+#   Helper Function for assortativity_degree: Farine Weighted Assortivity
+    function assortative_mixing(adj::SparseMatrixCSC{T,Int}; 
+                            directed::Union{Bool,Nothing}=nothing,
+                            atol::Float64=1e-12,
+                            normalized::Bool=true) where T<:Real
+        """
+        Compute weighted degree assortativity coefficient (Farine 2014)
+        
+        Args:
+            adj: Sparse adjacency matrix (weighted or binary)
+            directed: true for directed, false for undirected, nothing to auto-detect
+            atol: tolerance for symmetry checking
+            normalized: if true, return Pearson r; if false, return covariance
+        
+        Returns:
+            Float64: Assortativity coefficient (r) or covariance
+        """
+        
+        #   Determine n
+            n = size(adj, 1)
+        
+        #   Check if matrix is square
+            if size(adj, 1) != size(adj, 2)
+                throw(DimensionMismatch("Adjacency matrix must be square"))
+            end
+        
+        #   Determine if we should treat as undirected based on actual symmetry
+            if isnothing(directed)
+                is_undirected = _is_symmetric(adj; directed=nothing, atol=atol)
+            else
+                is_undirected = !directed
+            end
+        
+        #   Handle undirected case - ensure symmetry
+            if is_undirected
+                # 	Check for actual numerical symmetry
+					if !_is_symmetric(adj; directed=nothing, atol=atol)
+						@warn "Matrix is not symmetric for undirected graph. Symmetrizing by averaging (A + A')/2"
+						adj = (adj + adj') / 2
+						dropzeros!(adj)  # Clean up any numerical zeros from averaging
+					end
+            end
+        
+        # 	Compute weighted degrees
+        # 	This counts each edge from both directions in symmetric matrices
+        	d = vec(sum(adj, dims=2))  
+        
+        #   Initialize accumulator variables (using ORA terminology)
+            wjk_sum = 0.0
+            wj_sum = 0.0
+            wk_sum = 0.0
+            wj2_sum = 0.0
+            wk2_sum = 0.0
+            W = 0.0
+        
+        #   Get the row, column, and value arrays from sparse matrix
+            rows, cols, vals = findnz(adj)
+        
+        #   Process ALL edges (for both directed and undirected)
+        #   For undirected/symmetric: each edge appears twice in the matrix
+        #   This matches how degrees are calculated (counting from both directions)
+            for idx in eachindex(rows)
+                j = rows[idx]
+                k = cols[idx]
+                w = vals[idx]
+                
+                W += w
+                wjk_sum += w * d[j] * d[k]
+                wj_sum += w * d[j]
+                wk_sum += w * d[k]
+                wj2_sum += w * d[j]^2
+                wk2_sum += w * d[k]^2
+            end
+        
+        #   Check for zero weight sum
+            if W == 0
+                return normalized ? NaN : 0.0
+            end
+        
+        #   Calculate assortativity components (following ORA formula exactly)
+            numerator = wjk_sum - (wj_sum * wk_sum) / W
+            
+        #   Non-normalized case → covariance only
+            if !normalized
+                return numerator / W
+            end
+            
+        #   Normalized case → Pearson correlation
+            denominator = sqrt((wj2_sum - wj_sum^2 / W) * (wk2_sum - wk_sum^2 / W))
+        
+        #   Return result, handling division by zero
+            return denominator > 0 ? numerator / denominator : NaN
+    end
+
+#   Helper Function for assortativity_degree: Farine Weighted Assortivity for dense matrices
+    function assortative_mixing(adj::Matrix{T}; kwargs...) where T<:Real
+        return assortative_mixing(sparse(adj); kwargs...)
+    end
+
+#	Degree Assortativity (Newman 2002/2003 for binary, Farine 2014 for weighted)
 	function assortativity_degree(edges::DataFrame;
 									nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}} = nothing,
 									graph_type::Symbol = :directed,
@@ -9941,35 +10162,29 @@ THE SOFTWARE.
 				:directed   → use out-degree at tail, in-degree at head
 				:undirected → treat each undirected edge as two directed edges
 			weighted::Bool:
-				If true, treat graph as weighted:
-					- Multi-edges are aggregated by summing weights (or counts
-					  when no :weight column exists).
-					- `_graph_to_sparse_matrix` uses the resulting :weight.
-				If false, treat graph as binary:
-					- Multi-edges are aggregated by presence (maximum over edges).
-					- `_graph_to_sparse_matrix` ignores any :weight and uses ones.
+				If true, use Farine (2014) weighted degree assortativity:
+					- Multi-edges are aggregated by summing weights
+					- Degrees are computed as weighted sums
+					- Uses `assortative_mixing` function
+				If false, use Newman (2002/2003) binary degree assortativity:
+					- Multi-edges are aggregated by presence (maximum over edges)
+					- Degrees are computed as binary neighbor counts
+					- Uses `_degree_edge_sequences` → `_assortativity_from_sequences`
 			normalized::Bool:
 				If true (default), return Pearson assortativity coefficient r.
-				If false, return the non-normalized covariance of degree
-				values at the two ends of edges.
+				If false, return the non-normalized covariance.
 		Returns:
 			Float64:
 				Assortativity coefficient (or covariance) based on vertex degree.
 		Notes:
-			- This is a *value-based* assortativity in the sense of Newman (2003),
-			  where vertex degree is used as the numeric attribute.
-			- For `graph_type = :directed`:
-				- x_e = out-degree of source of edge e
-				- y_e = in-degree of target of edge e
-			- For `graph_type = :undirected`:
-				- The graph is symmetrized via `max.(A, A')` and each undirected
-				  edge {i,j} contributes two directed samples (i→j, j→i).
-			- Self-loops are dropped before computing degrees and edge sequences,
-			  to avoid inflating degree values and correlations.
-			- Degrees are always computed as *binary* degrees (number of neighbors),
-			  even when the input graph is weighted.
-			- If the graph has no edges, or if there is zero variance in degree
-			  at either end, the result is NaN.
+			- For weighted graphs, uses Farine (2014) method which computes
+			  weighted degree assortativity.
+			- For binary graphs, uses Newman (2002/2003) method with binary
+			  degree counts.
+			- Self-loops are handled differently by the two methods:
+			  - Newman method: dropped before computing degrees
+			  - Farine method: included in weighted degree calculations
+			- If the graph has no edges, the result is NaN.
 		"""
 		
 		#	Validation
@@ -9997,49 +10212,43 @@ THE SOFTWARE.
 				weighted = weighted    # semantics already decided via agg_func
 			)
 
-		#	Prepare effective adjacency based on directed/weighted semantics
-			A_eff = adj_base
-
-			if !weighted && !directed
-				#	Case 1: Unweighted Undirected
-					if !_is_symmetric(A_eff)  # Check actual symmetry
-						A_eff = max.(A_eff, A_eff')
-					end
-					A_eff = _binarize_matrix(A_eff; directed=false)
-
-			elseif !weighted && directed
-				#	Case 2: Unweighted Directed
-					A_eff = _binarize_matrix(A_eff; directed=true)
-
-			elseif weighted && !directed
-				#	Case 3: Weighted Undirected
-					if _is_binary_matrix(A_eff; directed=false)
-						throw(ArgumentError("weighted=true not allowed on binary matrix (undirected)"))
-					end
-					if !_is_symmetric(A_eff)  # Check actual symmetry
-						A_eff = 0.5 .* (A_eff + A_eff')
-					end
-
+		#	Branch based on weighted flag
+			if weighted
+				#	Weighted case: Use Farine (2014) method
+				#	No need to check if matrix is binary - let assortative_mixing handle it
+                    return assortative_mixing(adj_base; 
+                                            directed = directed,
+                                            normalized = normalized)
 			else
-				#	Case 4: Weighted Directed
-					if _is_binary_matrix(A_eff; directed=true)
-						throw(ArgumentError("weighted=true not allowed on binary matrix (directed)"))
-					end
-					#	No transformation needed for weighted directed
+				#	Unweighted case: Use Newman (2002/2003) method
+				#	Prepare effective adjacency based on directed semantics
+				    A_eff = adj_base
+				
+                    if !directed
+                        #	Unweighted Undirected: symmetrize and binarize
+                            if !_is_symmetric(A_eff)  # Check actual symmetry
+                                A_eff = max.(A_eff, A_eff')
+                            end
+                            A_eff = _binarize_matrix(A_eff; directed=false)
+                    else
+                        #	Unweighted Directed: just binarize
+                            A_eff = _binarize_matrix(A_eff; directed=true)
+                    end
+				
+				#	Extract degree-based edge sequences (degrees treated as binary)
+                    seqs = _degree_edge_sequences(A_eff, graph_type)
+                    x = seqs.x
+                    y = seqs.y
+				
+				#	Compute assortativity
+				    return _assortativity_from_sequences(x, y; normalized = normalized)
 			end
-
-		#	Extract degree-based edge sequences (degrees treated as binary)
-			seqs = _degree_edge_sequences(A_eff, graph_type)
-			x = seqs.x
-			y = seqs.y
-
-		#	Compute assortativity
-			return _assortativity_from_sequences(x, y; normalized = normalized)
 	end
 	@doc raw"""
 		**Description**
-		Computes the degree assortativity of a network in the sense of Newman (2002, 2003),
-		using vertex degree as a numeric attribute. The coefficient is positive when
+		Computes the degree assortativity of a network using either Newman (2002, 2003)
+		binary degree assortativity or Farine (2014) weighted degree assortativity,
+		depending on the `weighted` parameter. The coefficient is positive when
 		nodes with similar degrees tend to connect (assortative mixing), and negative
 		when high-degree nodes tend to connect to low-degree nodes (disassortative mixing).
 
@@ -10058,80 +10267,66 @@ THE SOFTWARE.
 		Optional node universe. When provided, it defines the node ordering and includes
 		isolates even if they do not appear in `edges`.
 		- `graph_type::Symbol`:
-		- `:directed`   → treat graph as directed, using out-degree at the tail and
-			in-degree at the head of each edge.
-		- `:undirected` → treat graph as undirected. The adjacency is symmetrized,
-			with different rules for unweighted vs weighted graphs (see Details).
+		- `:directed`   → treat graph as directed
+		- `:undirected` → treat graph as undirected
 		- `weighted::Bool`:
-		- `true` (default when `edges` has a `:weight` column): treat the graph as weighted.
-			Multi-edges are aggregated by summing weights (or counts if no `:weight` exists),
-			and `_graph_to_sparse_matrix` uses the resulting `:weight`.
-		- `false`: treat the graph as binary. Multi-edges are aggregated by presence
-			(maximum over edges), and the adjacency is built with unit weights.
+		- `true` (default when `edges` has a `:weight` column): Use Farine (2014) 
+			weighted degree assortativity. Multi-edges are aggregated by summing weights,
+			and degrees are computed as weighted sums.
+		- `false`: Use Newman (2002/2003) binary degree assortativity. Multi-edges are 
+			aggregated by presence (maximum), and degrees are computed as binary neighbor counts.
 		- `normalized::Bool`:
-		- `true` (default): return the **Pearson correlation** of degrees at the two
-			ends of edges.
-		- `false`: return the **covariance** of degrees at the two ends of edges
-			(non-normalized value-based assortativity).
+		- `true` (default): return the **Pearson correlation** coefficient.
+		- `false`: return the **covariance** (non-normalized).
 
 		**Details**
-		Internally, the edge list is first aggregated using `_aggregate_multi_edges`.
-		The resulting adjacency matrix is then transformed according to four cases:
+		The function employs two different methods depending on the `weighted` parameter:
 
-		1. **Unweighted undirected (`weighted=false`, `graph_type=:undirected`)**  
-		The adjacency is symmetrized via `max.(A, A')`, then binarized.
-		2. **Unweighted directed (`weighted=false`, `graph_type=:directed`)**  
-		The adjacency is binarized but not symmetrized.
-		3. **Weighted undirected (`weighted=true`, `graph_type=:undirected`)**  
-		If the matrix is binary, an error is thrown (weights are required).  
-		Otherwise, the matrix is symmetrized via `0.5 * (A + A')`.
-		4. **Weighted directed (`weighted=true`, `graph_type=:directed`)**  
-		If the matrix is binary, an error is thrown; otherwise, the matrix
-		is left as-is.
+		**Binary Method (weighted=false, Newman 2002/2003):**
+		- Degrees are computed as binary neighbor counts (ignoring edge weights)
+		- Self-loops are removed before computing degrees
+		- For directed graphs: uses out-degree at tail, in-degree at head
+		- For undirected graphs: each edge contributes two directed samples
 
-		After this, degree sequences are constructed:
-
-		- For a directed graph, let `k_out(i)` be the out-degree of node `i` and
-		`k_in(j)` the in-degree of node `j`. For each edge `e = i → j`, we create a
-		sample pair `(x_e, y_e) = (k_out(i), k_in(j))`.
-		- For an undirected graph, the adjacency is (again) treated symmetrically,
-		and each undirected edge `{i, j}` contributes two samples:
-		`(k(i), k(j))` and `(k(j), k(i))`, where `k(i)` is the (binary) degree of node `i`.
-
-		Degrees are always treated as binary counts of neighbors, independent of
-		underlying edge weights.
+		**Weighted Method (weighted=true, Farine 2014):**
+		- Degrees are computed as weighted sums of edge weights
+		- Self-loops (if present) contribute to weighted degrees
+		- Specifically designed for weighted networks where binary assortativity
+		  can be misleading
+		- More robust for networks with heterogeneous edge weights
 
 		**Value**
 		A single `Float64`:
-		- Normalized mode (`normalized=true`): Pearson degree assortativity `r`, in
-		the range `[-1, 1]` (up to numerical error) whenever variance is non-zero.
-		- Non-normalized mode (`normalized=false`): covariance of degree values at the
-		two ends of edges.
-		- `NaN` if there are no edges, or if the variance of degree at either end is zero.
+		- Normalized mode (`normalized=true`): Pearson assortativity coefficient `r`, 
+		  in the range `[-1, 1]`.
+		- Non-normalized mode (`normalized=false`): covariance of degree values.
+		- `NaN` if there are no edges or if variance is zero.
 
 		**References**
 		- Newman, M. E. (2002). Assortative mixing in networks. Physical review letters, 89(20), 208701.
 		- Newman, M. E. (2003). Mixing patterns in networks. Physical review E, 67(2), 026126.
+		- Farine, D. R. (2014). Measuring phenotypic assortment in animal social networks: 
+		  weighted associations are more robust than binary edges. Animal Behaviour, 89, 141-153.
 
 		**Examples**
-		```julia
-		using DataFrames
+        ```julia
+            using DataFrames
 
-		#	Simple undirected triangle with an attached leaf
-		src = ["n1","n2","n2","n3","n3","n1","n3","n4"]
-		dst = ["n2","n1","n3","n2","n1","n3","n4","n3"]
-		edges = DataFrame(; src, dst)
+            #	Simple undirected triangle with weighted edges
+            src = ["n1","n2","n3"]
+            dst = ["n2","n3","n1"]
+            weight = [1.5, 2.0, 0.5]
+            edges = DataFrame(; src, dst, weight)
 
-		#	Degree assortativity, treating graph as undirected and binary
-		r_und = assortativity_degree(edges; graph_type = :undirected, weighted = false)
+            #	Binary degree assortativity (Newman method)
+            r_binary = assortativity_degree(edges; graph_type = :undirected, weighted = false)
 
-		#	Degree assortativity, treating edges as directed and binary
-		r_dir = assortativity_degree(edges; graph_type = :directed, weighted = false)
+            #	Weighted degree assortativity (Farine method)
+            r_weighted = assortativity_degree(edges; graph_type = :undirected, weighted = true)
 
-		println("Undirected degree assortativity: ", r_und)
-		println("Directed degree assortativity: ", r_dir)
-		```
-
+            println("Binary degree assortativity: ", r_binary)
+            println("Weighted degree assortativity: ", r_weighted)
+        ```
 		**See Also**
 		`triad_census`, `component_statistics`, `core_decomposition`
 	""" assortativity_degree
@@ -10548,7 +10743,7 @@ THE SOFTWARE.
             total_deg_norm = total_degree(
                 symmetric_edgelist; 
                 directed = false, 
-                weighted = true, 
+                weighted = false, 
                 normalize = true, 
                 drop_self_loops = true,
                 count_self_loops_once = true, 
@@ -10563,12 +10758,8 @@ THE SOFTWARE.
             node_stats.total_degree_normalized = convert.(Float64, node_stats.total_degree_normalized)
 
         #	Local clustering coefficient (ORA-style density version)
-            local_density_clustering = local_clustering_coefficient(
-                symmetric_edgelist;  
-                directed = false, 
-                weighted = false, 
-                method = :local_density
-            )   
+            local_density_clustering = local_clustering_coefficient(symmetric_edgelist; directed = false, 
+																	method = :local_density)   
             rename!(local_density_clustering, ["node", "ego_density", "density_clustering_coefficient"])   
             leftjoin!(node_stats, local_density_clustering, on = :node)     
             node_stats.density_clustering_coefficient = convert.(Float64, node_stats.density_clustering_coefficient) 

@@ -37,6 +37,7 @@
 ################
 
 suppressPackageStartupMessages({
+  library(assortnet)
   library(igraph)
   library(DirectedClustering)
   library(centiserve)
@@ -221,6 +222,23 @@ suppressPackageStartupMessages({
 # Calculating Local
   igraph::transitivity(all_comm, type ="localaverage")
   
+######################################
+#   CALCULATING FARINE ASSORTIVITY   #
+######################################
+  
+# Creating a Weighed Symmetric Adjacency Matrix
+  g_sym <- igraph::as_undirected(all_comm, mode = "collapse", edge.attr.comb = list(weight = "sum", "ignore"))
+  
+  A <- as_adjacency_matrix(g_sym, attr   = "weight", sparse = TRUE)
+  
+# Creating Degree "Traits"
+  out_degree <- igraph::degree(g_sym, mode="out")
+  total_degree <- igraph::degree(g_sym, mode="all")
+  
+# Calculating Assortivity
+  assortnet::assortment.continuous(A, out_degree, weighted=TRUE)
+  assortnet::assortment.continuous(A, total_degree, weighted=TRUE)
+
 ############################
 #   CREATING TEST GRAPHS   #
 ############################

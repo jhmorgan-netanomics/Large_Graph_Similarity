@@ -13,6 +13,7 @@
 ################
 using CSV
 using DataFrames
+using LinearAlgebra
 using SparseArrays
 using Statistics
 using StatsBase
@@ -848,16 +849,8 @@ using Large_Graph_Similarity
             triads_ud.proportion = round.(triads_ud.count ./ triad_count_sum, digits=6)
 
         #	Normalized degree centrality (Freeman normalization)
-            total_deg_norm = total_degree(
-                symmetric_edgelist; 
-                directed = false, 
-                weighted = true, 
-                normalize = true, 
-                drop_self_loops = true,
-                count_self_loops_once = true, 
-                agg_func = maximum, 
-                n = nrow(ni)
-            )
+            total_deg_norm = total_degree(symmetric_edgelist; directed = false, weighted = true, normalize = true, 
+                                          drop_self_loops = true, count_self_loops_once = true, n = nrow(ni))
             rename!(total_deg_norm, ["node", "total_degree_normalized"])
             leftjoin!(node_stats, total_deg_norm, on = :node)
             
@@ -866,12 +859,7 @@ using Large_Graph_Similarity
             node_stats.total_degree_normalized = convert.(Float64, node_stats.total_degree_normalized)
 
         #	Local clustering coefficient (ORA-style density version)
-            local_density_clustering = local_clustering_coefficient(
-                symmetric_edgelist;  
-                directed = false, 
-                weighted = false, 
-                method = :local_density
-            )   
+            local_density_clustering = local_clustering_coefficient(symmetric_edgelist; directed = false,method = :local_density)   
             rename!(local_density_clustering, ["node", "ego_density", "density_clustering_coefficient"])   
             leftjoin!(node_stats, local_density_clustering, on = :node)     
             node_stats.density_clustering_coefficient = convert.(Float64, node_stats.density_clustering_coefficient) 
@@ -1205,7 +1193,6 @@ using Large_Graph_Similarity
     symmeric_binary_feature_vector = symmetric_binary_feature_builder(global_stats, triad_census_counts, node_measures)
 
 #   Generating Undirected/Weighted Graph Design Matrices from which to Create Feature Vectors
-
     edges = agent_agent_all_com.edges
     directed = false
     weighted = true
@@ -1252,17 +1239,21 @@ using Large_Graph_Similarity
         #	Preserve node index for community detection
             ni = deepcopy(idx_to_node)
 
-        #	Symmetrize adjacency (max preserves all connections)
-            adj = max.(adj_base, adj_base')
+        #	Symmetrize adjacency:
+        #	- Off-diagonal: sum(i→j, j→i)
+        #	- Diagonal: keep original self-loop weight (already aggregated)
+            adj = adj_base + adj_base'
+
+        #	Restore original self-loop weights so they are not doubled
+            n = min(size(adj, 1), size(adj, 2))
+            @inbounds for i in 1:n
+                adj[i, i] = adj_base[i, i]
+            end
 
         #	========== GLOBAL NETWORK MEASURES ==========
 
         #	Convert symmetrized adjacency back to edge list for function compatibility
-            symmetric_edgelist = _symmetric_sparse_to_undirected_edgelist(
-                adj; 
-                include_diagonal = true, 
-                node_map = node_map
-            )
+            symmetric_edgelist = _symmetric_sparse_to_undirected_edgelist(adj; include_diagonal = true, node_map = node_map)
 
         #	Component statistics
             component_stats = component_statistics(symmetric_edgelist, nodes = ni, graph_type = :undirected)
@@ -1294,6 +1285,10 @@ using Large_Graph_Similarity
             global_stats_df = DataFrame(measure = global_measures, value = global_values)
 
         #	========== MESO-LEVEL (COMMUNITY) MEASURES ==========
+
+        #	Triad census
+            triads_w_ud = triad_census(symmetric_edgelist; weighted = true, graph_type = :undirected)
+            triads_summary =  triads_w_ud.summary
 
         #	Community detection or use provided membership
             resolution_used = resolution
@@ -1430,6 +1425,44 @@ using Large_Graph_Similarity
             node_stats = group_statistics_dict.node_stats
             node_stats.in_group_ratio = node_stats.total_degree_in_group ./ node_stats.total_degree
             node_stats.interal_strength_fraction = node_stats.weighted_total_degree_in_group ./ node_stats.weighted_total_degree
+
+        #	========== NODE-LEVEL MEASURES ==========
+
+        #	K-core decomposition
+            k_core_all = core_decomposition(symmetric_edgelist; weighted = false, mode = "total")
+            rename!(k_core_all, ["node", "k_core_all"])
+            leftjoin!(node_stats, k_core_all, on = :node)
+            node_stats.k_core_all = convert.(Int64, node_stats.k_core_all)
+
+        #	2-hop reachability
+            all_hop_reach = hop_reach_k(symmetric_edgelist, mode = "all", k = 2) 
+            rename!(all_hop_reach, ["node", "undirected_reach_2"])
+            leftjoin!(node_stats, all_hop_reach, on = :node)
+            node_stats.undirected_reach_2 = convert.(Int64, node_stats.undirected_reach_2)
+
+        #	Normalized degree centrality (Freeman normalization)
+            total_deg_norm = total_degree(symmetric_edgelist; directed = false, weighted = true, 
+                normalize = true, 
+                drop_self_loops = true,
+                count_self_loops_once = true, 
+                agg_func = maximum, 
+                n = nrow(ni)
+            )
+            rename!(total_deg_norm, ["node", "total_degree_normalized"])
+            leftjoin!(node_stats, total_deg_norm, on = :node)
+            
+        #	Handle isolates (nodes with only self-loops get 0 degree)
+            node_stats.total_degree_normalized = coalesce.(node_stats.total_degree_normalized, 0.0)
+            node_stats.total_degree_normalized = convert.(Float64, node_stats.total_degree_normalized)
+
+        #	Local clustering coefficient (ORA-style density version)
+            local_density_clustering = local_clustering_coefficient(symmetric_edgelist; directed = false, method = :local_density)   
+            rename!(local_density_clustering, ["node", "ego_density", "density_clustering_coefficient"])   
+            leftjoin!(node_stats, local_density_clustering, on = :node)     
+            node_stats.density_clustering_coefficient = convert.(Float64, node_stats.density_clustering_coefficient) 
+
+        #	Weighted Global Clustering Coefficient: Barrat et al. (2004)
+	        barrat_clustering_coefficients = weighted_clustering_coefficient(symmetric_edgelist; directed=false, agg_func=sum)
 
 
     end
