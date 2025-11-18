@@ -11197,7 +11197,9 @@ THE SOFTWARE.
         #	========== MESO-LEVEL (COMMUNITY) MEASURES ==========
 
         #	Weighted triad census
-            triads_w_ud = triad_census(symmetric_edgelist; weighted = true, graph_type = :undirected)
+            tau_grid_paremetrs = recommend_L(symmetric_edgelist; graph_type=:undirected)
+            triads_w_ud = triad_census(symmetric_edgelist; weighted = true, graph_type = :undirected, L= tau_grid_paremetrs.L, 
+				               tau_min=tau_grid_paremetrs.tau_min, tau_max=tau_grid_paremetrs.tau_max)
             triads_summary = triads_w_ud.summary
 
         #	Community detection or process provided membership
@@ -11402,7 +11404,7 @@ THE SOFTWARE.
             - Groups features by type for interpretability
             - Pre-allocates arrays for efficiency
             - Deep copies inputs to prevent mutation
-            - Includes weighted-specific metrics (Barrat clustering, strength fractions)
+            - Includes weighted-specific metrics (Barrat clustering, strength fractions, s-cores)
         """
 
         #	Input validation
@@ -11679,6 +11681,666 @@ THE SOFTWARE.
                 node_features
             )
 
+        #	Return feature vector
+            return feature_vector
+    end
+
+#	Helper: Directed Binary Network Constructor for Comparisons
+    function directed_binary_constructor(edges::DataFrame, 
+                                        nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}};
+                                        resolution_sweep::Bool = false, 
+                                        resolution::Float64 = 1.0, 
+                                        directed::Bool = true, 
+                                        weighted::Bool = false, 
+                                        n_resolutions::Int = 15, 
+                                        n_runs_per_gamma::Int = 5,
+                                        n_iterations_per_run::Int = 10, 
+                                        seed::Union{Int,Nothing} = nothing, 
+                                        provided_membership::Union{Nothing,DataFrame,Vector{Int},Dict} = nothing)
+        """
+        Helper function for network_comparator() that constructs directed binary network and computes comprehensive statistics.
+        
+        Args:
+            edges::DataFrame: Edge list with :src, :dst columns
+            nodes: Node universe (includes isolates if present)
+            resolution_sweep::Bool: Use CHAMP multi-resolution community detection
+            resolution::Float64: Resolution parameter for community detection
+            directed::Bool: Treat as directed (default true)
+            weighted::Bool: Ignored - always produces binary network
+            n_resolutions::Int: Number of resolutions for CHAMP sweep
+            n_runs_per_gamma::Int: Leiden runs per resolution
+            n_iterations_per_run::Int: Iterations per Leiden run
+            seed: Random seed for reproducibility
+            provided_membership: Optional pre-computed community assignments
+        Returns:
+            Tuple of three elements:
+                1. global_measures: DataFrame of network-level statistics
+                2. triads_b_dir: DataFrame of directed triad census
+                3. node_stats: DataFrame of node-level metrics including community membership
+        Notes:
+            - Always produces binary directed network regardless of weighted parameter
+            - Multi-edges collapsed to presence/absence
+            - Includes directed-specific measures (PageRank, SALSA, reciprocity)
+            - Used internally by network_comparator() for directed binary comparisons
+        """
+
+        #	========== NETWORK TRANSFORMATION ==========
+
+        #	Create working copy and prepare for binarization
+            clean_edges = deepcopy(edges) 
+
+        #	Standardize weight column (will be binarized)
+            if weighted
+                #	Ensure weight column exists with proper type
+                    if !hasproperty(clean_edges, :weight)
+                        clean_edges.weight = ones(Float64, nrow(clean_edges))
+                    else
+                        clean_edges.weight = Float64.(clean_edges.weight)
+                    end
+                    agg_func = sum
+            else
+                #	Force binary weights
+                    clean_edges.weight = ones(Float64, nrow(clean_edges))
+                    agg_func = maximum
+            end
+
+        #	Binarize network (aggregate multi-edges to presence/absence)
+            clean_edges = _aggregate_multi_edges(clean_edges; agg_func = maximum)
+
+        #	Build adjacency matrix
+            adj_base, node_map, idx_to_node = _graph_to_sparse_matrix(clean_edges; nodes = nodes, weighted = false)
+
+        #	Preserve node index for community detection
+            ni = deepcopy(idx_to_node)
+
+        #	========== GLOBAL NETWORK MEASURES ==========
+
+        #	Component statistics
+            component_stats = component_statistics(clean_edges, nodes = ni, graph_type = :directed)
+            component_stat_names = collect(keys(component_stats))      
+            component_stat_values = collect(values(component_stats)) 
+
+        #	Link statistics
+            link_stats = link_statistics(clean_edges; nodes = ni, graph_type = :directed, weighted = false)
+            link_stats_tuple = _summarize_link_stats(link_stats)
+            link_stats_df = link_stats_tuple[1]
+
+        #	Global clustering and assortativity
+            degree_assortativity = assortativity_degree(clean_edges; graph_type = :directed, weighted = false)
+            
+            transitivity = global_clustering_coefficient(clean_edges; directed = true, weighted = false, method = :transitivity, drop_self_loops = true)
+
+            global_local_clustering_coeff = global_clustering_coefficient(clean_edges; directed = false, weighted = false, method = :average, drop_self_loops = true)
+            
+            graph_reciprocity = reciprocity(clean_edges; weighted = false, mode = :dyad_based)
+
+        #	Assemble global statistics
+            global_measures = [
+                component_stat_names; 
+                link_stats_df.link_group; 
+                "degree assortativity"; 
+                "transitivity"; 
+                "local clustering coefficient";
+                "reciprocity"; 
+                "density"
+            ]
+            
+            global_values = string.([
+                component_stat_values; 
+                link_stats_df.values; 
+                round(degree_assortativity, digits=6); 
+                round(transitivity, digits=6); 
+                round(global_local_clustering_coeff, digits=6);
+                round(graph_reciprocity, digits=6);
+                round(link_stats.density[1], digits=6)
+            ])
+            
+            global_stats_df = DataFrame(measure = global_measures, value = global_values)
+
+        #	========== MESO-LEVEL (COMMUNITY) MEASURES ==========
+
+        #	Directed binary triad census
+            triads_b_dir = triad_census(clean_edges; weighted = false, graph_type = :directed)
+            triad_count_sum = sum(triads_b_dir.count)
+            triads_b_dir.proportion = round.(triads_b_dir.count ./ triad_count_sum, digits=6)
+        
+        #	Community detection or process provided membership
+            resolution_used = resolution
+            
+            if provided_membership === nothing
+                #	Perform community detection
+                    if resolution_sweep
+                        #	Multi-resolution CHAMP sweep
+                            community_solution = champ_community_detection(
+                                clean_edges;
+                                resolution = nothing,
+                                resolution_range = (0.5, 1.8),
+                                n_resolutions = n_resolutions,
+                                weighted = weighted,
+                                directed = directed,
+                                n_runs_per_gamma = n_runs_per_gamma,
+                                n_iterations_per_run = n_iterations_per_run,
+                                seed = seed,
+                                show_progress = true
+                            )
+                            resolution_used = community_solution.resolution_used
+                            modularity = community_solution.modularity
+                            
+                        #	Extract partition
+                            if community_solution.node_names isa DataFrame
+                                partition_df = DataFrame(
+                                    node = String.(community_solution.node_names.id), 
+                                    community = community_solution.membership
+                                )
+                            else
+                                partition_df = DataFrame(
+                                    node = String.(community_solution.node_names), 
+                                    community = community_solution.membership
+                                )
+                            end
+                    else
+                        #	Single resolution Leiden
+                            community_solution = leiden_community_detection(
+                                clean_edges;
+                                resolution = resolution,
+                                n_iterations = n_iterations_per_run,
+                                n_runs = n_runs_per_gamma,
+                                weighted = weighted,
+                                directed = directed,
+                                seed = seed
+                            )
+                            resolution_used = resolution
+                            modularity = community_solution.modularity
+                            
+                        #	Extract partition
+                            if community_solution.node_names isa DataFrame
+                                partition_df = DataFrame(
+                                    node = String.(community_solution.node_names.id), 
+                                    community = community_solution.membership
+                                )
+                            else
+                                partition_df = DataFrame(
+                                    node = String.(community_solution.node_names), 
+                                    community = community_solution.membership
+                                )
+                            end
+                    end	
+            else
+                #	Process user-provided partition
+                    if provided_membership isa DataFrame
+                        #	DataFrame with node and community columns
+                            pm = deepcopy(provided_membership)
+                            rename!(pm, lowercase.(string.(propertynames(pm))))
+                            @assert hasproperty(pm, :node) && hasproperty(pm, :community) "DataFrame needs :node and :community"
+                            partition_df = DataFrame(
+                                node = String.(pm.node),
+                                community = Int.(pm.community)
+                            )
+                            
+                    elseif provided_membership isa Vector
+                        #	Vector aligned to matrix order
+                            @assert length(provided_membership) == length(ni) "Vector length must match node count"
+                            partition_df = DataFrame(
+                                node = String.(ni isa DataFrame ? ni.id : ni),
+                                community = Int.(provided_membership)
+                            )
+                            
+                    elseif provided_membership isa Dict
+                        #	Dictionary mapping node IDs to communities
+                            node_ids = ni isa DataFrame ? String.(ni.id) : String.(ni)
+                            communities = zeros(Int64, length(node_ids))
+                            for i in eachindex(node_ids)
+                                communities[i] = get(provided_membership, node_ids[i], 0)
+                            end
+                            partition_df = DataFrame(
+                                node = node_ids,
+                                community = communities
+                            )
+                    end
+            end
+
+        #	Calculate modularity if using provided membership
+            if !isnothing(provided_membership)
+                #	Build adjacency for connected nodes
+                    adj_edges, node_map_edges, idx_to_node_edges = _graph_to_sparse_matrix(clean_edges; weighted = false)
+
+                #	Align partition to connected nodes
+                    keep_index = DataFrame(
+                        node = idx_to_node_edges, 
+                        keep = ones(Int64, length(idx_to_node_edges))
+                    )
+                    keep_index = leftjoin!(keep_index, partition_df, on = :node)
+                    keep_index.community = convert.(Int64, keep_index.community)
+
+                #	Calculate modularity
+                    modularity = calculate_modularity(adj_edges, keep_index.community, γ = resolution)
+                    resolution_used = resolution
+            end
+            
+        #	Add modularity and resolution to global statistics
+            partition_stats_df = DataFrame(
+                measure = ["resolution", "modularity"], 
+                value = string.(round.([resolution_used, modularity], digits=6))
+            )
+            global_measures = vcat(global_stats_df, partition_stats_df)
+
+        #	Calculate group-level statistics
+            group_statistics_dict = group_statistics(clean_edges; membership = partition_df, directed = true, weighted = false)
+
+        #	Extract and enhance node statistics
+            node_stats = group_statistics_dict.node_stats
+            node_stats.in_group_indegree_ratio = node_stats.in_degree_in_group ./ node_stats.in_degree
+            node_stats.in_group_indegree_ratio[isnan.(node_stats.in_group_indegree_ratio)] .= 0
+
+            node_stats.in_group_outdegree_ratio = node_stats.out_degree_in_group ./ node_stats.out_degree
+            node_stats.in_group_outdegree_ratio[isnan.(node_stats.in_group_outdegree_ratio)] .= 0
+
+        #	========== NODE-LEVEL MEASURES ==========
+
+        #	K-core decomposition (in, out, undirected)
+            k_core_in = core_decomposition(clean_edges; weighted = false, mode = "in")
+            rename!(k_core_in, ["node", "k_core_in"])
+            leftjoin!(node_stats, k_core_in, on = :node)
+            node_stats.k_core_in = convert.(Int64, node_stats.k_core_in)
+
+            k_core_out = core_decomposition(clean_edges; weighted = false, mode = "out")
+            rename!(k_core_out, ["node", "k_core_out"])
+            leftjoin!(node_stats, k_core_out, on = :node)
+            node_stats.k_core_out = convert.(Int64, node_stats.k_core_out)
+
+            k_core_all = core_decomposition(clean_edges; weighted = false, mode = "undirected")
+            rename!(k_core_all, ["node", "k_core_undirected"])
+            leftjoin!(node_stats, k_core_all, on = :node)
+            node_stats.k_core_undirected = convert.(Int64, node_stats.k_core_undirected)
+
+        #	2-hop reachability (in, out, undirected)
+            in_hop_reach = hop_reach_k(clean_edges, mode = "in", k = 2) 
+            rename!(in_hop_reach, ["node", "in_reach_2"])
+            leftjoin!(node_stats, in_hop_reach, on = :node)
+            node_stats.in_reach_2 = convert.(Int64, node_stats.in_reach_2)
+
+            out_hop_reach = hop_reach_k(clean_edges, mode = "out", k = 2) 
+            rename!(out_hop_reach, ["node", "out_reach_2"])
+            leftjoin!(node_stats, out_hop_reach, on = :node)
+            node_stats.out_reach_2 = convert.(Int64, node_stats.out_reach_2)
+
+            all_hop_reach = hop_reach_k(clean_edges, mode = "all", k = 2) 
+            rename!(all_hop_reach, ["node", "undirected_reach_2"])
+            leftjoin!(node_stats, all_hop_reach, on = :node)
+            node_stats.undirected_reach_2 = convert.(Int64, node_stats.undirected_reach_2)
+
+        #	Normalized in-degree and out-degree centrality
+            out_deg_norm = out_degree(clean_edges; weighted = false, normalize = true, n = nrow(ni))
+            rename!(out_deg_norm, ["node", "out_degree_normalized"])
+            leftjoin!(node_stats, out_deg_norm, on = :node)
+
+            in_deg_norm = in_degree(clean_edges; weighted = false, normalize = true, n = nrow(ni))
+            rename!(in_deg_norm, ["node", "in_degree_normalized"])
+            leftjoin!(node_stats, in_deg_norm, on = :node)
+
+        #	Handle isolates
+            node_stats.in_degree_normalized = coalesce.(node_stats.in_degree_normalized, 0.0)
+            node_stats.in_degree_normalized = convert.(Float64, node_stats.in_degree_normalized)
+            node_stats.out_degree_normalized = coalesce.(node_stats.out_degree_normalized, 0.0)
+            node_stats.out_degree_normalized = convert.(Float64, node_stats.out_degree_normalized)
+
+        #	Local clustering coefficient (ORA-style)
+            local_density_clustering = local_clustering_coefficient(clean_edges; directed = true, method = :local_density)   
+            rename!(local_density_clustering, ["node", "ego_density", "density_clustering_coefficient"])   
+            leftjoin!(node_stats, local_density_clustering, on = :node)     
+            node_stats.density_clustering_coefficient = convert.(Float64, node_stats.density_clustering_coefficient) 
+
+        #	PageRank (component scaled)
+            page_rank_scores_scaled = pagerank_stitched(clean_edges; mode = :in, weighted = false, stitch_by = :nodes)
+            page_rank_df = DataFrame(node = page_rank_scores_scaled.node_names, page_rank = page_rank_scores_scaled.scores)
+            leftjoin!(node_stats, page_rank_df, on = :node)  
+            node_stats.page_rank = convert.(Float64, node_stats.page_rank)
+
+        #	SALSA hub centrality
+            hub_centrality = salsa_centrality(clean_edges; weighted = false, score = :hub)
+            leftjoin!(node_stats, hub_centrality, on = :node)  
+            node_stats.salsa_hub = convert.(Float64, node_stats.salsa_hub)
+
+        #	SALSA authority centrality
+            authority_centrality = salsa_centrality(clean_edges; weighted = false, score = :authority)
+            leftjoin!(node_stats, authority_centrality, on = :node)  
+            node_stats.salsa_authority = convert.(Float64, node_stats.salsa_authority)
+
+        #	Modularity vitality (hub and bridge scores)
+            modularity_scores = modularity_vitality(clean_edges; directed = false, resolution = resolution_used, weighted = false, resolution_sweep = resolution_sweep)
+            leftjoin!(node_stats, modularity_scores.results_df[:, [1, 3, 4]], on = :node)
+            
+        #	Convert vitality scores to proper type
+            var_names = names(modularity_scores.results_df[:, [3, 4]])
+            for i in eachindex(var_names)
+                node_stats[!, var_names[i]] = convert.(Float64, node_stats[:, var_names[i]])
+            end
+
+        #	Return comprehensive statistics at all levels
+            return global_measures, triads_b_dir, node_stats
+    end
+
+#	Helper: Directed Binary Feature Builder for Network Comparator
+    function directed_binary_feature_builder(global_stats::DataFrame, 
+                                            triad_census_counts::DataFrame, 
+                                            node_measures::DataFrame)
+        """
+        Helper function for network_comparator() that builds standardized feature vector from directed binary network statistics.
+        
+        Args:
+            global_stats::DataFrame: Global network measures from directed_binary_constructor
+            triad_census_counts::DataFrame: Directed triad census with columns [:triad, :count, :proportion]
+            node_measures::DataFrame: Node-level statistics including community assignments
+        Returns:
+            DataFrame: Feature vector with columns [:type, :measure, :value]
+        Notes:
+            - Transforms raw directed statistics into normalized features
+            - Groups features by type for interpretability
+            - Pre-allocates arrays for efficiency
+            - Deep copies inputs to prevent mutation
+            - Includes directed-specific metrics (PageRank, SALSA, reciprocity, in/out k-cores)
+        """
+
+        #	Input validation
+            @assert hasproperty(global_stats, :measure) && hasproperty(global_stats, :value) "global_stats needs :measure and :value"
+            @assert hasproperty(triad_census_counts, :triad) && hasproperty(triad_census_counts, :proportion) "triad_census needs :triad and :proportion"
+            @assert hasproperty(node_measures, :node) "node_measures needs :node column"
+
+        #	Deep copy inputs to prevent mutation
+            global_stats = deepcopy(global_stats)
+            triad_census_counts = deepcopy(triad_census_counts)
+            node_measures = deepcopy(node_measures)
+
+        #	========== GLOBAL NETWORK MEASURES ==========
+
+        #	Prepare global stats with row ordering
+            global_stats.measure = string.(global_stats.measure)
+            global_stats.Obs_ID = 1:nrow(global_stats)
+            global_stats = select(global_stats, :Obs_ID, :measure, :value)
+
+        #	Extract key values for normalization
+            graph_size = parse(Int64, global_stats[global_stats.measure .== "num_nodes", :value][1])
+            num_wcc = parse(Int64, global_stats[global_stats.measure .== "num_wcc", :value][1])
+
+        #	Process component size proportions
+            size_measures = ["largest_wcc", "second_largest_wcc", "min_wcc_size", "largest_scc", "second_largest_scc"]
+            size_idx = findall(in(size_measures), global_stats.measure)
+            
+            size_features = DataFrame(
+                Obs_ID = global_stats.Obs_ID[size_idx],
+                measure = global_stats.measure[size_idx] .* "_proportion",
+                value = round.(parse.(Int64, global_stats.value[size_idx]) ./ graph_size, digits=6)
+            )
+
+        #	Process WCC type proportions
+            type_measures = ["num_isolates", "num_dyads", "num_triads", "num_groups"]
+            type_idx = findall(in(type_measures), global_stats.measure)
+            
+            type_features = DataFrame(
+                Obs_ID = global_stats.Obs_ID[type_idx],
+                measure = global_stats.measure[type_idx] .* "_proportion",
+                value = round.(parse.(Int64, global_stats.value[type_idx]) ./ num_wcc, digits=6)
+            )
+
+        #	Retain raw component measures
+            kept_measures = ["num_nodes", "num_edges", "num_scc", "bow_tie_scc_fraction", 
+                            "bow_tie_in_fraction", "bow_tie_out_fraction"]
+            kept_idx = findall(in(kept_measures), global_stats.measure)
+            
+            kept_features = DataFrame(
+                Obs_ID = global_stats.Obs_ID[kept_idx],
+                measure = global_stats.measure[kept_idx],
+                value = parse.(Float64, global_stats.value[kept_idx])
+            )
+
+        #	Combine component features
+            component_features = vcat(kept_features, size_features, type_features)
+            component_features.type .= "Component Measure"
+
+        #	========== LINK STATISTICS ==========
+
+        #	Process link measures with robust parsing
+            link_types = ["all_links", "nonself_links", "self_loops"]
+            link_idx = findall(in(link_types), global_stats.measure)
+            
+        #	Pre-allocate result array (6 stats per type)
+            n_link_features = length(link_types) * 6  
+            link_data = Vector{NamedTuple{(:Obs_ID, :type, :measure, :value), Tuple{Int, String, String, Float64}}}(undef, n_link_features)
+            
+        #	Process each link type
+            feature_idx = 1
+            prefixes = Dict("all_links" => "all_link_", 
+                        "nonself_links" => "non_self_", 
+                        "self_loops" => "self_loops_")
+            
+            stat_names = ["count", "min", "max", "mean", "std", "sum"]
+            
+            for (i, mkey) in enumerate(link_types)
+                #	Define parameters & output objects
+                    row_idx = link_idx[i]
+                    vstr = global_stats.value[row_idx]
+                    obsid = global_stats.Obs_ID[row_idx]
+                    
+                #	Use regex to extract numeric values robustly
+                    numbers = Float64[]
+                    for m in eachmatch(r"=\s*([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)", vstr)
+                        push!(numbers, parse(Float64, m.captures[1]))
+                    end
+                    
+                #	Take first 6 values (excluding density)
+                    numbers = numbers[1:min(6, length(numbers))]
+                    
+                #	Ensure we have 6 values
+                    if length(numbers) < 6
+                        @warn "Expected 6 values for $mkey, got $(length(numbers))"
+                        resize!(numbers, 6)
+                        numbers[length(numbers)+1:6] .= NaN
+                    end
+                    
+                #	Store in pre-allocated array
+                    for (j, stat_name) in enumerate(stat_names)
+                        link_data[feature_idx] = (
+                            Obs_ID = obsid,
+                            type = "Link Measure",
+                            measure = prefixes[mkey] * stat_name,
+                            value = numbers[j]
+                        )
+                        feature_idx += 1
+                    end
+            end
+            
+            link_features = DataFrame(link_data)
+
+        #	Normalize non-self and self-loop counts to proportions
+            num_edges = component_features[component_features.measure .== "num_edges", :value][1]
+            
+            for (count_name, prop_name) in [("non_self_count", "non_self_proportion"), 
+                                            ("self_loops_count", "self_loops_proportion")]
+                idx = findfirst(==(count_name), link_features.measure)
+                if !isnothing(idx)
+                    link_features.value[idx] = link_features.value[idx] / num_edges
+                    link_features.measure[idx] = prop_name
+                end
+            end
+            
+        #	Remove redundant all_link_count
+            filter!(row -> row.measure != "all_link_count", link_features)
+
+        #	========== GLOBAL NETWORK METRICS ==========
+
+        #	Process remaining global measures
+            global_measures = ["degree assortativity", "transitivity", "local clustering coefficient", 
+                            "reciprocity", "density", "resolution", "modularity"]
+            global_idx = findall(in(global_measures), global_stats.measure)
+            
+            global_features = DataFrame(
+                Obs_ID = global_stats.Obs_ID[global_idx],
+                type = fill("Global Network Measure", length(global_idx)),
+                measure = global_stats.measure[global_idx],
+                value = parse.(Float64, global_stats.value[global_idx])
+            )
+
+        #	Combine all global-level features
+            global_all = vcat(component_features, link_features, global_features)
+            sort!(global_all, :Obs_ID)
+            select!(global_all, Not(:Obs_ID))
+
+        #	========== TRIAD CENSUS ==========
+
+        #	Create triad census features
+            triad_features = DataFrame(
+                type = fill("Triad Census", nrow(triad_census_counts)),
+                measure = triad_census_counts.triad,
+                value = triad_census_counts.proportion
+            )
+
+        #	========== K-CORE DECOMPOSITION ==========
+
+        #	Compute in-k-core membership distribution
+            n_nodes = nrow(node_measures)
+            k_core_in_groups = combine(
+                groupby(node_measures, :k_core_in),
+                nrow => :count
+            )
+            sort!(k_core_in_groups, :k_core_in)
+
+            k_core_in_features = DataFrame(
+                type = fill("K-Core Decomposition", nrow(k_core_in_groups)),
+                measure = "k_core_in_" .* string.(k_core_in_groups.k_core_in),
+                value = round.(k_core_in_groups.count ./ n_nodes, digits=6)
+            )
+
+        #	Compute out-k-core membership distribution
+            k_core_out_groups = combine(
+                groupby(node_measures, :k_core_out),
+                nrow => :count
+            )
+            sort!(k_core_out_groups, :k_core_out)
+
+            k_core_out_features = DataFrame(
+                type = fill("K-Core Decomposition", nrow(k_core_out_groups)),
+                measure = "k_core_out_" .* string.(k_core_out_groups.k_core_out),
+                value = round.(k_core_out_groups.count ./ n_nodes, digits=6)
+            )
+
+        #	Compute undirected k-core membership distribution
+            k_core_groups = combine(
+                groupby(node_measures, :k_core_undirected),
+                nrow => :count
+            )
+            sort!(k_core_groups, :k_core_undirected)
+            
+            k_core_all_features = DataFrame(
+                type = fill("K-Core Decomposition", nrow(k_core_groups)),
+                measure = "k_core_undirected_" .* string.(k_core_groups.k_core_undirected),
+                value = round.(k_core_groups.count ./ n_nodes, digits=6)
+            )
+
+            k_core_features = vcat(k_core_in_features, k_core_out_features, k_core_all_features)
+
+        #	========== COMMUNITY STRUCTURE ==========
+
+        #	Compute community size distribution
+            community_groups = combine(
+                groupby(node_measures, :community),
+                nrow => :count
+            )
+            sort!(community_groups, :count, rev=true)
+            
+            community_features = DataFrame(
+                type = fill("Community Structure", nrow(community_groups)),
+                measure = "Community_" .* string.(1:nrow(community_groups)),
+                value = round.(community_groups.count ./ n_nodes, digits=6)
+            )
+
+        #	========== NODE-LEVEL AGGREGATES ==========
+
+        #	Normalize 2-step reach metrics
+            full_n = parse(Int64, global_stats.value[1])
+            
+        #	Undirected reach: proportion of node pairs reachable
+            if hasproperty(node_measures, :undirected_reach_2)
+                #	Guard against n_nodes ≤ 1
+                    den = max(full_n * (full_n - 1), 1)
+                    node_measures.undirected_reach_2_normalized = node_measures.undirected_reach_2 ./ den
+            end
+
+        #	In-reach: 2k_in/(n-1)
+            if hasproperty(node_measures, :in_reach_2)
+                #	Guard against n_nodes ≤ 1
+                    den = max(full_n - 1, 1)
+                    node_measures.in_reach_2_normalized = node_measures.in_reach_2 ./ den
+            end
+
+        #	Out-reach: 2k_out/(n-1)
+            if hasproperty(node_measures, :out_reach_2)
+                #	Guard against n_nodes ≤ 1
+                    den = max(full_n - 1, 1)
+                    node_measures.out_reach_2_normalized = node_measures.out_reach_2 ./ den
+            end
+
+        #	Define measures and their types
+            node_measures_config = [
+                ("out_degree_normalized", "Degree Measures"),
+                ("in_degree_normalized", "Degree Measures"),
+                ("in_group_indegree_ratio", "Degree Measures"),
+                ("in_group_outdegree_ratio", "Degree Measures"),
+                ("in_reach_2_normalized", "Local Reach"),
+                ("out_reach_2_normalized", "Local Reach"),
+                ("undirected_reach_2_normalized", "Local Reach"),
+                ("ego_density", "Local Structure"),
+                ("density_clustering_coefficient", "Local Structure"),
+                ("page_rank", "Influence"),
+                ("salsa_hub", "Influence"),
+                ("salsa_authority", "Influence"),
+                ("modularity_vitality_hub", "Influence"),
+                ("modularity_vitality_bridge", "Influence")
+            ]
+
+        #	Pre-allocate node features array
+            n_node_features = length(node_measures_config) * 5  # 5 stats per measure
+            node_data = Vector{NamedTuple{(:type, :measure, :value), Tuple{String, String, Float64}}}(undef, n_node_features)
+            
+        #	Compute aggregate statistics efficiently
+            feature_idx = 1
+            for (col_name, feat_type) in node_measures_config
+                if hasproperty(node_measures, Symbol(col_name))
+                    col_data = node_measures[!, col_name]
+                    
+                    #	Compute statistics
+                        stats = (
+                            mean = mean(col_data),
+                            median = median(col_data),
+                            std = std(col_data),
+                            skew = skew_about_mean(col_data),
+                            kurtosis = kurtosis_about_mean(col_data)
+                        )
+                        
+                    #	Store in pre-allocated array
+                        for (stat_name, stat_value) in pairs(stats)
+                            node_data[feature_idx] = (
+                                type = feat_type,
+                                measure = col_name * "_" * string(stat_name),
+                                value = round(stat_value, digits=6)
+                            )
+                            feature_idx += 1
+                        end
+                end
+            end
+            
+            node_features = DataFrame(node_data[1:feature_idx-1])
+
+        #	========== COMBINE ALL FEATURES ==========
+
+        #	Combine all feature DataFrames
+            feature_vector = vcat(
+                global_all,
+                triad_features,
+                k_core_features,
+                community_features,
+                node_features
+            )
+            
         #	Return feature vector
             return feature_vector
     end
