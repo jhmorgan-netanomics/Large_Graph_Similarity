@@ -11116,8 +11116,8 @@ THE SOFTWARE.
                     agg_func = maximum
             end
 
-		#   Checking if Edgelist is Symmetric
-		    src = clean_edges[:,1]
+        #   Checking if Edgelist is Symmetric
+            src = clean_edges[:,1]
             dst = clean_edges[:,2]
 
         #   Canonical unordered form (always small→large)
@@ -11335,6 +11335,12 @@ THE SOFTWARE.
             rename!(k_core_all, ["node", "k_core_all"])
             leftjoin!(node_stats, k_core_all, on = :node)
             node_stats.k_core_all = convert.(Int64, node_stats.k_core_all)
+
+        #	S-core decomposition
+            s_core_all = core_decomposition(symmetric_edgelist; weighted = true, mode = "total")
+            rename!(s_core_all, ["node", "s_core_all"])
+            leftjoin!(node_stats, s_core_all, on = :node)
+            node_stats.s_core_all = convert.(Int64, node_stats.s_core_all)
 
         #	2-hop reachability
             all_hop_reach = hop_reach_k(symmetric_edgelist, mode = "all", k = 2) 
@@ -11561,7 +11567,7 @@ THE SOFTWARE.
             triad_features = vcat(AUMC_density, peak_tau, peak_density)
             triad_features.type .= "Triad Census"
 
-        #	========== K-CORE DECOMPOSITION ==========
+        #	========== K-CORE & S-CORE DECOMPOSITION ==========
 
         #	Compute k-core membership distribution
             n_nodes = nrow(node_measures)
@@ -11577,6 +11583,19 @@ THE SOFTWARE.
                 value = round.(k_core_groups.count ./ n_nodes, digits=6)
             )
 
+         #	Compute s-core membership distribution
+            s_core_groups = combine(
+                groupby(node_measures, :s_core_all),
+                nrow => :count
+            )
+            sort!(s_core_groups, :s_core_all)
+
+            s_core_features = DataFrame(
+                type = fill("S-Core Decomposition", nrow(s_core_groups)),
+                measure = "s_core_all_" .* string.(s_core_groups.s_core_all),
+                value = round.(s_core_groups.count ./ n_nodes, digits=6)
+            )
+            
         #	========== COMMUNITY STRUCTURE ==========
 
         #	Compute community size distribution
@@ -11655,6 +11674,7 @@ THE SOFTWARE.
                 global_all,
                 triad_features,
                 k_core_features,
+                s_core_features,
                 community_features,
                 node_features
             )
