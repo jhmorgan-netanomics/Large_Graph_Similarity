@@ -639,16 +639,15 @@ using Large_Graph_Similarity
             transitivity = global_clustering_coefficient(
                 symmetric_edgelist; 
                 directed = false, 
-                weighted = false, 
                 method = :transitivity, 
                 drop_self_loops = true
             )
             
             global_local_clustering_coeff = global_clustering_coefficient(
                 symmetric_edgelist; 
-                directed = false, 
-                weighted = false, 
+                directed = false,  
                 method = :average, 
+                average_mode = :local_clustering,
                 drop_self_loops = true
             )
 
@@ -1267,9 +1266,10 @@ using Large_Graph_Similarity
         #	Global clustering and assortativity
             degree_assortativity = assortativity_degree(symmetric_edgelist; graph_type = :undirected, weighted = true)
             
-            transitivity = global_clustering_coefficient(symmetric_edgelist; directed = false, weighted = true, method = :transitivity, drop_self_loops = true)
+            transitivity = global_clustering_coefficient(symmetric_edgelist; directed = false, method = :transitivity, drop_self_loops = true)
             
-            global_local_clustering_coeff = global_clustering_coefficient(symmetric_edgelist; directed = false, weighted = true, method = :average, drop_self_loops = true)
+            global_local_clustering_coeff = global_clustering_coefficient(symmetric_edgelist; directed = false, method = :average, 
+                                                                          average_mode = :local_clustering, drop_self_loops = true)
 
         #	Assemble global statistics
             global_measures = [
@@ -1866,9 +1866,10 @@ using Large_Graph_Similarity
         #	Global clustering and assortativity
             degree_assortativity = assortativity_degree(clean_edges; graph_type = :directed, weighted = false)
             
-            transitivity = global_clustering_coefficient(clean_edges; directed = true, weighted = false, method = :transitivity, drop_self_loops = true)
+            transitivity = global_clustering_coefficient(clean_edges; directed = true, method = :transitivity, drop_self_loops = true)
 
-            global_local_clustering_coeff = global_clustering_coefficient(clean_edges; directed = false, weighted = false, method = :average, drop_self_loops = true)
+            global_local_clustering_coeff = global_clustering_coefficient(clean_edges; directed = true, method = :average, 
+                                                                          average_mode = :local_clustering, drop_self_loops = true)
             
             graph_reciprocity = reciprocity(clean_edges; weighted = false, mode = :dyad_based)
 
@@ -2081,6 +2082,12 @@ using Large_Graph_Similarity
             node_stats.in_degree_normalized = convert.(Float64, node_stats.in_degree_normalized)
             node_stats.out_degree_normalized = coalesce.(node_stats.out_degree_normalized, 0.0)
             node_stats.out_degree_normalized = convert.(Float64, node_stats.out_degree_normalized)
+
+        #   In/Out Degree Ratio
+            sample_degree_ratio = degree_ratio(clean_edges; weighted=false)
+            sample_degree_ratio.in_out_ratio[isinf.(sample_degree_ratio.in_out_ratio)] .= 0
+            leftjoin!(node_stats,  sample_degree_ratio[:,["node", "in_out_ratio"]], on=:node)
+            node_stats.in_out_ratio = convert.(Float64, node_stats.in_out_ratio)
 
         #	Local clustering coefficient (ORA-style)
             local_density_clustering = local_clustering_coefficient(clean_edges; directed = true, method = :local_density)   
@@ -2381,6 +2388,7 @@ using Large_Graph_Similarity
             node_measures_config = [
                 ("out_degree_normalized", "Degree Measures"),
                 ("in_degree_normalized", "Degree Measures"),
+                ("in_out_ratio", "Degree Measures"),
                 ("in_group_indegree_ratio", "Degree Measures"),
                 ("in_group_outdegree_ratio", "Degree Measures"),
                 ("in_reach_2_normalized", "Local Reach"),
@@ -2499,12 +2507,383 @@ using Large_Graph_Similarity
 #   Constructing Directed/Binary Feature Vector
     directed_binary_feature_vector = directed_binary_feature_builder(global_stats, triad_census_counts, node_measures)
 
-
 #   Generating Directed/Weighted Graph Design Matrices from which to Create Feature Vectors 
+    edges = deepcopy(balikatan_arcs)
+    resolution_sweep = false
+    resolution = 1.0
+    directed = true
+    weighted = true
+    n_resolutions = 15
+    n_runs_per_gamma = 5
+    n_iterations_per_run = 10
+    seed = 42
+    provided_membership = nothing
+    function directed_weighted_constructor(edges::DataFrame, nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}};
+                                          resolution_sweep::Bool = false, resolution::Float64 = 1.0, directed::Bool = true, 
+                                          weighted::Bool = true, n_resolutions::Int = 15, n_runs_per_gamma::Int = 5,
+                                          n_iterations_per_run::Int = 10, seed::Union{Int,Nothing} = nothing, 
+                                          provided_membership::Union{Nothing,DataFrame,Vector{Int},Dict} = nothing)
 
-#   START BACK HERE!!!!
+        #	========== NETWORK TRANSFORMATION ==========
+
+        #	Create working copy
+            clean_edges = deepcopy(edges) 
+
+        #	Standardize weight column 
+            if weighted
+                #	Ensure weight column exists with proper type
+                    if !hasproperty(clean_edges, :weight)
+                        clean_edges.weight = ones(Float64, nrow(clean_edges))
+                    else
+                        clean_edges.weight = Float64.(clean_edges.weight)
+                    end
+                    agg_func = sum
+            else
+                #	Force binary weights
+                    clean_edges.weight = ones(Float64, nrow(clean_edges))
+                    agg_func = maximum
+            end
+
+        #	Binarize network (aggregate multi-edges to presence/absence)
+            clean_edges = _aggregate_multi_edges(clean_edges; agg_func = sum)
+
+        #	Build adjacency matrix
+            adj_base, node_map, idx_to_node = _graph_to_sparse_matrix(clean_edges; nodes = nodes, weighted = true)
+
+        #	Preserve node index for community detection
+            ni = deepcopy(idx_to_node)
+
+        #	========== GLOBAL NETWORK MEASURES ==========
+
+        #	Component statistics
+            component_stats = component_statistics(clean_edges, nodes = ni, graph_type = :directed)
+            component_stat_names = collect(keys(component_stats))      
+            component_stat_values = collect(values(component_stats)) 
+
+        #	Link statistics
+            link_stats = link_statistics(clean_edges; nodes = ni, graph_type = :directed, weighted = true)
+            link_stats_tuple = _summarize_link_stats(link_stats)
+            link_stats_df = link_stats_tuple[1]
+
+        #	Global clustering and assortativity
+            degree_assortativity = assortativity_degree(clean_edges; graph_type = :directed, weighted = true, 
+                                                        directed_mode="in-degree")
+            
+            transitivity = global_clustering_coefficient(clean_edges; directed = true, method = :transitivity, drop_self_loops = true)
+
+            global_local_clustering_coeff = global_clustering_coefficient(clean_edges; directed = true, method = :average, 
+                                                                          average_mode = :local_clustering, drop_self_loops = true)
+            
+            graph_reciprocity = reciprocity(clean_edges; weighted = true, mode = :dyad_based)
+
+        #	Assemble global statistics
+            global_measures = [
+                component_stat_names; 
+                link_stats_df.link_group; 
+                "degree assortativity"; 
+                "transitivity"; 
+                "local clustering coefficient";
+                "reciprocity"; 
+                "density"
+            ]
+            
+            global_values = string.([
+                component_stat_values; 
+                link_stats_df.values; 
+                round(degree_assortativity, digits=6); 
+                round(transitivity, digits=6); 
+                round(global_local_clustering_coeff, digits=6);
+                round(graph_reciprocity, digits=6);
+                round(link_stats.density[1], digits=6)
+            ])
+            
+            global_stats_df = DataFrame(measure = global_measures, value = global_values)
+
+
+        #	========== MESO-LEVEL (COMMUNITY) MEASURES ==========
+
+
+        #	========== NODE-LEVEL MEASURES ==========
+
+    end
+
 
 ######################################
 #   COMPARATOR FUNCTION ASSESSMENT   #
 ######################################
 
+
+################
+#   TESTING    #
+################
+
+#	Helper Function for testing_directed_transitivity_binary: count non-vacuous triplets
+	function _count_triplets_directed_binary(adj::SparseMatrixCSC{Float64,Int64}, node_idx::Int)
+		"""
+		Args:
+			adj::SparseMatrixCSC{Float64,Int64}:
+				Binary adjacency matrix (nonnegative, 0/1 entries).
+				adj[i, j] > 0 indicates a directed edge i → j.
+			node_idx::Int:
+				Index of center node (1-based).
+		Returns:
+			Tuple{Float64, Float64}:
+				(closed_triplets, total_nonvacuous_triplets)
+		Notes:
+			Directed triplets are defined as *non-vacuous* 2-paths centered at node_idx:
+				- j → node_idx → k
+				- k → node_idx → j
+			A triplet is transitive (closed) if:
+				- j → node_idx → k and j → k exists, or
+				- k → node_idx → j and k → j exists.
+			Pure in-stars (j → node_idx, k → node_idx) and out-stars
+			(node_idx → j, node_idx → k) are vacuous and excluded.
+		"""
+
+		#	Get in- and out-neighbors
+			out_neighbors = findnz(adj[node_idx, :])[1]
+			in_neighbors  = findnz(adj[:, node_idx])[1]
+
+		#	Remove self from neighbor sets, if present
+			out_neighbors = filter(n -> n != node_idx, out_neighbors)
+			in_neighbors  = filter(n -> n != node_idx, in_neighbors)
+
+		#	Initialize counts
+			total_triplets  = 0.0
+			closed_triplets = 0.0
+
+		#	Type 1: j → node_idx → k (j in in_neighbors, k in out_neighbors)
+			for j in in_neighbors
+				for k in out_neighbors
+					if j == k
+						continue
+					end
+					total_triplets += 1.0
+					if adj[j, k] > 0
+						closed_triplets += 1.0
+					end
+				end
+			end
+
+		#	Type 2: k → node_idx → j (k in in_neighbors, j in out_neighbors)
+		#	Treated as distinct ordered triplets (first, center, last).
+			for k in in_neighbors
+				for j in out_neighbors
+					if j == k
+						continue
+					end
+					total_triplets += 1.0
+					if adj[k, j] > 0
+						closed_triplets += 1.0
+					end
+				end
+			end
+
+		#	Return (closed, total)
+			return (closed_triplets, total_triplets)
+	end
+
+#	Testing Function: Directed Global Transitivity (Binary, Non-vacuous Triplets)
+	function testing_directed_transitivity_binary(edges::DataFrame;
+	                                              agg_func::Function = maximum,
+	                                              drop_self_loops::Bool = true)
+		"""
+		Args:
+			edges::DataFrame:
+				Edge list with :src and :dst columns (and optional :weight).
+				Weights are ignored for this binary test; only presence matters.
+			agg_func::Function:
+				Aggregation for multi-edges before binarization (default = maximum).
+				Any positive result after aggregation is treated as an edge.
+			drop_self_loops::Bool:
+				If true (default), self-loops (src == dst) are removed before building
+				the adjacency. This matches most directed transitivity definitions.
+		Returns:
+			NamedTuple:
+				(; closed::Float64,
+				   triplets::Float64,
+				   transitivity::Float64)
+				where:
+					- closed      = total number of closed non-vacuous triplets
+					- triplets    = total number of non-vacuous triplets
+					- transitivity = closed / triplets (NaN if triplets == 0)
+		Notes:
+			This is a *binary, directed* global transitivity measure based on
+			non-vacuous 2-paths centered at each node (Wasserman & Faust / Opsahl):
+				- Triplets: j → i → k or k → i → j
+				- Closed if the edge from first to last exists.
+			Use this as a test implementation to compare with ORA's directed
+			transitivity on a binarized version of the same network.
+		"""
+
+		#	Validation
+			if !hasproperty(edges, :src) || !hasproperty(edges, :dst)
+				throw(ArgumentError("testing_directed_transitivity_binary: edges must have :src and :dst columns"))
+			end
+
+		#	Handle empty edge list early
+			if nrow(edges) == 0
+				return (; closed = 0.0, triplets = 0.0, transitivity = NaN)
+			end
+
+		#	Drop self-loops if requested
+			edges_effective = edges
+			if drop_self_loops
+				if hasproperty(edges_effective, :weight)
+					edges_effective = edges_effective[edges_effective.src .!= edges_effective.dst, [:src, :dst, :weight]]
+				else
+					edges_effective = edges_effective[edges_effective.src .!= edges_effective.dst, [:src, :dst]]
+				end
+			end
+
+		#	Aggregate multi-edges (weights ignored after aggregation; presence only)
+			clean_edges = _aggregate_multi_edges(edges_effective; agg_func = agg_func)
+
+		#	Build binary adjacency from edge list
+		#	weighted=false should already give 0/1 presence; no weights used here.
+			adj, _, _ = _edgelist_to_sparse_matrix(clean_edges; weighted = false)
+			n = size(adj, 1)
+
+		#	Accumulate closed and total non-vacuous triplets
+			total_closed   = 0.0
+			total_triplets = 0.0
+
+			for i in 1:n
+				closed_i, triplets_i = _count_triplets_directed_binary(adj, i)
+				total_closed   += closed_i
+				total_triplets += triplets_i
+			end
+
+		#	Compute transitivity
+			transitivity = total_triplets > 0 ? (total_closed / total_triplets) : NaN
+
+		#	Return all components for inspection
+			return (; closed = total_closed, triplets = total_triplets, transitivity = transitivity)
+	end
+
+    edges = deepcopy(balikatan_arcs)
+    testing_directed_transitivity_binary(edges)
+
+#	Test Helper for global_clustering_coefficient: analytic toy graphs
+    function test_global_clustering_coefficient_toys(; verbose::Bool = true)
+        """
+        Args:
+            verbose::Bool:
+                If true (default), print test names and values.
+        Returns:
+            Nothing:
+                Raises AssertionError if any test fails.
+        Notes:
+            Validates the classic (Watts–Strogatz / Newman) local clustering
+            aggregated via the :average / :local_clustering pathway, and its
+            directed analogue, using small graphs with analytically known
+            global clustering values.
+        """
+
+        #	Helper for reporting
+            print_test(name, got, expected) = verbose && println("$(name): got=$(got), expected=$(expected)")
+
+        #	------------------------------------------------------------
+        #	Test 1: Undirected triangle → global C = 1.0
+        #	Nodes: 1,2,3; edges: (1-2), (2-3), (3-1)
+        #	------------------------------------------------------------
+            edges1 = DataFrame(
+                src = ["1","2","3"],
+                dst = ["2","3","1"],
+            )
+            val1 = global_clustering_coefficient(
+                edges1;
+                directed = false,
+                method = :average,
+                average_mode = :local_clustering,
+                drop_self_loops = true,
+            )
+            expected1 = 1.0
+            print_test("Test 1 (undirected triangle)", val1, expected1)
+            @assert isapprox(val1, expected1; atol = 1e-10)
+
+        #	------------------------------------------------------------
+        #	Test 2: Undirected path of length 2 → global C = 0.0
+        #	Nodes: 1-2-3
+        #	------------------------------------------------------------
+            edges2 = DataFrame(
+                src = ["1","2"],
+                dst = ["2","3"],
+            )
+            val2 = global_clustering_coefficient(
+                edges2;
+                directed = false,
+                method = :average,
+                average_mode = :local_clustering,
+                drop_self_loops = true,
+            )
+            expected2 = 0.0
+            print_test("Test 2 (undirected path length 2)", val2, expected2)
+            @assert isapprox(val2, expected2; atol = 1e-10)
+
+        #	------------------------------------------------------------
+        #	Test 3: Undirected square with one diagonal
+        #	Nodes: 1,2,3,4
+        #	Edges: (1-2), (2-3), (3-4), (4-1), (1-3)
+        #	Expected:
+        #		C1 = 2/3, C2 = 1, C3 = 2/3, C4 = 1 → global = 5/6 ≈ 0.8333
+        #	------------------------------------------------------------
+            edges3 = DataFrame(
+                src = ["1","2","3","4","1"],
+                dst = ["2","3","4","1","3"],
+            )
+            val3 = global_clustering_coefficient(
+                edges3;
+                directed = false,
+                method = :average,
+                average_mode = :local_clustering,
+                drop_self_loops = true,
+            )
+            expected3 = 5.0 / 6.0
+            print_test("Test 3 (square + diagonal)", val3, expected3)
+            @assert isapprox(val3, expected3; atol = 1e-10)
+
+        #	------------------------------------------------------------
+        #	Test 4: Directed bidirected triangle → global C_dir = 1.0
+        #	Nodes: 1,2,3; edges: all pairs both directions
+        #	------------------------------------------------------------
+            edges4 = DataFrame(
+                src = ["1","2","1","3","2","3"],
+                dst = ["2","1","3","1","3","2"],
+            )
+            val4 = global_clustering_coefficient(
+                edges4;
+                directed = true,
+                method = :average,
+                average_mode = :local_clustering,
+                drop_self_loops = true,
+            )
+            expected4 = 1.0
+            print_test("Test 4 (directed bidirected triangle)", val4, expected4)
+            @assert isapprox(val4, expected4; atol = 1e-10)
+
+        #	------------------------------------------------------------
+        #	Test 5: Directed chain 1→2→3 → global C_dir = 0.0
+        #	Nodes: 1,2,3; edges: 1→2, 2→3
+        #	------------------------------------------------------------
+            edges5 = DataFrame(
+                src = ["1","2"],
+                dst = ["2","3"],
+            )
+            val5 = global_clustering_coefficient(
+                edges5;
+                directed = true,
+                method = :average,
+                average_mode = :local_clustering,
+                drop_self_loops = true,
+            )
+            expected5 = 0.0
+            print_test("Test 5 (directed chain 1→2→3)", val5, expected5)
+            @assert isapprox(val5, expected5; atol = 1e-10)
+
+        #	All tests passed
+            verbose && println("All global_clustering_coefficient toy tests passed.")
+            return nothing
+    end
+
+    test_global_clustering_coefficient_toys()
