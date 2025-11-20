@@ -3217,6 +3217,415 @@ using Large_Graph_Similarity
             return feature_vector
     end
 
+#	Helper: Compute Overall Euclidean Distance
+    function _compute_overall_distance(combined_measures::DataFrame)
+        """
+        Compute Euclidean distance and similarity between two network feature vectors.
+        
+        Args:
+            combined_measures::DataFrame: Features with :network_1_values and :network_2_values
+        Returns:
+            NamedTuple: (distance, squared_distance, similarity)
+        Notes:
+            - Distance is standard Euclidean distance in feature space
+            - Similarity = 1/(1+distance), mapping [0,∞) → (0,1]
+        """
+
+        #	Validation
+            @assert hasproperty(combined_measures, :network_1_values) "combined_measures must contain :network_1_values"
+            @assert hasproperty(combined_measures, :network_2_values) "combined_measures must contain :network_2_values"
+
+        #	Extract numeric vectors
+            x = Vector{Float64}(combined_measures.network_1_values)
+            y = Vector{Float64}(combined_measures.network_2_values)
+
+        #	Compute squared differences
+            diff = x .- y
+            sq_diff = diff .^ 2
+            total_sq = sum(sq_diff)
+
+        #	Compute Euclidean distance
+            dist = sqrt(total_sq)
+
+        #	Map distance to similarity
+            sim = 1.0 / (1.0 + dist)
+
+        #	Return summary
+            return (distance = dist,
+                    squared_distance = total_sq,
+                    similarity = sim)
+    end
+
+#	Helper: Compute Type-Level Distance Contributions
+    function _compute_type_contributions(combined_measures::DataFrame,
+                                        total_squared_distance::Float64)
+        """
+        Compute per-type contributions to overall network distance.
+        
+        Args:
+            combined_measures::DataFrame: Features with values and type labels
+            total_squared_distance::Float64: Total squared Euclidean distance
+        Returns:
+            DataFrame: Per-type distance metrics and contributions
+        Notes:
+            - Normalized contribution = type_distance_sq / total_distance_sq
+            - Type similarity = 1/(1+type_distance)
+        """
+
+        #	Validation
+            @assert hasproperty(combined_measures, :network_1_values) "combined_measures must contain :network_1_values"
+            @assert hasproperty(combined_measures, :network_2_values) "combined_measures must contain :network_2_values"
+            @assert hasproperty(combined_measures, :type) "combined_measures must contain :type"
+
+        #	Handle empty input
+            if nrow(combined_measures) == 0
+                return DataFrame(
+                    type = String[],
+                    n_measures = Int[],
+                    distance_sq = Float64[],
+                    distance = Float64[],
+                    normalized_contribution = Float64[],
+                    type_similarity = Float64[]
+                )
+            end
+
+        #	Compute squared differences per feature
+            x = Vector{Float64}(combined_measures.network_1_values)
+            y = Vector{Float64}(combined_measures.network_2_values)
+            sq_diff = (x .- y) .^ 2
+
+        #	Assemble per-feature table for grouping
+            tmp = DataFrame(
+                type = String.(combined_measures.type),
+                sq_diff = sq_diff
+            )
+
+        #	Summarize by type
+            type_df = combine(
+                groupby(tmp, :type),
+                :sq_diff => sum => :distance_sq,
+                nrow => :n_measures
+            )
+
+        #	Compute per-type distances
+            type_df.distance = sqrt.(type_df.distance_sq)
+
+        #	Compute normalized contributions
+            if total_squared_distance > 0.0
+                type_df.normalized_contribution = type_df.distance_sq ./ total_squared_distance
+            else
+                type_df.normalized_contribution = fill(0.0, nrow(type_df))
+            end
+
+        #	Map per-type distance to similarity
+            type_df.type_similarity = 1.0 ./ (1.0 .+ type_df.distance)
+
+        #	Return contributions table
+            return type_df
+    end
+
+#	Network Comparator: Compare Two Networks
+    function network_comparator(edges_1::DataFrame, nodes_1::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}},
+                            edges_2::DataFrame, nodes_2::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}};
+                            resolution_sweep::Bool = false, resolution::Float64 = 1.0, directed::Bool = true, 
+                            weighted::Bool = true, n_resolutions::Int = 15, n_runs_per_gamma::Int = 5,
+                            n_iterations_per_run::Int = 10, seed::Union{Int,Nothing} = nothing, 
+                            provided_membership_1::Union{Nothing,DataFrame,Vector{Int},Dict} = nothing,
+                            provided_membership_2::Union{Nothing,DataFrame,Vector{Int},Dict} = nothing)
+        """
+        Compare two networks by computing comprehensive feature vectors and measuring their similarity.
+        
+        Args:
+            edges_1, edges_2::DataFrame: Edge lists with :src, :dst, optional :weight
+            nodes_1, nodes_2: Node universes (include isolates if present)
+            resolution_sweep::Bool: Use CHAMP multi-resolution community detection
+            resolution::Float64: Resolution parameter for modularity
+            directed::Bool: Treat networks as directed (default true)
+            weighted::Bool: Use edge weights if present (default true)
+            n_resolutions::Int: Number of resolutions for CHAMP sweep
+            n_runs_per_gamma::Int: Leiden runs per resolution
+            n_iterations_per_run::Int: Iterations per Leiden run
+            seed: Random seed for reproducibility
+            provided_membership_1, provided_membership_2: Optional pre-computed communities
+        Returns:
+            NamedTuple with fields:
+                - combined_features: DataFrame of aligned feature vectors
+                - overall_distance: Euclidean distance between networks
+                - overall_similarity: Similarity score ∈ (0,1]
+                - type_contributions: Per-type distance breakdown
+        Notes:
+            - Automatically selects appropriate constructor based on directed/weighted flags
+            - Handles mismatched features by zero-filling
+            - Preserves feature ordering while ensuring completeness
+        """
+
+        #	Create working copies
+            clean_edges_1 = deepcopy(edges_1) 
+            clean_nodes_1 = deepcopy(nodes_1)
+            clean_edges_2 = deepcopy(edges_2)
+            clean_nodes_2 = deepcopy(nodes_2)
+
+        #	========== CONSTRUCT FEATURE VECTORS ==========
+
+        #	Select appropriate constructor and builder based on configuration
+            if !directed && !weighted
+                #	Undirected binary networks
+                    global_stats_1, triad_census_counts_1, node_measures_1 = undirected_binary_constructor(
+                        clean_edges_1, clean_nodes_1;
+                        resolution_sweep = resolution_sweep,
+                        resolution = resolution,
+                        directed = directed,
+                        weighted = weighted,
+                        n_resolutions = n_resolutions,
+                        n_runs_per_gamma = n_runs_per_gamma,
+                        n_iterations_per_run = n_iterations_per_run,
+                        seed = seed,
+                        provided_membership = provided_membership_1
+                    )
+
+                    global_stats_2, triad_census_counts_2, node_measures_2 = undirected_binary_constructor(
+                        clean_edges_2, clean_nodes_2;
+                        resolution_sweep = resolution_sweep,
+                        resolution = resolution,
+                        directed = directed,
+                        weighted = weighted,
+                        n_resolutions = n_resolutions,
+                        n_runs_per_gamma = n_runs_per_gamma,
+                        n_iterations_per_run = n_iterations_per_run,
+                        seed = seed,
+                        provided_membership = provided_membership_2
+                    )
+
+                #	Build feature vectors
+                    feature_vector_1 = symmetric_binary_feature_builder(global_stats_1, triad_census_counts_1, node_measures_1)
+                    feature_vector_2 = symmetric_binary_feature_builder(global_stats_2, triad_census_counts_2, node_measures_2)
+
+            elseif !directed && weighted
+                #	Undirected weighted networks
+                    global_stats_1, triad_census_counts_1, node_measures_1 = undirected_weighted_constructor(
+                        clean_edges_1, clean_nodes_1;
+                        resolution_sweep = resolution_sweep,
+                        resolution = resolution,
+                        directed = directed,
+                        weighted = weighted,
+                        n_resolutions = n_resolutions,
+                        n_runs_per_gamma = n_runs_per_gamma,
+                        n_iterations_per_run = n_iterations_per_run,
+                        seed = seed,
+                        provided_membership = provided_membership_1
+                    )
+
+                    global_stats_2, triad_census_counts_2, node_measures_2 = undirected_weighted_constructor(
+                        clean_edges_2, clean_nodes_2;
+                        resolution_sweep = resolution_sweep,
+                        resolution = resolution,
+                        directed = directed,
+                        weighted = weighted,
+                        n_resolutions = n_resolutions,
+                        n_runs_per_gamma = n_runs_per_gamma,
+                        n_iterations_per_run = n_iterations_per_run,
+                        seed = seed,
+                        provided_membership = provided_membership_2
+                    )
+
+                #	Build feature vectors
+                    feature_vector_1 = symmetric_weighted_feature_builder(global_stats_1, triad_census_counts_1, node_measures_1)
+                    feature_vector_2 = symmetric_weighted_feature_builder(global_stats_2, triad_census_counts_2, node_measures_2)
+
+            elseif directed && !weighted
+                #	Directed binary networks
+                    global_stats_1, triad_census_counts_1, node_measures_1 = directed_binary_constructor(
+                        clean_edges_1, clean_nodes_1;
+                        resolution_sweep = resolution_sweep,
+                        resolution = resolution,
+                        directed = directed,
+                        weighted = weighted,
+                        n_resolutions = n_resolutions,
+                        n_runs_per_gamma = n_runs_per_gamma,
+                        n_iterations_per_run = n_iterations_per_run,
+                        seed = seed,
+                        provided_membership = provided_membership_1
+                    )
+
+                    global_stats_2, triad_census_counts_2, node_measures_2 = directed_binary_constructor(
+                        clean_edges_2, clean_nodes_2;
+                        resolution_sweep = resolution_sweep,
+                        resolution = resolution,
+                        directed = directed,
+                        weighted = weighted,
+                        n_resolutions = n_resolutions,
+                        n_runs_per_gamma = n_runs_per_gamma,
+                        n_iterations_per_run = n_iterations_per_run,
+                        seed = seed,
+                        provided_membership = provided_membership_2
+                    )
+
+                #	Build feature vectors
+                    feature_vector_1 = directed_binary_feature_builder(global_stats_1, triad_census_counts_1, node_measures_1)
+                    feature_vector_2 = directed_binary_feature_builder(global_stats_2, triad_census_counts_2, node_measures_2)
+
+            else
+                #	Directed weighted networks
+                    global_stats_1, triad_census_counts_1, node_measures_1 = directed_weighted_constructor(
+                        clean_edges_1, clean_nodes_1;
+                        resolution_sweep = resolution_sweep,
+                        resolution = resolution,
+                        directed = directed,
+                        weighted = weighted,
+                        n_resolutions = n_resolutions,
+                        n_runs_per_gamma = n_runs_per_gamma,
+                        n_iterations_per_run = n_iterations_per_run,
+                        seed = seed,
+                        provided_membership = provided_membership_1
+                    )
+
+                    global_stats_2, triad_census_counts_2, node_measures_2 = directed_weighted_constructor(
+                        clean_edges_2, clean_nodes_2;
+                        resolution_sweep = resolution_sweep,
+                        resolution = resolution,
+                        directed = directed,
+                        weighted = weighted,
+                        n_resolutions = n_resolutions,
+                        n_runs_per_gamma = n_runs_per_gamma,
+                        n_iterations_per_run = n_iterations_per_run,
+                        seed = seed,
+                        provided_membership = provided_membership_2
+                    )
+
+                #	Build feature vectors
+                    feature_vector_1 = directed_weighted_feature_builder(global_stats_1, triad_census_counts_1, node_measures_1)
+                    feature_vector_2 = directed_weighted_feature_builder(global_stats_2, triad_census_counts_2, node_measures_2)
+            end
+
+        #	========== ALIGN AND COMBINE FEATURE VECTORS ==========
+
+        #	Rename columns for clarity
+            rename!(feature_vector_1, ["measure", "network_1_values", "type"])
+            rename!(feature_vector_2, ["measure", "network_2_values", "type"])
+
+        #	Create measure indices with sequential IDs
+            measures_1 = DataFrame(ID_1 = 1:nrow(feature_vector_1), measure = feature_vector_1.measure)
+            measures_2 = DataFrame(ID_2 = 1:nrow(feature_vector_2), measure = feature_vector_2.measure)
+            
+        #	Outer join to capture all unique measures
+            combined_measures = outerjoin(measures_1, measures_2; on = :measure)
+            combined_measures = select(combined_measures, :measure, :ID_1, :ID_2)
+            
+        #	Handle missing features by assigning sequential IDs
+            id_1_missing = sum(ismissing.(combined_measures.ID_1))
+            id_2_missing = sum(ismissing.(combined_measures.ID_2))
+
+            if id_1_missing > 0
+                missing_number = maximum(skipmissing(combined_measures.ID_1)) + 1
+                combined_measures.ID_1[ismissing.(combined_measures.ID_1)] .= missing_number 
+            end
+        
+            if id_2_missing > 0
+                missing_number = maximum(skipmissing(combined_measures.ID_2)) + 1
+                combined_measures.ID_2[ismissing.(combined_measures.ID_2)] .= missing_number 
+            end
+            
+            combined_measures.ID_1 = convert.(Int64, combined_measures.ID_1)
+            combined_measures.ID_2 = convert.(Int64, combined_measures.ID_2)
+
+        #	Sort by larger feature set to preserve ordering
+            feature_length_1 = nrow(feature_vector_1)
+            feature_length_2 = nrow(feature_vector_2)
+
+            if feature_length_1 >= feature_length_2
+                sort!(combined_measures, [:ID_1, :ID_2])
+            else
+                sort!(combined_measures, [:ID_2, :ID_1])
+            end
+            
+            select!(combined_measures, :measure)
+
+        #	Join values from both networks, zero-fill missing
+            leftjoin!(combined_measures, feature_vector_1[:, 1:2], on = :measure)
+            combined_measures.network_1_values[ismissing.(combined_measures.network_1_values)] .= 0.0
+            combined_measures.network_1_values = convert.(Float64, combined_measures.network_1_values)
+
+            leftjoin!(combined_measures, feature_vector_2[:, 1:2], on = :measure)
+            combined_measures.network_2_values[ismissing.(combined_measures.network_2_values)] .= 0.0
+            combined_measures.network_2_values = convert.(Float64, combined_measures.network_2_values)
+
+        #	Add feature types
+            types_index = unique(vcat(feature_vector_1[:, [1, 3]], feature_vector_2[:, [1, 3]]))
+            leftjoin!(combined_measures, types_index, on = :measure)
+            combined_measures.type = string.(combined_measures.type)
+
+        #	========== COMPUTE SIMILARITY METRICS ==========
+
+        #	Compute overall Euclidean distance and similarity
+            dist_summary = _compute_overall_distance(combined_measures)
+
+        #	Compute type-level contributions
+            type_contrib = _compute_type_contributions(
+                combined_measures,
+                dist_summary.squared_distance
+            )
+
+        #	Return results
+            return (combined_features = combined_measures,
+                    overall_distance = dist_summary.distance,
+                    overall_similarity = dist_summary.similarity,
+                    type_contributions = type_contrib)
+    end
+    @doc raw"""
+    **Description**
+    Compare two networks by computing comprehensive feature vectors and measuring their similarity using Euclidean distance in feature space.
+
+    **Usage**
+    `network_comparator(edges_1, nodes_1, edges_2, nodes_2; resolution_sweep=false, resolution=1.0, directed=true, weighted=true, n_resolutions=15, n_runs_per_gamma=5, n_iterations_per_run=10, seed=nothing, provided_membership_1=nothing, provided_membership_2=nothing)`
+
+    **Arguments**
+    - `edges_1, edges_2::DataFrame`: Edge lists with `:src` and `:dst` columns (string IDs), optional `:weight` column
+    - `nodes_1, nodes_2::Union{Nothing,DataFrame,Vector}`: Optional node universes to include isolates
+    - `resolution_sweep::Bool`: Use CHAMP multi-resolution community detection (default false)
+    - `resolution::Float64`: Resolution parameter for modularity optimization (default 1.0)
+    - `directed::Bool`: Treat networks as directed (default true)
+    - `weighted::Bool`: Use edge weights if present (default true)
+    - `n_resolutions::Int`: Number of resolutions for CHAMP sweep (default 15)
+    - `n_runs_per_gamma::Int`: Leiden algorithm runs per resolution (default 5)
+    - `n_iterations_per_run::Int`: Iterations per Leiden run (default 10)
+    - `seed::Union{Int,Nothing}`: Random seed for reproducibility (default nothing)
+    - `provided_membership_1, provided_membership_2`: Pre-computed community assignments as DataFrame, Vector, or Dict
+
+    **Details**
+    The function automatically selects the appropriate network constructor and feature builder based on the `directed` and `weighted` parameters, resulting in four possible configurations:
+    - Undirected Binary: symmetric unweighted networks
+    - Undirected Weighted: symmetric weighted networks  
+    - Directed Binary: asymmetric unweighted networks
+    - Directed Weighted: asymmetric weighted networks
+
+    Features are computed at multiple levels (global, meso, node) and include component statistics, link statistics, degree distributions, clustering coefficients, community structure, and centrality measures. When features exist in one network but not the other, they are zero-filled to maintain alignment.
+
+    **Value**
+    Returns a NamedTuple with fields:
+    - `combined_features::DataFrame`: Aligned feature vectors with columns [:measure, :network_1_values, :network_2_values, :type]
+    - `overall_distance::Float64`: Euclidean distance between feature vectors
+    - `overall_similarity::Float64`: Similarity score ∈ (0,1] computed as 1/(1+distance)
+    - `type_contributions::DataFrame`: Per-type distance breakdown with normalized contributions
+
+    **Examples**
+    ```julia
+    # Compare two social networks
+    edges1 = DataFrame(src=["A","B","C"], dst=["B","C","A"])
+    edges2 = DataFrame(src=["X","Y","Z"], dst=["Y","Z","X"])
+    result = network_comparator(edges1, nothing, edges2, nothing; directed=true, weighted=false)
+    println("Similarity: ", result.overall_similarity)
+
+    # Compare weighted networks with community detection
+    edges1 = DataFrame(src=["A","B"], dst=["B","C"], weight=[1.5, 2.0])
+    edges2 = DataFrame(src=["X","Y"], dst=["Y","Z"], weight=[1.0, 3.0])
+    result = network_comparator(edges1, nothing, edges2, nothing; 
+                            directed=false, weighted=true, resolution_sweep=true)
+    ```
+
+    **See Also**
+    `undirected_binary_constructor`, `undirected_weighted_constructor`, `directed_binary_constructor`, `directed_weighted_constructor`
+    """ network_comparator
+
 ############################
 #   IMPORT TEST NETWORKS   #
 ############################
@@ -3227,57 +3636,77 @@ using Large_Graph_Similarity
     file_location = string(import_directory, "/", ora_xml)
     balikatan_2022 = load_ora_xml(file_location)
 
-    agents = balikatan_2022.nodesets["Agent"]
-    nodes = agents[:,(1:2)]
-	rename!(nodes, ["id", "label"])
+    balikatan_agents = balikatan_2022.nodesets["Agent"]
+    balikatan_nodes =  balikatan_agents[:,(1:2)]
+	rename!(balikatan_nodes, ["id", "label"])
 
     agent_agent_all_com = balikatan_2022.networks["Agent x Agent - All Communication"]
     balikatan_arcs = agent_agent_all_com.edges
 
-#   Loading TOTO 2024 Synthetic Network
-  
+#   Loading TOTO 2023 Synthetic Network
+    ora_xml = "Pac Rim Day 1.xml"
+    file_location = string(import_directory, "/", ora_xml)
+    pac_rim_2023 = load_ora_xml(file_location)
 
+    pac_rim_agents = pac_rim_2023.nodesets["Agent"]
+    pac_rim_nodes = pac_rim_agents[:,(1:2)]
+	rename!(pac_rim_nodes, ["id", "label"])
+
+    agent_agent_all_com = pac_rim_2023.networks["Agent x Agent - All Communication"]
+    pac_rim_arcs = agent_agent_all_com.edges
+
+#   Loading Pac Sentry 2025 Synthetic Network
+    ora_xml = "PAO_Day_6.xml"
+    file_location = string(import_directory, "/", ora_xml)
+    pac_sentry_2025 = load_ora_xml(file_location)
+
+    pac_sentry_agents = pac_sentry_2025.nodesets["Agent"]
+    pac_sentry_nodes = pac_sentry_agents[:,(1:2)]
+	rename!(pac_sentry_nodes, ["id", "label"])
+
+    agent_agent_all_com = pac_sentry_2025.networks["Agent x Agent - All Communication"]
+    pac_sentry_arcs = agent_agent_all_com.edges
 
 ########################################################################
 #   ASSESSMENT OF THE DESIGN MATRICES' CONSTRUCTORS & FEATURE VECTORS  #
 ########################################################################
 
 #   Generating Undirected/Binary Graph Design Matrices from which to Create Feature Vectors
-    global_stats, triad_census_counts, node_measures = undirected_binary_constructor(balikatan_arcs, nodes; directed=false, 
+    global_stats, triad_census_counts, node_measures = undirected_binary_constructor(balikatan_arcs, balikatan_nodes; directed=false, 
                                                                                      weighted=false, resolution_sweep=true)
 
-    global_stats, triad_census_counts, node_measures = undirected_binary_constructor(balikatan_arcs, nodes; directed=false, 
-                                                                                    weighted=false, resolution=1.0)
+    global_stats, triad_census_counts, node_measures = undirected_binary_constructor(balikatan_arcs, balikatan_nodes; directed=false, 
+                                                                                     weighted=false, resolution=1.0)
 
 #	Constructing Undirected/Binary Feature Vector
     symmeric_binary_feature_vector = symmetric_binary_feature_builder(global_stats, triad_census_counts, node_measures)
 
 #   Generating Undirected/Weighted Graph Design Matrices from which to Create Feature Vectors
-    global_stats, triad_census_counts, node_measures = undirected_weighted_constructor(balikatan_arcs, nodes; directed=false, 
+    global_stats, triad_census_counts, node_measures = undirected_weighted_constructor(balikatan_arcs, balikatan_nodes; directed=false, 
                                                                                        weighted=true, resolution=1.0)
 
-    global_stats, triad_census_counts, node_measures = undirected_weighted_constructor(balikatan_arcs, nodes; directed=false, 
+    global_stats, triad_census_counts, node_measures = undirected_weighted_constructor(balikatan_arcs, balikatan_nodes; directed=false, 
                                                                                        weighted=true, resolution_sweep=true)
 
 #	Constructing Undirected/Weighted Feature Vector
     symmeric_weighted_feature_vector = symmetric_weighted_feature_builder(global_stats, triad_census_counts, node_measures)
 
 #   Generating Directed/Binary Graph Design Matrices from which to Create Feature Vectors  
-    global_stats, triad_census_counts, node_measures = directed_binary_constructor(balikatan_arcs, nodes; directed=true, 
+    global_stats, triad_census_counts, node_measures = directed_binary_constructor(balikatan_arcs, balikatan_nodes; directed=true, 
                                                                                    weighted=false, resolution=1.0)
 
-    global_stats, triad_census_counts, node_measures = directed_binary_constructor(balikatan_arcs, nodes; directed=true, weighted=false, 
-                                                                                   resolution_sweep=true)
+    global_stats, triad_census_counts, node_measures = directed_binary_constructor(balikatan_arcs, balikatan_nodes; directed=true, 
+                                                                                   weighted=false, resolution_sweep=true)
 
 #   Constructing Directed/Binary Feature Vector
     directed_binary_feature_vector = directed_binary_feature_builder(global_stats, triad_census_counts, node_measures)
 
 #   Generating Directed/Weighted Graph Design Matrices from which to Create Feature Vectors 
-    global_stats, triad_census_counts, node_measures = directed_weighted_constructor(balikatan_arcs, nodes; directed=true, 
+    global_stats, triad_census_counts, node_measures = directed_weighted_constructor(balikatan_arcs, balikatan_nodes; directed=true, 
                                                                                     weighted=true, resolution=1.0)
 
-    global_stats, triad_census_counts, node_measures = directed_weighted_constructor(balikatan_arcs, nodes; directed=true, weighted=true, 
-                                                                                     resolution_sweep=true)
+    global_stats, triad_census_counts, node_measures = directed_weighted_constructor(balikatan_arcs, balikatan_nodes; directed=true, 
+                                                                                    weighted=true, resolution_sweep=true)
 
 #   Constructing Directed/Weighted Feature Vector
     directed_weighted__feature_vector = directed_weighted_feature_builder(global_stats, triad_census_counts, node_measures)
@@ -3286,6 +3715,18 @@ using Large_Graph_Similarity
 #   COMPARATOR FUNCTION ASSESSMENT   #
 ######################################
 
+#   Performing Network Comparison of Balikatan and TOTO 2023: 
+    combined_features, overall_distance,  overall_similarity, type_contributions = network_comparator(balikatan_arcs, balikatan_nodes, 
+                                                                                                      pac_rim_arcs, pac_rim_nodes; 
+                                                                                                      directed=true, weighted=true, 
+                                                                                                      resolution=1.0)
+
+    
+#   Performing Network Comparison of Balikatan and Pac Sentry: 
+    combined_features, overall_distance,  overall_similarity, type_contributions = network_comparator(balikatan_arcs, balikatan_nodes, 
+                                                                                                      pac_sentry_arcs, pac_sentry_nodes; 
+                                                                                                      directed=true, weighted=true, 
+                                                                                                      resolution=1.0)
 
 ################
 #   TESTING    #
