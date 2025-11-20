@@ -9660,7 +9660,7 @@ THE SOFTWARE.
 		- Undirected: `D = 2L / (N × (N - 1))`
 		
 		Where:
-		- `L` = total number of edges (including self-loops)
+		- `L` = total number of edges (dropping self-loops)
 		- `N` = number of nodes
 		- Denominator excludes self-loops from possible edges
 		
