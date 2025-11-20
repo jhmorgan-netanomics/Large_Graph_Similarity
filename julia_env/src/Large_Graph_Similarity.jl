@@ -9455,7 +9455,7 @@ THE SOFTWARE.
 				- count, min, max, mean, std, sum
 				- density: classic global density (same for all rows)
 		Notes:
-			- Density includes self-loops in the numerator L
+			- Density drops self-loops in the numerator L
 			- Directed: D = L / (N * (N - 1))
 			- Undirected: D = 2L / (N * (N - 1))
 			- Unweighted graphs are forced to be binary (0/1) before stats
@@ -9597,8 +9597,8 @@ THE SOFTWARE.
 			c_non,  min_non,  max_non,  mean_non,  std_non,  sum_non  = _summarize(nonself_w)
 			c_loop, min_loop, max_loop, mean_loop, std_loop, sum_loop = _summarize(loop_w)
 
-		#	Global density (same for all rows), classic formulas with L = total links incl loops
-			L = c_all	# total number of nonzero links including self-loops
+		#	Global density (same for all rows), classic formulas with L = total links dropping self-loops
+			L = c_non	# total number of nonzero links dropping self-loops
 
 			if n > 1
 				if directed
