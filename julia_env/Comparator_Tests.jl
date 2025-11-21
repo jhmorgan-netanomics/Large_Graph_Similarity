@@ -2112,7 +2112,13 @@ using Large_Graph_Similarity
             node_stats.salsa_authority = convert.(Float64, node_stats.salsa_authority)
 
         #	Modularity vitality (hub and bridge scores)
-            modularity_scores = modularity_vitality(clean_edges; directed = false, resolution = resolution_used, weighted = false, resolution_sweep = resolution_sweep)
+            if provided_membership === nothing
+				modularity_scores = modularity_vitality(clean_edges; directed = false, resolution = resolution_used, 
+									weighted = true, resolution_sweep = resolution_sweep)
+			else
+				modularity_scores = modularity_vitality(clean_edges; directed = false, resolution = resolution_used, 
+									weighted = true, provided_membership = keep_index)
+			end
             leftjoin!(node_stats, modularity_scores.results_df[:, [1, 3, 4]], on = :node)
             
         #	Convert vitality scores to proper type
@@ -2672,6 +2678,15 @@ using Large_Graph_Similarity
                     keep_index = leftjoin!(keep_index, partition_df, on = :node)
                     keep_index.community = convert.(Int64, keep_index.community)
 
+                #   Creating Sequential IDs
+                    unique_communities = sort(unique(keep_index.community))
+                    community_id_index = DataFrame(sequential_community = [1:1:length(unique_communities);], 
+                                                   community = unique_communities)
+                    leftjoin!(keep_index, community_id_index, on = :community)
+                    select!(keep_index, ["node", "sequential_community"])
+                    rename!(keep_index, ["node", "community"])
+                    keep_index.community = convert.(Int64, keep_index.community)
+
                 #	Calculate modularity
                     modularity = calculate_modularity(adj_edges, keep_index.community, γ = resolution)
                     resolution_used = resolution
@@ -2817,7 +2832,13 @@ using Large_Graph_Similarity
             node_stats.salsa_authority = convert.(Float64, node_stats.salsa_authority)
 
         #	Modularity vitality (hub and bridge scores)
-            modularity_scores = modularity_vitality(clean_edges; directed = false, resolution = resolution_used, weighted = true, resolution_sweep = resolution_sweep)
+            if provided_membership === nothing
+				modularity_scores = modularity_vitality(clean_edges; directed = false, resolution = resolution_used, 
+									weighted = true, resolution_sweep = resolution_sweep)
+			else
+				modularity_scores = modularity_vitality(clean_edges; directed = false, resolution = resolution_used, 
+									weighted = true, provided_membership = keep_index[:,["node", "community"]])
+			end
             leftjoin!(node_stats, modularity_scores.results_df[:, [1, 3, 4]], on = :node)
             
         #	Convert vitality scores to proper type
@@ -3324,6 +3345,125 @@ using Large_Graph_Similarity
             return type_df
     end
 
+#	Helper Function for network_comparator: Normalize Global Metrics
+	function _global_metric_normalizer(feature_vector_1::DataFrame,
+	                                   feature_vector_2::DataFrame)
+		"""
+		Args:
+			feature_vector_1::DataFrame:
+				Single-network feature vector with columns:
+					- :measure :: AbstractString
+					- :value   :: Real
+					- :type    :: AbstractString
+			feature_vector_2::DataFrame:
+				Second-network feature vector with the same structure.
+		Returns:
+			Tuple{DataFrame,DataFrame}:
+				(feature_vector_1_norm, feature_vector_2_norm)
+		Notes:
+			- Applies asinh() transformations to size-like Component Measures:
+				- num_nodes
+				- num_edges
+			- Drops Component Measure: num_scc
+			- Drops Link Measures: all_link_max, all_link_sum
+			- For Link Measures
+				- all_link_mean
+				- all_link_sd
+				- non_self_link_mean
+				- non_self_link_sd
+				- self_link_mean
+				- self_link_sd
+			  performs a within-pair scaling across the two networks:
+				- For each measure m, let v₁, v₂ be the two network values
+				- scale = max(abs(v₁), abs(v₂), eps())
+				- v₁' = v₁ / scale, v₂' = v₂ / scale
+			  This preserves relative differences while down-weighting raw magnitude.
+		"""
+
+		#	Create local copies so we don't mutate caller data
+			fv1 = deepcopy(feature_vector_1)
+			fv2 = deepcopy(feature_vector_2)
+
+		#	Standardize column names by position if needed
+			if !(:measure in names(fv1)) || !(:value in names(fv1)) || !(:type in names(fv1))
+				rename!(fv1, [:measure, :value, :type])
+			end
+			if !(:measure in names(fv2)) || !(:value in names(fv2)) || !(:type in names(fv2))
+				rename!(fv2, [:measure, :value, :type])
+			end
+
+		#	Component Measure transforms
+			function _normalize_components!(df::DataFrame)
+				#	Drop num_scc
+					filter!(row -> !(row.type == "Component Measure" && row.measure == "num_scc"), df)
+
+				#	asinh(num_nodes)
+					mask_nodes = (df.type .== "Component Measure") .& (df.measure .== "num_nodes")
+					if any(mask_nodes)
+						df.value[mask_nodes] .= asinh.(df.value[mask_nodes])
+					end
+
+				#	asinh(num_edges)
+					mask_edges = (df.type .== "Component Measure") .& (df.measure .== "num_edges")
+					if any(mask_edges)
+						df.value[mask_edges] .= asinh.(df.value[mask_edges])
+					end
+
+				return df
+			end
+
+		#	Apply Component Measure normalization to both networks
+			_normalize_components!(fv1)
+			_normalize_components!(fv2)
+
+		#	Drop extreme Link Measures
+			function _drop_link_extremes!(df::DataFrame)
+				drop_set = Set(["all_link_max", "all_link_sum"])
+				filter!(row -> !(row.type == "Link Measure" && (row.measure in drop_set)), df)
+				return df
+			end
+
+			_drop_link_extremes!(fv1)
+			_drop_link_extremes!(fv2)
+
+		#	Within-pair scaling for selected Link Measures
+			link_measures_to_scale = [
+				"all_link_mean",
+				"all_link_sd",
+				"non_self_link_mean",
+				"non_self_link_sd",
+				"self_link_mean",
+				"self_link_sd",
+			]
+
+			for m in link_measures_to_scale
+				#	Locate row for this measure in each feature vector
+					idx1 = findfirst(i -> fv1.measure[i] == m && fv1.type[i] == "Link Measure",
+					                 eachindex(fv1.measure))
+					idx2 = findfirst(i -> fv2.measure[i] == m && fv2.type[i] == "Link Measure",
+					                 eachindex(fv2.measure))
+
+				#	Skip if missing in either network
+					if idx1 === nothing || idx2 === nothing
+						continue
+					end
+
+				#	Extract values
+					v1 = Float64(fv1.value[idx1])
+					v2 = Float64(fv2.value[idx2])
+
+				#	Compute scale; enforce lower bound to avoid zero division
+					scale = max(abs(v1), abs(v2), eps())
+
+				#	Apply scaled normalization
+					fv1.value[idx1] = v1 / scale
+					fv2.value[idx2] = v2 / scale
+			end
+
+		#	Return normalized feature vectors
+			return fv1, fv2
+	end
+
 #	Network Comparator: Compare Two Networks
     function network_comparator(edges_1::DataFrame, nodes_1::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}},
                             edges_2::DataFrame, nodes_2::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}};
@@ -3496,6 +3636,13 @@ using Large_Graph_Similarity
                     feature_vector_1 = directed_weighted_feature_builder(global_stats_1, triad_census_counts_1, node_measures_1)
                     feature_vector_2 = directed_weighted_feature_builder(global_stats_2, triad_census_counts_2, node_measures_2)
             end
+
+         #	========== GLOBAL METRIC NORMALIZATIONS ==========
+
+			feature_vector_1, feature_vector_2 = _global_metric_normalizer(
+				feature_vector_1,
+				feature_vector_2
+			)
 
         #	========== ALIGN AND COMBINE FEATURE VECTORS ==========
 
@@ -3715,19 +3862,29 @@ using Large_Graph_Similarity
 #   COMPARATOR FUNCTION ASSESSMENT   #
 ######################################
 
-#   Performing Network Comparison of Balikatan and TOTO 2023: 
-    combined_features, overall_distance,  overall_similarity, type_contributions = network_comparator(balikatan_arcs, balikatan_nodes, 
+#   Performing Network Comparison of Balikatan and TOTO 2023: 0.0008461531293579395
+    pac_rim_combined_features, pac_rim_overall_distance, pac_rim_overall_similarity, pac_rim_type_contributions = network_comparator(balikatan_arcs, balikatan_nodes, 
                                                                                                       pac_rim_arcs, pac_rim_nodes; 
                                                                                                       directed=true, weighted=true, 
                                                                                                       resolution=1.0)
 
-    
-#   Performing Network Comparison of Balikatan and Pac Sentry: 
-    combined_features, overall_distance,  overall_similarity, type_contributions = network_comparator(balikatan_arcs, balikatan_nodes, 
-                                                                                                      pac_sentry_arcs, pac_sentry_nodes; 
-                                                                                                      directed=true, weighted=true, 
-                                                                                                      resolution=1.0)
+#   Performing Network Comparison of Balikatan and Pac Sentry: 0.00003289315596998
+    balikatan_partition = CSV.read("/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data/balikatan_all_comm_partition_leiden_gamma1.csv",
+							   DataFrame, types=Dict(1 => String))
+	rename!(balikatan_partition, ["node", "community"])
 
+    pac_sentry_partition = CSV.read("/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data/pac_sentry_leiden.csv",
+                                    DataFrame, types=Dict(1 => String))
+    rename!(pac_sentry_partition, ["node", "community"])
+
+    pac_sentry_combined_features, pac_sentry_overall_distance,  
+    pac_sentry_overall_similarity, pac_sentry_type_contributions = network_comparator(balikatan_arcs, balikatan_nodes, 
+                                                                                      pac_sentry_arcs, pac_sentry_nodes; 
+                                                                                      directed=true, weighted=true, 
+                                                                                      resolution=1.0,
+                                                                                      provided_membership_1 =  balikatan_partition,
+                                                                                      provided_membership_2 =  pac_sentry_partition)
+    
 ################
 #   TESTING    #
 ################
