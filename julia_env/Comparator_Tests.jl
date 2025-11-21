@@ -3345,126 +3345,418 @@ using Large_Graph_Similarity
             return type_df
     end
 
-#	Helper Function for network_comparator: Normalize Global Metrics
-	function _global_metric_normalizer(feature_vector_1::DataFrame,
-	                                   feature_vector_2::DataFrame)
-		"""
-		Args:
-			feature_vector_1::DataFrame:
-				Single-network feature vector with columns:
-					- :measure :: AbstractString
-					- :value   :: Real
-					- :type    :: AbstractString
-			feature_vector_2::DataFrame:
-				Second-network feature vector with the same structure.
-		Returns:
-			Tuple{DataFrame,DataFrame}:
-				(feature_vector_1_norm, feature_vector_2_norm)
-		Notes:
-			- Applies asinh() transformations to size-like Component Measures:
-				- num_nodes
-				- num_edges
-			- Drops Component Measure: num_scc
-			- Drops Link Measures: all_link_max, all_link_sum
-			- For Link Measures
-				- all_link_mean
-				- all_link_sd
-				- non_self_link_mean
-				- non_self_link_sd
-				- self_link_mean
-				- self_link_sd
-			  performs a within-pair scaling across the two networks:
-				- For each measure m, let v₁, v₂ be the two network values
-				- scale = max(abs(v₁), abs(v₂), eps())
-				- v₁' = v₁ / scale, v₂' = v₂ / scale
-			  This preserves relative differences while down-weighting raw magnitude.
-		"""
+#   Helper Function for network_comparator: Compute JS (Jensen-Shannon) Divergence for Node-Level Measures
+    function _kl_divergence_normalization(node_measures_1::DataFrame,
+                                        node_measures_2::DataFrame,
+                                        base_measures::Vector{String};
+                                        nbins::Int = 20)
+        """
+        Args:
+            node_measures_1::DataFrame:
+                Node-level measures for network 1 (columns include base measure names).
+            node_measures_2::DataFrame:
+                Node-level measures for network 2.
+            base_measures::Vector{String}:
+                Names of node-level columns (e.g., "out_degree_normalized") for which
+                we want a divergence measure.
 
-		#	Create local copies so we don't mutate caller data
-			fv1 = deepcopy(feature_vector_1)
-			fv2 = deepcopy(feature_vector_2)
+        Returns:
+            Dict{String,Tuple{Float64,Float64}}:
+                Mapping base_measure_name => (v1, v2), where:
+                    jsd  = Jensen-Shannon divergence between empirical distributions
+                    v1   =  sqrt(jsd) / 2    (network_1_values)
+                    v2   = -sqrt(jsd) / 2    (network_2_values)
 
-		#	Standardize column names by position if needed
-			if !(:measure in names(fv1)) || !(:value in names(fv1)) || !(:type in names(fv1))
-				rename!(fv1, [:measure, :value, :type])
-			end
-			if !(:measure in names(fv2)) || !(:value in names(fv2)) || !(:type in names(fv2))
-				rename!(fv2, [:measure, :value, :type])
-			end
+        Notes:
+            - JSD is symmetric and bounded; we use natural logs.
+            - We approximate the empirical distributions via common-bin histograms.
+            - If a column is missing or constant in both networks → JSD = 0.0.
+        """
 
-		#	Component Measure transforms
-			function _normalize_components!(df::DataFrame)
-				#	Drop num_scc
-					filter!(row -> !(row.type == "Component Measure" && row.measure == "num_scc"), df)
+        #   Inner helper: JS divergence between two numeric vectors
+            function _js_divergence(x::AbstractVector{<:Real},
+                                    y::AbstractVector{<:Real};
+                                    nbins::Int = nbins)::Float64
+                #   Drop missings
+                    x_clean = collect(skipmissing(x))
+                    y_clean = collect(skipmissing(y))
 
-				#	asinh(num_nodes)
-					mask_nodes = (df.type .== "Component Measure") .& (df.measure .== "num_nodes")
-					if any(mask_nodes)
-						df.value[mask_nodes] .= asinh.(df.value[mask_nodes])
+                #   If both are empty or constant/identical, divergence is zero
+                    if isempty(x_clean) && isempty(y_clean)
+                        return 0.0
+                    elseif isempty(x_clean)
+                        x_clean = copy(y_clean)
+                    elseif isempty(y_clean)
+                        y_clean = copy(x_clean)
+                    end
+
+                    lo = min(minimum(x_clean), minimum(y_clean))
+                    hi = max(maximum(x_clean), maximum(y_clean))
+
+                #   Degenerate range → all mass on single bin → no divergence
+                    if lo == hi
+                        return 0.0
+                    end
+
+                #   Common bin edges
+                    edges = range(lo, hi; length = nbins + 1)
+
+                    h1 = fit(Histogram, x_clean, edges)
+                    h2 = fit(Histogram, y_clean, edges)
+
+                    p = h1.weights
+                    q = h2.weights
+
+                #   Normalize to probabilities
+                    s1 = sum(p)
+                    s2 = sum(q)
+                    if s1 == 0.0 && s2 == 0.0
+                        return 0.0
+                    elseif s1 == 0.0
+                        p .= 1.0
+                        s1 = length(p)
+                    elseif s2 == 0.0
+                        q .= 1.0
+                        s2 = length(q)
+                    end
+
+                    p = p ./ s1
+                    q = q ./ s2
+
+                #   Avoid log(0): add tiny epsilon and renormalize
+                    eps_val = eps(Float64)
+                    p .= p .+ eps_val
+                    q .= q .+ eps_val
+                    p ./= sum(p)
+                    q ./= sum(q)
+
+                    m = 0.5 .* (p .+ q)
+
+                #   KL helper: natural logarithm
+                    function _kl(a::Vector{Float64}, b::Vector{Float64})
+                        return sum(a .* log.(a ./ b))
+                    end
+
+                    jsd = 0.5 * _kl(p, m) + 0.5 * _kl(q, m)
+
+                #   Return Jensen-Shannon divergence
+                    return jsd
+            end
+
+        #   Main body: compute JSD per base measure
+            js_map = Dict{String,Tuple{Float64,Float64}}()
+
+            for base in base_measures
+                #   Map to symmetric pair that plays nicely with Euclidean metrics:
+                #   dist^2 = (sqrt(jsd)/2 - (-sqrt(jsd)/2))^2 = jsd
+                    if !(hasproperty(node_measures_1, Symbol(base)) && hasproperty(node_measures_2, Symbol(base)))
+						# 	If missing in either, treat divergence as 0.0
+							jsd = 0.0
+							v1  = 0.0
+							v2  = 0.0
+							js_map[base] = (v1, v2)
+							continue
 					end
 
-				#	asinh(num_edges)
-					mask_edges = (df.type .== "Component Measure") .& (df.measure .== "num_edges")
-					if any(mask_edges)
-						df.value[mask_edges] .= asinh.(df.value[mask_edges])
+                    col1 = node_measures_1[!, Symbol(base)]
+					col2 = node_measures_2[!, Symbol(base)]
+
+				# 	Drop missings and coerce to Float64
+					x = Float64.(collect(skipmissing(col1)))
+					y = Float64.(collect(skipmissing(col2)))
+
+				# 	If either becomes empty after dropping missings, treat divergence as 0
+					if isempty(x) || isempty(y)
+						jsd = 0.0
+					else
+						jsd = _js_divergence(x, y; nbins = nbins)
+					end
+                
+                    root_jsd = sqrt(jsd)
+                    v1 =  0.5 * root_jsd
+                    v2 = -0.5 * root_jsd
+
+                    js_map[base] = (v1, v2)
+            end
+
+        #   Return Jensen-Shannon Divergence Score for Each Node-Level Measure
+            return js_map
+    end
+
+#   Helper Function for network_comparator: Normalize Global Metrics
+    function _global_metric_normalizer(feature_vector_1::DataFrame,
+                                        feature_vector_2::DataFrame,
+                                        node_measures_1::DataFrame,
+                                        node_measures_2::DataFrame, 
+                                        n_1::Int64, n_2::Int64, 
+                                        directed::Bool)
+        """
+        Args:
+            feature_vector_1::DataFrame:
+                Single-network feature vector with columns:
+                    - :measure :: AbstractString
+                    - :value   :: Real
+                    - :type    :: AbstractString
+            feature_vector_2::DataFrame:
+                Second-network feature vector with the same structure.
+            node_measures_1::DataFrame:
+                Node-level measures for network 1 (columns include base measure names).
+            node_measures_2::DataFrame:
+                Node-level measures for network 2.
+
+        Returns:
+            Tuple{DataFrame,DataFrame}:
+                (feature_vector_1_norm, feature_vector_2_norm)
+
+        Notes:
+            - Component Measures:
+                * Drop: num_scc
+                * asinh-transform: num_nodes, num_edges
+            - Link Measures:
+                * Drop: all_link_min, all_link_max, all_link_sum,
+                        non_self_min, non_self_max, non_self_sum,
+                        self_loops_min, self_loops_max, self_loops_sum
+                * Within-pair scaling for:
+                    - all_link_mean, all_link_std
+                    - non_self_mean, non_self_std
+                    - self_loops_mean, self_loops_std
+            - Degree / Local Reach / Local Structure / Influence:
+                * Identify base measures via suffixes:
+                    _mean, _median, _std, _skew, _kurtosis
+                * For each base (e.g., out_degree_normalized):
+                    - Compute JS divergence between node_measures_1[!, base]
+                    and node_measures_2[!, base]
+                    - Define:
+                        v1 =  sqrt(JSD) / 2
+                        v2 = -sqrt(JSD) / 2
+                    - Remove the original moment features belonging to that base
+                    from both feature vectors
+                    - Insert a new feature:
+                        measure = "jsd_" * base
+                        value   = v1 or v2
+                        type    = original type (e.g., "Degree Measures")
+
+            This guarantees that for each base measure, the squared difference
+            between networks equals the JSD, while keeping the feature space
+            Euclidean.
+        """
+
+        #   Create local copies so we don't mutate caller data
+            fv1 = deepcopy(feature_vector_1)
+            fv2 = deepcopy(feature_vector_2)
+
+        #   Standardize column names by position if needed
+            if !(:measure in names(fv1)) || !(:value in names(fv1)) || !(:type in names(fv1))
+                rename!(fv1, [:measure, :value, :type])
+            end
+
+            if !(:measure in names(fv2)) || !(:value in names(fv2)) || !(:type in names(fv2))
+                rename!(fv2, [:measure, :value, :type])
+            end
+
+        #   Ensure values are numeric
+            fv1.value = Float64.(fv1.value)
+            fv2.value = Float64.(fv2.value)
+
+        # ---------- Component Measure transforms ----------
+
+            function _normalize_components!(df::DataFrame)
+                #   Drop num_scc
+                    filter!(row -> !(row.type == "Component Measure" && row.measure == "num_scc"), df)
+
+                #   asinh(num_nodes)
+                    mask_nodes = (df.type .== "Component Measure") .& (df.measure .== "num_nodes")
+                    if any(mask_nodes)
+                        df.value[mask_nodes] .= asinh.(df.value[mask_nodes])
+                    end
+
+                #   asinh(num_edges)
+                    mask_edges = (df.type .== "Component Measure") .& (df.measure .== "num_edges")
+                    if any(mask_edges)
+                        df.value[mask_edges] .= asinh.(df.value[mask_edges])
+                    end
+
+                #   Return Transformed Measures
+                    return df
+            end
+
+            _normalize_components!(fv1)
+            _normalize_components!(fv2)
+
+        # ---------- Link Measure transforms ----------
+
+        #   Dropping Extreme Measures that are Captured in Pairwsie Normalizations
+            function _drop_link_extremes!(df::DataFrame)
+                drop_set = Set([
+                    "all_link_min", "all_link_max", "all_link_sum",
+                    "non_self_min", "non_self_max", "non_self_sum",
+                    "self_loops_min", "self_loops_max", "self_loops_sum",
+                ])
+                filter!(row -> !(row.type == "Link Measure" && (row.measure in drop_set)), df)
+                return df
+            end
+
+            _drop_link_extremes!(fv1)
+            _drop_link_extremes!(fv2)
+
+        #   Within-pair scaling for selected Link Measures
+            link_measures_to_scale = [
+                "all_link_mean",
+                "all_link_std",
+                "non_self_mean",
+                "non_self_std",
+                "self_loops_mean",
+                "self_loops_std",
+            ]
+
+            for m in link_measures_to_scale
+                #   Locate row for this measure in each feature vector
+                    idx1 = findfirst(i -> fv1.measure[i] == m && fv1.type[i] == "Link Measure",
+                                    eachindex(fv1.measure))
+                    idx2 = findfirst(i -> fv2.measure[i] == m && fv2.type[i] == "Link Measure",
+                                    eachindex(fv2.measure))
+
+                #   Skip if missing in either network
+                    if idx1 === nothing || idx2 === nothing
+                        continue
+                    end
+
+                    v1 = Float64(fv1.value[idx1])
+                    v2 = Float64(fv2.value[idx2])
+
+                    scale = max(abs(v1), abs(v2), eps(Float64))
+
+                    fv1.value[idx1] = v1 / scale
+                    fv2.value[idx2] = v2 / scale
+            end
+
+        # ---------- KL / JS-based replacement for node-moment summaries ----------
+
+        #   Creating Reach-2 Normalized Features
+            if !directed
+                den_1 = max(n_1 * (n_1 - 1), 1)
+                node_measures_1.undirected_reach_2_normalized = node_measures_1.undirected_reach_2 ./ den_1
+
+                den_2 = max(n_2 * (n_2 - 1), 1)
+                node_measures_2.undirected_reach_2_normalized = node_measures_2.undirected_reach_2 ./ den_2
+            else
+                #	Undirected reach: proportion of node pairs reachable
+                    den_1 = max(n_1 * (n_1 - 1), 1)
+                    node_measures_1.undirected_reach_2_normalized = node_measures_1.undirected_reach_2 ./ den_1
+
+                    den_2 = max(n_2 * (n_2 - 1), 1)
+                    node_measures_2.undirected_reach_2_normalized = node_measures_2.undirected_reach_2 ./ den_2
+                 
+                #	In-reach: 2k_in/(n-1)
+                    den_1 = max(n_1 - 1, 1)
+                    node_measures_1.in_reach_2_normalized = node_measures_1.in_reach_2 ./ den_1
+
+                    den_2 = max(n_2 - 1, 1)
+                    node_measures_2.in_reach_2_normalized = node_measures_2.in_reach_2 ./ den_2
+           
+                #	Out-reach: 2k_out/(n-1)
+                    den_1 = max(n_1 - 1, 1)
+                    node_measures_1.out_reach_2_normalized = node_measures_1.out_reach_2 ./ den_1
+
+                    den_2 = max(n_2 - 1, 1)
+                    node_measures_2.out_reach_2_normalized = node_measures_2.out_reach_2 ./ den_2
+            end
+
+        #   Target categories where we computed moments from node_measures
+            kl_types = Set([
+                "Degree Measures",
+                "Local Reach",
+                "Local Structure",
+                "Influence",
+            ])
+
+        #   Suffixes that indicate "moment" summaries
+            moment_suffixes = ("_mean", "_median", "_std", "_skew", "_kurtosis")
+
+        #   Extracting Feature Vector 1 Node-Level Measurs
+            types_list = ["Degree Measures", "Local Reach", "Local Structure", "Influence"]
+            fv1_node_measures = fv1[in(types_list).(fv1.type),:]
+            fv1_node_means = fv1_node_measures.measure[occursin.("_mean",  fv1_node_measures.measure)]
+            fv1_features = replace.(fv1_node_means, "_mean" => "")
+            
+        #   Extracting Feature Vector 1 Node-Level Measurs
+            fv2_node_measures = fv2[in(types_list).(fv2.type),:]
+            fv2_node_means = fv2_node_measures.measure[occursin.("_mean",  fv2_node_measures.measure)]
+            fv2_features = replace.(fv2_node_means, "_mean" => "")
+            base_measures = unique([fv1_features; fv2_features])
+            
+        #   Compute divergence-based values for each base measure
+            js_map = _kl_divergence_normalization(node_measures_1, node_measures_2, base_measures)
+
+        #   Constructing Measure Aligned Index: Measures Are Symmetric by Design 
+            base_index = DataFrame(measure = base_measures, type = fv1_node_measures.type[occursin.("_mean",  fv2_node_measures.measure)])
+            js_map_index = DataFrame(measure = string.(keys(js_map)), value = collect(values(js_map)))
+            leftjoin!(base_index, js_map_index, on=:measure)
+
+            feature_js_scores = split.(string.(base_index.value), ",")
+            fv1_js_scores = string.([s[1] for s in feature_js_scores])
+            fv1_js_scores = parse.(Float64, replace.(fv1_js_scores, "(" => ""))
+
+            fv2_js_scores = string.([s[2] for s in feature_js_scores])
+            fv2_js_scores = parse.(Float64, replace.(fv2_js_scores, ")" => ""))
+
+            fv1_js_df = DataFrame(measure = base_index.measure, value =  fv1_js_scores, type = base_index.type)
+            fv2_js_df = DataFrame(measure = base_index.measure, value =  fv2_js_scores, type = base_index.type)
+           
+        #   Remove original moment-based summaries for those bases in the target types
+            function _drop_moment_rows!(df::DataFrame)
+				#	Types we will replace with JS/Euclidean divergence features
+					moment_types = Set([
+						"Degree Measures",
+						"Local Reach",
+						"Local Structure",
+						"Influence",
+					])
+
+					moment_suffixes = ("_mean", "_median", "_std", "_skew", "_kurtosis")
+
+				#	Identifying & Filter Moment Rows
+					filter!(df) do row
+						t = String(row.type)
+						m = String(row.measure)
+
+						is_moment_type  = t in moment_types
+						is_moment_field = any(endswith(m, suf) for suf in moment_suffixes)
+
+						# keep row if it's NOT a moment field in a moment-type block
+						!(is_moment_type && is_moment_field)
 					end
 
-				return df
+				#	Return Filtered DataFrame
+					return df
 			end
 
-		#	Apply Component Measure normalization to both networks
-			_normalize_components!(fv1)
-			_normalize_components!(fv2)
+            _drop_moment_rows!(fv1)
+            _drop_moment_rows!(fv2)
 
-		#	Drop extreme Link Measures
-			function _drop_link_extremes!(df::DataFrame)
-				drop_set = Set(["all_link_max", "all_link_sum"])
-				filter!(row -> !(row.type == "Link Measure" && (row.measure in drop_set)), df)
-				return df
-			end
+        #   Insert new JSD-based features
+            fv1 = [fv1; fv1_js_df]
+            fv2 = [fv2; fv2_js_df]
 
-			_drop_link_extremes!(fv1)
-			_drop_link_extremes!(fv2)
-
-		#	Within-pair scaling for selected Link Measures
-			link_measures_to_scale = [
-				"all_link_mean",
-				"all_link_sd",
-				"non_self_link_mean",
-				"non_self_link_sd",
-				"self_link_mean",
-				"self_link_sd",
-			]
-
-			for m in link_measures_to_scale
-				#	Locate row for this measure in each feature vector
-					idx1 = findfirst(i -> fv1.measure[i] == m && fv1.type[i] == "Link Measure",
-					                 eachindex(fv1.measure))
-					idx2 = findfirst(i -> fv2.measure[i] == m && fv2.type[i] == "Link Measure",
-					                 eachindex(fv2.measure))
-
-				#	Skip if missing in either network
-					if idx1 === nothing || idx2 === nothing
-						continue
-					end
-
-				#	Extract values
-					v1 = Float64(fv1.value[idx1])
-					v2 = Float64(fv2.value[idx2])
-
-				#	Compute scale; enforce lower bound to avoid zero division
-					scale = max(abs(v1), abs(v2), eps())
-
-				#	Apply scaled normalization
-					fv1.value[idx1] = v1 / scale
-					fv2.value[idx2] = v2 / scale
-			end
-
-		#	Return normalized feature vectors
-			return fv1, fv2
-	end
+        #   Return Transformed Feature Vectors
+            return fv1, fv2
+    end
 
 #	Network Comparator: Compare Two Networks
+    edges_1 = deepcopy(balikatan_arcs)
+    edges_2 = deepcopy(pac_rim_arcs)
+    nodes_1 = deepcopy(balikatan_nodes)
+    nodes_2 = deepcopy(pac_rim_nodes)
+    directed = true
+    weighted = true
+    resolution = 1.0
+    resolution_sweep = false
+    n_resolutions = 15 
+    n_runs_per_gamma = 5
+    n_iterations_per_run = 10
+    seed = 42 
+    provided_membership_1 = nothing
+    provided_membership_2 = nothing
     function network_comparator(edges_1::DataFrame, nodes_1::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}},
                             edges_2::DataFrame, nodes_2::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}};
                             resolution_sweep::Bool = false, resolution::Float64 = 1.0, directed::Bool = true, 
@@ -3639,10 +3931,14 @@ using Large_Graph_Similarity
 
          #	========== GLOBAL METRIC NORMALIZATIONS ==========
 
-			feature_vector_1, feature_vector_2 = _global_metric_normalizer(
-				feature_vector_1,
-				feature_vector_2
-			)
+        #   Isolate Numerators
+            n_1 = parse(Int64, global_stats_1.value[1])
+            n_2 = parse(Int64, global_stats_2.value[1])
+
+        #   Normalize Feature Vectors
+            feature_vector_1, feature_vector_2 = _global_metric_normalizer(feature_vector_1,feature_vector_2, 
+                                                                           node_measures_1, node_measures_2,
+                                                                           n_1, n_2, directed)
 
         #	========== ALIGN AND COMBINE FEATURE VECTORS ==========
 
@@ -3862,13 +4158,16 @@ using Large_Graph_Similarity
 #   COMPARATOR FUNCTION ASSESSMENT   #
 ######################################
 
-#   Performing Network Comparison of Balikatan and TOTO 2023: 0.0008461531293579395
+#   Performing Network Comparison of Balikatan and TOTO 2023: 0.26241733569938586
     pac_rim_combined_features, pac_rim_overall_distance, pac_rim_overall_similarity, pac_rim_type_contributions = network_comparator(balikatan_arcs, balikatan_nodes, 
                                                                                                       pac_rim_arcs, pac_rim_nodes; 
                                                                                                       directed=true, weighted=true, 
                                                                                                       resolution=1.0)
 
-#   Performing Network Comparison of Balikatan and Pac Sentry: 0.00003289315596998
+    directory = "mnt/c/Users/metal/OneDrive/Desktop"
+
+
+#   Performing Network Comparison of Balikatan and Pac Sentry: 0.00042036572678795433
     balikatan_partition = CSV.read("/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data/balikatan_all_comm_partition_leiden_gamma1.csv",
 							   DataFrame, types=Dict(1 => String))
 	rename!(balikatan_partition, ["node", "community"])
