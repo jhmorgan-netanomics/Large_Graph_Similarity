@@ -13256,366 +13256,429 @@ THE SOFTWARE.
 #   NETWORK COMPARISON FUNCTIONS   #
 ####################################
 
-#   Helper Function for network_comparator: Compute JS (Jensen-Shannon) Divergence for Node-Level Measures
-    function _kl_divergence_normalization(node_measures_1::DataFrame,
-                                        node_measures_2::DataFrame,
-                                        base_measures::Vector{String};
-                                        nbins::Int = 20)
-        """
-        Args:
-            node_measures_1::DataFrame:
-                Node-level measures for network 1 (columns include base measure names).
-            node_measures_2::DataFrame:
-                Node-level measures for network 2.
-            base_measures::Vector{String}:
-                Names of node-level columns (e.g., "out_degree_normalized") for which
-                we want a divergence measure.
 
-        Returns:
-            Dict{String,Tuple{Float64,Float64}}:
-                Mapping base_measure_name => (v1, v2), where:
-                    jsd  = Jensen-Shannon divergence between empirical distributions
-                    v1   =  sqrt(jsd) / 2    (network_1_values)
-                    v2   = -sqrt(jsd) / 2    (network_2_values)
+#	Helper Function for network_comparator: Apply Category Weights to Multi-Indicator Measures
+	function _apply_category_weights!(measures_df::DataFrame)
+		"""
+		Args:
+			measures_df::DataFrame: Features with :measure and :value columns
+		Returns:
+			Nothing (modifies in place)
+		Notes:
+			Applies weights to normalize multi-indicator categories:
+			- Triad Census: weight = 1/n_triads
+			- K-Core: weight = 1/n_kcore_levels
+			- S-Core: weight = 1/n_score_levels
+			- Community Structure: weight = 1/n_community_measures
+		"""
+		
+		#	Identify measure patterns
+			triad_pattern = r"^triad_"
+			kcore_pattern = r"^k_core_"
+			score_pattern = r"^s_core_"
+			community_patterns = [r"^num_communities", r"^modularity", r"^largest_component_fraction", 
+								  r"^component_size_", r"^community_"]
+		
+		#	Count measures in each category
+			n_triads = count(m -> occursin(triad_pattern, m), measures_df.measure)
+			n_kcores = count(m -> occursin(kcore_pattern, m), measures_df.measure)
+			n_scores = count(m -> occursin(score_pattern, m), measures_df.measure)
+			n_community = count(m -> any(p -> occursin(p, m), community_patterns), measures_df.measure)
+		
+		#	Add weight column if not present
+			if !hasproperty(measures_df, :weight)
+				measures_df.weight = ones(Float64, nrow(measures_df))
+			end
+		
+		#	Apply category weights
+			for i in eachindex(measures_df.measure)
+				m = measures_df.measure[i]
+				
+				if occursin(triad_pattern, m) && n_triads > 0
+					measures_df.weight[i] = 1.0 / n_triads
+				elseif occursin(kcore_pattern, m) && n_kcores > 0
+					measures_df.weight[i] = 1.0 / n_kcores
+				elseif occursin(score_pattern, m) && n_scores > 0
+					measures_df.weight[i] = 1.0 / n_scores
+				elseif any(p -> occursin(p, m), community_patterns) && n_community > 0
+					measures_df.weight[i] = 1.0 / n_community
+				end
+			end
+		
+		#	Return nothing (in-place modification)
+			return nothing
+	end
 
-        Notes:
-            - JSD is symmetric and bounded; we use natural logs.
-            - We approximate the empirical distributions via common-bin histograms.
-            - If a column is missing or constant in both networks → JSD = 0.0.
-        """
-
-        #   Inner helper: JS divergence between two numeric vectors
-            function _js_divergence(x::AbstractVector{<:Real},
-                                    y::AbstractVector{<:Real};
-                                    nbins::Int = nbins)::Float64
-                #   Drop missings
-                    x_clean = collect(skipmissing(x))
-                    y_clean = collect(skipmissing(y))
-
-                #   If both are empty or constant/identical, divergence is zero
-                    if isempty(x_clean) && isempty(y_clean)
-                        return 0.0
-                    elseif isempty(x_clean)
-                        x_clean = copy(y_clean)
-                    elseif isempty(y_clean)
-                        y_clean = copy(x_clean)
-                    end
-
-                    lo = min(minimum(x_clean), minimum(y_clean))
-                    hi = max(maximum(x_clean), maximum(y_clean))
-
-                #   Degenerate range → all mass on single bin → no divergence
-                    if lo == hi
-                        return 0.0
-                    end
-
-                #   Common bin edges
-                    edges = range(lo, hi; length = nbins + 1)
-
-                    h1 = fit(Histogram, x_clean, edges)
-                    h2 = fit(Histogram, y_clean, edges)
-
-                    p = h1.weights
-                    q = h2.weights
-
-                #   Normalize to probabilities
-                    s1 = sum(p)
-                    s2 = sum(q)
-                    if s1 == 0.0 && s2 == 0.0
-                        return 0.0
-                    elseif s1 == 0.0
-                        p .= 1.0
-                        s1 = length(p)
-                    elseif s2 == 0.0
-                        q .= 1.0
-                        s2 = length(q)
-                    end
-
-                    p = p ./ s1
-                    q = q ./ s2
-
-                #   Avoid log(0): add tiny epsilon and renormalize
-                    eps_val = eps(Float64)
-                    p .= p .+ eps_val
-                    q .= q .+ eps_val
-                    p ./= sum(p)
-                    q ./= sum(q)
-
-                    m = 0.5 .* (p .+ q)
-
-                #   KL helper: natural logarithm
-                    function _kl(a::Vector{Float64}, b::Vector{Float64})
-                        return sum(a .* log.(a ./ b))
-                    end
-
-                    jsd = 0.5 * _kl(p, m) + 0.5 * _kl(q, m)
-
-                #   Return Jensen-Shannon divergence
-                    return jsd
-            end
-
-        #   Main body: compute JSD per base measure
-            js_map = Dict{String,Tuple{Float64,Float64}}()
-
-            for base in base_measures
-                #   Map to symmetric pair that plays nicely with Euclidean metrics:
-                #   dist^2 = (sqrt(jsd)/2 - (-sqrt(jsd)/2))^2 = jsd
-                    if !(hasproperty(node_measures_1, Symbol(base)) && hasproperty(node_measures_2, Symbol(base)))
-						# 	If missing in either, treat divergence as 0.0
-							jsd = 0.0
-							v1  = 0.0
-							v2  = 0.0
-							js_map[base] = (v1, v2)
+#	Helper Function for network_comparator: Compute JS (Jensen-Shannon) Divergence for Node-Level Measures
+	function _js_divergence_computation(node_measures_1::DataFrame,
+										node_measures_2::DataFrame,
+										base_measures::Vector{String};
+										nbins::Int = 20,
+										apply_asinh::Bool = false)
+		"""
+		Args:
+			node_measures_1::DataFrame: Node-level measures for network 1
+			node_measures_2::DataFrame: Node-level measures for network 2
+			base_measures::Vector{String}: Names of node-level columns
+			nbins::Int: Number of histogram bins (default 20)
+			apply_asinh::Bool: Apply asinh transformation before JS computation
+		Returns:
+			DataFrame with columns:
+				- measure: base measure name
+				- network_1_value: value for network 1 (±sqrt(JSD)/2)
+				- network_2_value: value for network 2 (∓sqrt(JSD)/2)
+				- js_divergence: raw JS divergence value
+		Notes:
+			- JSD is symmetric and bounded; we use natural logs
+			- asinh transformation reduces influence of extreme values
+			- Missing columns treated as JSD = 0.0
+		"""
+		
+		#	Inner helper: JS divergence between two numeric vectors
+			function _js_divergence(x::AbstractVector{<:Real},
+									y::AbstractVector{<:Real};
+									nbins::Int = nbins)::Float64
+				#	Drop missings
+					x_clean = collect(skipmissing(x))
+					y_clean = collect(skipmissing(y))
+				
+				#	If both are empty or constant/identical, divergence is zero
+					if isempty(x_clean) && isempty(y_clean)
+						return 0.0
+					elseif isempty(x_clean)
+						x_clean = copy(y_clean)
+					elseif isempty(y_clean)
+						y_clean = copy(x_clean)
+					end
+				
+					lo = min(minimum(x_clean), minimum(y_clean))
+					hi = max(maximum(x_clean), maximum(y_clean))
+				
+				#	Degenerate range → all mass on single bin → no divergence
+					if lo == hi
+						return 0.0
+					end
+				
+				#	Common bin edges
+					edges = range(lo, hi; length = nbins + 1)
+				
+					h1 = fit(Histogram, x_clean, edges)
+					h2 = fit(Histogram, y_clean, edges)
+				
+					p = h1.weights
+					q = h2.weights
+				
+				#	Normalize to probabilities
+					s1 = sum(p)
+					s2 = sum(q)
+					if s1 == 0.0 && s2 == 0.0
+						return 0.0
+					elseif s1 == 0.0
+						p .= 1.0
+						s1 = length(p)
+					elseif s2 == 0.0
+						q .= 1.0
+						s2 = length(q)
+					end
+				
+					p = p ./ s1
+					q = q ./ s2
+				
+				#	Avoid log(0): add tiny epsilon and renormalize
+					eps_val = eps(Float64)
+					p .= p .+ eps_val
+					q .= q .+ eps_val
+					p ./= sum(p)
+					q ./= sum(q)
+				
+					m = 0.5 .* (p .+ q)
+				
+				#	KL helper: natural logarithm
+					function _kl(a::Vector{Float64}, b::Vector{Float64})
+						return sum(a .* log.(a ./ b))
+					end
+				
+					jsd = 0.5 * _kl(p, m) + 0.5 * _kl(q, m)
+				
+				#	Return Jensen-Shannon divergence
+					return jsd
+			end
+		
+		#	Initialize results DataFrame
+			results = DataFrame(
+				measure = String[],
+				network_1_value = Float64[],
+				network_2_value = Float64[],
+				js_divergence = Float64[]
+			)
+		
+		#	Process each base measure
+			for base in base_measures
+				#	Check if measure exists in both networks
+					if !(hasproperty(node_measures_1, Symbol(base)) && hasproperty(node_measures_2, Symbol(base)))
+						#	If missing in either, treat divergence as 0.0
+							push!(results, (measure = base,
+											network_1_value = 0.0,
+											network_2_value = 0.0,
+											js_divergence = 0.0))
 							continue
 					end
-
-                    col1 = node_measures_1[!, Symbol(base)]
+				
+					col1 = node_measures_1[!, Symbol(base)]
 					col2 = node_measures_2[!, Symbol(base)]
-
-				# 	Drop missings and coerce to Float64
+				
+				#	Drop missings and coerce to Float64
 					x = Float64.(collect(skipmissing(col1)))
 					y = Float64.(collect(skipmissing(col2)))
-
-				# 	If either becomes empty after dropping missings, treat divergence as 0
+				
+				#	Apply asinh transformation if requested
+					if apply_asinh
+						x = asinh.(x)
+						y = asinh.(y)
+					end
+				
+				#	Compute JS divergence
 					if isempty(x) || isempty(y)
 						jsd = 0.0
 					else
 						jsd = _js_divergence(x, y; nbins = nbins)
 					end
-                
-                    root_jsd = sqrt(jsd)
-                    v1 =  0.5 * root_jsd
-                    v2 = -0.5 * root_jsd
+				
+				#	Map to symmetric pair
+					root_jsd = sqrt(jsd)
+					v1 =  0.5 * root_jsd
+					v2 = -0.5 * root_jsd
+				
+				#	Add to results
+					push!(results, (measure = base,
+									network_1_value = v1,
+									network_2_value = v2,
+									js_divergence = jsd))
+			end
+		
+		#	Return DataFrame
+			return results
+	end
 
-                    js_map[base] = (v1, v2)
-            end
-
-        #   Return Jensen-Shannon Divergence Score for Each Node-Level Measure
-            return js_map
-    end
-
-#   Helper Function for network_comparator: Normalize Global Metrics
-    function _global_metric_normalizer(feature_vector_1::DataFrame,
-                                        feature_vector_2::DataFrame,
-                                        node_measures_1::DataFrame,
-                                        node_measures_2::DataFrame, 
-                                        n_1::Int64, n_2::Int64, 
+#	Helper Function for network_comparator: Normalize Global Metrics
+	function _global_metric_normalizer(feature_vector_1::DataFrame,
+										feature_vector_2::DataFrame,
+										node_measures_1::DataFrame,
+										node_measures_2::DataFrame, 
+										n_1::Int64, n_2::Int64, 
 										directed::Bool)
-        """
-        Args:
-            feature_vector_1::DataFrame:
-                Single-network feature vector with columns:
-                    - :measure :: AbstractString
-                    - :value   :: Real
-                    - :type    :: AbstractString
-            feature_vector_2::DataFrame:
-                Second-network feature vector with the same structure.
-            node_measures_1::DataFrame:
-                Node-level measures for network 1 (columns include base measure names).
-            node_measures_2::DataFrame:
-                Node-level measures for network 2.
-
-        Returns:
-            Tuple{DataFrame,DataFrame}:
-                (feature_vector_1_norm, feature_vector_2_norm)
-
-        Notes:
-            - Component Measures:
-                * Drop: num_scc
-                * asinh-transform: num_nodes, num_edges
-            - Link Measures:
-                * Drop: all_link_min, all_link_max, all_link_sum,
-                        non_self_min, non_self_max, non_self_sum,
-                        self_loops_min, self_loops_max, self_loops_sum
-                * Within-pair scaling for:
-                    - all_link_mean, all_link_std
-                    - non_self_mean, non_self_std
-                    - self_loops_mean, self_loops_std
-            - Degree / Local Reach / Local Structure / Influence:
-                * Identify base measures via suffixes:
-                    _mean, _median, _std, _skew, _kurtosis
-                * For each base (e.g., out_degree_normalized):
-                    - Compute JS divergence between node_measures_1[!, base]
-                    and node_measures_2[!, base]
-                    - Define:
-                        v1 =  sqrt(JSD) / 2
-                        v2 = -sqrt(JSD) / 2
-                    - Remove the original moment features belonging to that base
-                    from both feature vectors
-                    - Insert a new feature:
-                        measure = "jsd_" * base
-                        value   = v1 or v2
-                        type    = original type (e.g., "Degree Measures")
-
-            This guarantees that for each base measure, the squared difference
-            between networks equals the JSD, while keeping the feature space
-            Euclidean.
-        """
-
-        #   Create local copies so we don't mutate caller data
-            fv1 = deepcopy(feature_vector_1)
-            fv2 = deepcopy(feature_vector_2)
-
-        #   Standardize column names by position if needed
-            if !(:measure in names(fv1)) || !(:value in names(fv1)) || !(:type in names(fv1))
-                rename!(fv1, [:measure, :value, :type])
-            end
-
-            if !(:measure in names(fv2)) || !(:value in names(fv2)) || !(:type in names(fv2))
-                rename!(fv2, [:measure, :value, :type])
-            end
-
-        #   Ensure values are numeric
-            fv1.value = Float64.(fv1.value)
-            fv2.value = Float64.(fv2.value)
-
-        # ---------- Component Measure transforms ----------
-
-            function _normalize_components!(df::DataFrame)
-                #   Drop num_scc
-                    filter!(row -> !(row.type == "Component Measure" && row.measure == "num_scc"), df)
-
-                #   asinh(num_nodes)
-                    mask_nodes = (df.type .== "Component Measure") .& (df.measure .== "num_nodes")
-                    if any(mask_nodes)
-                        df.value[mask_nodes] .= asinh.(df.value[mask_nodes])
-                    end
-
-                #   asinh(num_edges)
-                    mask_edges = (df.type .== "Component Measure") .& (df.measure .== "num_edges")
-                    if any(mask_edges)
-                        df.value[mask_edges] .= asinh.(df.value[mask_edges])
-                    end
-
-                #   Return Transformed Measures
-                    return df
-            end
-
-            _normalize_components!(fv1)
-            _normalize_components!(fv2)
-
-        # ---------- Link Measure transforms ----------
-
-        #   Dropping Extreme Measures that are Captured in Pairwsie Normalizations
-            function _drop_link_extremes!(df::DataFrame)
-                drop_set = Set([
-                    "all_link_min", "all_link_max", "all_link_sum",
-                    "non_self_min", "non_self_max", "non_self_sum",
-                    "self_loops_min", "self_loops_max", "self_loops_sum",
-                ])
-                filter!(row -> !(row.type == "Link Measure" && (row.measure in drop_set)), df)
-                return df
-            end
-
-            _drop_link_extremes!(fv1)
-            _drop_link_extremes!(fv2)
-
-        #   Within-pair scaling for selected Link Measures
-            link_measures_to_scale = [
-                "all_link_mean",
-                "all_link_std",
-                "non_self_mean",
-                "non_self_std",
-                "self_loops_mean",
-                "self_loops_std",
-            ]
-
-            for m in link_measures_to_scale
-                #   Locate row for this measure in each feature vector
-                    idx1 = findfirst(i -> fv1.measure[i] == m && fv1.type[i] == "Link Measure",
-                                    eachindex(fv1.measure))
-                    idx2 = findfirst(i -> fv2.measure[i] == m && fv2.type[i] == "Link Measure",
-                                    eachindex(fv2.measure))
-
-                #   Skip if missing in either network
-                    if idx1 === nothing || idx2 === nothing
-                        continue
-                    end
-
-                    v1 = Float64(fv1.value[idx1])
-                    v2 = Float64(fv2.value[idx2])
-
-                    scale = max(abs(v1), abs(v2), eps(Float64))
-
-                    fv1.value[idx1] = v1 / scale
-                    fv2.value[idx2] = v2 / scale
-            end
-
-        # ---------- KL / JS-based replacement for node-moment summaries ----------
-
-        #   Creating Reach-2 Normalized Features
-            if !directed
-                den_1 = max(n_1 * (n_1 - 1), 1)
-                node_measures_1.undirected_reach_2_normalized = node_measures_1.undirected_reach_2 ./ den_1
-
-                den_2 = max(n_2 * (n_2 - 1), 1)
-                node_measures_2.undirected_reach_2_normalized = node_measures_2.undirected_reach_2 ./ den_2
-            else
-                #	Undirected reach: proportion of node pairs reachable
-                    den_1 = max(n_1 * (n_1 - 1), 1)
-                    node_measures_1.undirected_reach_2_normalized = node_measures_1.undirected_reach_2 ./ den_1
-
-                    den_2 = max(n_2 * (n_2 - 1), 1)
-                    node_measures_2.undirected_reach_2_normalized = node_measures_2.undirected_reach_2 ./ den_2
-                 
-                #	In-reach: 2k_in/(n-1)
-                    den_1 = max(n_1 - 1, 1)
-                    node_measures_1.in_reach_2_normalized = node_measures_1.in_reach_2 ./ den_1
-
-                    den_2 = max(n_2 - 1, 1)
-                    node_measures_2.in_reach_2_normalized = node_measures_2.in_reach_2 ./ den_2
-           
-                #	Out-reach: 2k_out/(n-1)
-                    den_1 = max(n_1 - 1, 1)
-                    node_measures_1.out_reach_2_normalized = node_measures_1.out_reach_2 ./ den_1
-
-                    den_2 = max(n_2 - 1, 1)
-                    node_measures_2.out_reach_2_normalized = node_measures_2.out_reach_2 ./ den_2
-            end
-
-        #   Target categories where we computed moments from node_measures
-            kl_types = Set([
-                "Degree Measures",
-                "Local Reach",
-                "Local Structure",
-                "Influence",
-            ])
-
-        #   Suffixes that indicate "moment" summaries
-            moment_suffixes = ("_mean", "_median", "_std", "_skew", "_kurtosis")
-
-        #   Extracting Feature Vector 1 Node-Level Measurs
-            types_list = ["Degree Measures", "Local Reach", "Local Structure", "Influence"]
-            fv1_node_measures = fv1[in(types_list).(fv1.type),:]
-            fv1_node_means = fv1_node_measures.measure[occursin.("_mean",  fv1_node_measures.measure)]
-            fv1_features = replace.(fv1_node_means, "_mean" => "")
-            
-        #   Extracting Feature Vector 1 Node-Level Measurs
-            fv2_node_measures = fv2[in(types_list).(fv2.type),:]
-            fv2_node_means = fv2_node_measures.measure[occursin.("_mean",  fv2_node_measures.measure)]
-            fv2_features = replace.(fv2_node_means, "_mean" => "")
-            base_measures = unique([fv1_features; fv2_features])
-            
-        #   Compute divergence-based values for each base measure
-            js_map = _kl_divergence_normalization(node_measures_1, node_measures_2, base_measures)
-
-        #   Constructing Measure Aligned Index: Measures Are Symmetric by Design 
-            base_index = DataFrame(measure = base_measures, type = fv1_node_measures.type[occursin.("_mean",  fv2_node_measures.measure)])
-            js_map_index = DataFrame(measure = string.(keys(js_map)), value = collect(values(js_map)))
-            leftjoin!(base_index, js_map_index, on=:measure)
-
-            feature_js_scores = split.(string.(base_index.value), ",")
-            fv1_js_scores = string.([s[1] for s in feature_js_scores])
-            fv1_js_scores = parse.(Float64, replace.(fv1_js_scores, "(" => ""))
-
-            fv2_js_scores = string.([s[2] for s in feature_js_scores])
-            fv2_js_scores = parse.(Float64, replace.(fv2_js_scores, ")" => ""))
-
-            fv1_js_df = DataFrame(measure = base_index.measure, value =  fv1_js_scores, type = base_index.type)
-            fv2_js_df = DataFrame(measure = base_index.measure, value =  fv2_js_scores, type = base_index.type)
-           
-        #   Remove original moment-based summaries for those bases in the target types
-            function _drop_moment_rows!(df::DataFrame)
+		"""
+		Args:
+			feature_vector_1::DataFrame: Single-network feature vector
+			feature_vector_2::DataFrame: Second-network feature vector
+			node_measures_1::DataFrame: Node-level measures for network 1
+			node_measures_2::DataFrame: Node-level measures for network 2
+			n_1::Int64: Number of nodes in network 1
+			n_2::Int64: Number of nodes in network 2
+			directed::Bool: Whether networks are directed
+		Returns:
+			Tuple{DataFrame,DataFrame}: (feature_vector_1_norm, feature_vector_2_norm)
+		Notes:
+			- Computes both raw and asinh-normalized JS divergences
+			- Applies category weights to multi-indicator measures
+			- Component/Link measure transformations remain unchanged
+		"""
+		
+		#	Create local copies so we don't mutate caller data
+			fv1 = deepcopy(feature_vector_1)
+			fv2 = deepcopy(feature_vector_2)
+		
+		#	Standardize column names by position if needed
+			if !(:measure in names(fv1)) || !(:value in names(fv1)) || !(:type in names(fv1))
+				rename!(fv1, [:measure, :value, :type])
+			end
+		
+			if !(:measure in names(fv2)) || !(:value in names(fv2)) || !(:type in names(fv2))
+				rename!(fv2, [:measure, :value, :type])
+			end
+		
+		#	Ensure values are numeric
+			fv1.value = Float64.(fv1.value)
+			fv2.value = Float64.(fv2.value)
+		
+		# ---------- Component Measure transforms ----------
+		
+			function _normalize_components!(df::DataFrame)
+				#	Drop num_scc
+					filter!(row -> !(row.type == "Component Measure" && row.measure == "num_scc"), df)
+				
+				#	asinh(num_nodes)
+					mask_nodes = (df.type .== "Component Measure") .& (df.measure .== "num_nodes")
+					if any(mask_nodes)
+						df.value[mask_nodes] .= asinh.(df.value[mask_nodes])
+					end
+				
+				#	asinh(num_edges)
+					mask_edges = (df.type .== "Component Measure") .& (df.measure .== "num_edges")
+					if any(mask_edges)
+						df.value[mask_edges] .= asinh.(df.value[mask_edges])
+					end
+				
+				#	Return Transformed Measures
+					return df
+			end
+		
+			_normalize_components!(fv1)
+			_normalize_components!(fv2)
+		
+		# ---------- Link Measure transforms ----------
+		
+		#	Dropping Extreme Measures that are Captured in Pairwise Normalizations
+			function _drop_link_extremes!(df::DataFrame)
+				drop_set = Set([
+					"all_link_min", "all_link_max", "all_link_sum",
+					"non_self_min", "non_self_max", "non_self_sum",
+					"self_loops_min", "self_loops_max", "self_loops_sum",
+				])
+				filter!(row -> !(row.type == "Link Measure" && (row.measure in drop_set)), df)
+				return df
+			end
+		
+			_drop_link_extremes!(fv1)
+			_drop_link_extremes!(fv2)
+		
+		#	Within-pair scaling for selected Link Measures
+			link_measures_to_scale = [
+				"all_link_mean",
+				"all_link_std",
+				"non_self_mean",
+				"non_self_std",
+				"self_loops_mean",
+				"self_loops_std",
+			]
+		
+			for m in link_measures_to_scale
+				#	Locate row for this measure in each feature vector
+					idx1 = findfirst(i -> fv1.measure[i] == m && fv1.type[i] == "Link Measure",
+									eachindex(fv1.measure))
+					idx2 = findfirst(i -> fv2.measure[i] == m && fv2.type[i] == "Link Measure",
+									eachindex(fv2.measure))
+				
+				#	Skip if missing in either network
+					if idx1 === nothing || idx2 === nothing
+						continue
+					end
+				
+					v1 = Float64(fv1.value[idx1])
+					v2 = Float64(fv2.value[idx2])
+				
+					scale = max(abs(v1), abs(v2), eps(Float64))
+				
+					fv1.value[idx1] = v1 / scale
+					fv2.value[idx2] = v2 / scale
+			end
+		
+		# ---------- Create normalized reach-2 features ----------
+		
+			if !directed
+				den_1 = max(n_1 * (n_1 - 1), 1)
+				node_measures_1.undirected_reach_2_normalized = node_measures_1.undirected_reach_2 ./ den_1
+				
+				den_2 = max(n_2 * (n_2 - 1), 1)
+				node_measures_2.undirected_reach_2_normalized = node_measures_2.undirected_reach_2 ./ den_2
+			else
+				#	Undirected reach: proportion of node pairs reachable
+					den_1 = max(n_1 * (n_1 - 1), 1)
+					node_measures_1.undirected_reach_2_normalized = node_measures_1.undirected_reach_2 ./ den_1
+				
+					den_2 = max(n_2 * (n_2 - 1), 1)
+					node_measures_2.undirected_reach_2_normalized = node_measures_2.undirected_reach_2 ./ den_2
+				
+				#	In-reach: 2k_in/(n-1)
+					den_1 = max(n_1 - 1, 1)
+					node_measures_1.in_reach_2_normalized = node_measures_1.in_reach_2 ./ den_1
+				
+					den_2 = max(n_2 - 1, 1)
+					node_measures_2.in_reach_2_normalized = node_measures_2.in_reach_2 ./ den_2
+				
+				#	Out-reach: 2k_out/(n-1)
+					den_1 = max(n_1 - 1, 1)
+					node_measures_1.out_reach_2_normalized = node_measures_1.out_reach_2 ./ den_1
+				
+					den_2 = max(n_2 - 1, 1)
+					node_measures_2.out_reach_2_normalized = node_measures_2.out_reach_2 ./ den_2
+			end
+		
+		# ---------- JS-based replacement for node-moment summaries ----------
+		
+		#	Target categories where we computed moments from node_measures
+			kl_types = Set([
+				"Degree Measures",
+				"Local Reach",
+				"Local Structure",
+				"Influence",
+			])
+		
+		#	Suffixes that indicate "moment" summaries
+			moment_suffixes = ("_mean", "_median", "_std", "_skew", "_kurtosis")
+		
+		#	Extract base measures from both networks
+			types_list = ["Degree Measures", "Local Reach", "Local Structure", "Influence"]
+			fv1_node_measures = fv1[in(types_list).(fv1.type),:]
+			fv1_node_means = fv1_node_measures.measure[occursin.("_mean", fv1_node_measures.measure)]
+			fv1_features = replace.(fv1_node_means, "_mean" => "")
+		
+			fv2_node_measures = fv2[in(types_list).(fv2.type),:]
+			fv2_node_means = fv2_node_measures.measure[occursin.("_mean", fv2_node_measures.measure)]
+			fv2_features = replace.(fv2_node_means, "_mean" => "")
+			base_measures = unique([fv1_features; fv2_features])
+		
+		#	Compute both raw and asinh-normalized JS divergences
+			js_raw = _js_divergence_computation(node_measures_1, node_measures_2, base_measures; 
+												 apply_asinh = false)
+			js_asinh = _js_divergence_computation(node_measures_1, node_measures_2, base_measures; 
+												   apply_asinh = true)
+		
+		#	Build type mapping for JS features
+			type_map = Dict{String,String}()
+			for base in base_measures
+				#	Find the type for this base measure from fv1_node_measures
+					idx = findfirst(m -> startswith(m, base * "_"), fv1_node_means)
+					if idx !== nothing
+						type_map[base] = fv1_node_measures.type[idx]
+					else
+						#	Try fv2 if not in fv1
+							idx2 = findfirst(m -> startswith(m, base * "_"), fv2_node_means)
+							if idx2 !== nothing
+								type_map[base] = fv2_node_measures.type[idx2]
+							else
+								type_map[base] = "Unknown"
+							end
+					end
+			end
+		
+		#	Create JS feature DataFrames for both networks
+			fv1_js_raw = DataFrame(
+				measure = "jsd_raw_" .* js_raw.measure,
+				value = js_raw.network_1_value,
+				type = [get(type_map, m, "Unknown") for m in js_raw.measure]
+			)
+		
+			fv1_js_asinh = DataFrame(
+				measure = "jsd_asinh_" .* js_asinh.measure,
+				value = js_asinh.network_1_value,
+				type = [get(type_map, m, "Unknown") for m in js_asinh.measure]
+			)
+		
+			fv2_js_raw = DataFrame(
+				measure = "jsd_raw_" .* js_raw.measure,
+				value = js_raw.network_2_value,
+				type = [get(type_map, m, "Unknown") for m in js_raw.measure]
+			)
+		
+			fv2_js_asinh = DataFrame(
+				measure = "jsd_asinh_" .* js_asinh.measure,
+				value = js_asinh.network_2_value,
+				type = [get(type_map, m, "Unknown") for m in js_asinh.measure]
+			)
+		
+		#	Remove original moment-based summaries for those bases in the target types
+			function _drop_moment_rows!(df::DataFrame)
 				#	Types we will replace with JS/Euclidean divergence features
 					moment_types = Set([
 						"Degree Measures",
@@ -13623,455 +13686,547 @@ THE SOFTWARE.
 						"Local Structure",
 						"Influence",
 					])
-
+				
 					moment_suffixes = ("_mean", "_median", "_std", "_skew", "_kurtosis")
-
+				
 				#	Identifying & Filter Moment Rows
 					filter!(df) do row
 						t = String(row.type)
 						m = String(row.measure)
-
+				
 						is_moment_type  = t in moment_types
 						is_moment_field = any(endswith(m, suf) for suf in moment_suffixes)
-
+				
 						# keep row if it's NOT a moment field in a moment-type block
 						!(is_moment_type && is_moment_field)
 					end
-
+				
 				#	Return Filtered DataFrame
 					return df
 			end
+		
+			_drop_moment_rows!(fv1)
+			_drop_moment_rows!(fv2)
+		
+		#	Insert new JS-based features (both raw and asinh)
+			fv1 = vcat(fv1, fv1_js_raw, fv1_js_asinh)
+			fv2 = vcat(fv2, fv2_js_raw, fv2_js_asinh)
+		
+		#	Apply category weights to multi-indicator measures
+			_apply_category_weights!(fv1)
+			_apply_category_weights!(fv2)
+		
+		#	Return Transformed Feature Vectors
+			return fv1, fv2
+	end
 
-            _drop_moment_rows!(fv1)
-            _drop_moment_rows!(fv2)
+#	Helper: Compute Overall Euclidean Distance with Weights
+	function _compute_overall_distance(combined_measures::DataFrame; use_weights::Bool = true)
+		"""
+		Compute weighted Euclidean distance and similarity between two network feature vectors.
+		
+		Args:
+			combined_measures::DataFrame: Features with :network_1_values, :network_2_values, optional :weight
+			use_weights::Bool: Whether to apply measure weights (default true)
+		Returns:
+			NamedTuple: (distance, squared_distance, similarity)
+		Notes:
+			- Distance is weighted Euclidean distance in feature space
+			- Similarity = 1/(1+distance), mapping [0,∞) → (0,1]
+		"""
+		
+		#	Validation
+			@assert hasproperty(combined_measures, :network_1_values) "combined_measures must contain :network_1_values"
+			@assert hasproperty(combined_measures, :network_2_values) "combined_measures must contain :network_2_values"
+		
+		#	Extract numeric vectors
+			x = Vector{Float64}(combined_measures.network_1_values)
+			y = Vector{Float64}(combined_measures.network_2_values)
+		
+		#	Get weights
+			if use_weights && hasproperty(combined_measures, :weight)
+				w = Vector{Float64}(combined_measures.weight)
+			else
+				w = ones(Float64, length(x))
+			end
+		
+		#	Compute weighted squared differences
+			diff = x .- y
+			sq_diff = w .* (diff .^ 2)
+			total_sq = sum(sq_diff)
+		
+		#	Compute Euclidean distance
+			dist = sqrt(total_sq)
+		
+		#	Map distance to similarity
+			sim = 1.0 / (1.0 + dist)
+		
+		#	Return summary
+			return (distance = dist,
+					squared_distance = total_sq,
+					similarity = sim)
+	end
 
-        #   Insert new JSD-based features
-            fv1 = [fv1; fv1_js_df]
-            fv2 = [fv2; fv2_js_df]
+#	Helper: Compute Type-Level Distance Contributions with Weights
+	function _compute_type_contributions(combined_measures::DataFrame,
+										 total_squared_distance::Float64;
+										 use_weights::Bool = true)
+		"""
+		Compute per-type weighted contributions to overall network distance.
+		
+		Args:
+			combined_measures::DataFrame: Features with values, type labels, and weights
+			total_squared_distance::Float64: Total weighted squared Euclidean distance
+			use_weights::Bool: Whether to apply measure weights (default true)
+		Returns:
+			DataFrame: Per-type distance metrics and contributions
+		Notes:
+			- Accounts for category weights in contribution calculations
+			- Type similarity = 1/(1+type_distance)
+		"""
+		
+		#	Validation
+			@assert hasproperty(combined_measures, :network_1_values) "combined_measures must contain :network_1_values"
+			@assert hasproperty(combined_measures, :network_2_values) "combined_measures must contain :network_2_values"
+			@assert hasproperty(combined_measures, :type) "combined_measures must contain :type"
+		
+		#	Handle empty input
+			if nrow(combined_measures) == 0
+				return DataFrame(
+					type = String[],
+					n_measures = Int[],
+					distance_sq = Float64[],
+					distance = Float64[],
+					normalized_contribution = Float64[],
+					type_similarity = Float64[]
+				)
+			end
+		
+		#	Extract values and weights
+			x = Vector{Float64}(combined_measures.network_1_values)
+			y = Vector{Float64}(combined_measures.network_2_values)
+		
+			if use_weights && hasproperty(combined_measures, :weight)
+				w = Vector{Float64}(combined_measures.weight)
+			else
+				w = ones(Float64, length(x))
+			end
+		
+		#	Compute weighted squared differences
+			sq_diff = w .* ((x .- y) .^ 2)
+		
+		#	Assemble per-feature table for grouping
+			tmp = DataFrame(
+				type = String.(combined_measures.type),
+				sq_diff = sq_diff
+			)
+		
+		#	Summarize by type
+			type_df = combine(
+				groupby(tmp, :type),
+				:sq_diff => sum => :distance_sq,
+				nrow => :n_measures
+			)
+		
+		#	Compute per-type distances
+			type_df.distance = sqrt.(type_df.distance_sq)
+		
+		#	Compute normalized contributions
+			if total_squared_distance > 0.0
+				type_df.normalized_contribution = type_df.distance_sq ./ total_squared_distance
+			else
+				type_df.normalized_contribution = fill(0.0, nrow(type_df))
+			end
+		
+		#	Map per-type distance to similarity
+			type_df.type_similarity = 1.0 ./ (1.0 .+ type_df.distance)
+		
+		#	Return contributions table
+			return type_df
+	end
 
-        #   Return Transformed Feature Vectors
-            return fv1, fv2
-    end
-
-#	Helper: Compute Overall Euclidean Distance
-    function _compute_overall_distance(combined_measures::DataFrame)
-        """
-        Compute Euclidean distance and similarity between two network feature vectors.
-        
-        Args:
-            combined_measures::DataFrame: Features with :network_1_values and :network_2_values
-        Returns:
-            NamedTuple: (distance, squared_distance, similarity)
-        Notes:
-            - Distance is standard Euclidean distance in feature space
-            - Similarity = 1/(1+distance), mapping [0,∞) → (0,1]
-        """
-
-        #	Validation
-            @assert hasproperty(combined_measures, :network_1_values) "combined_measures must contain :network_1_values"
-            @assert hasproperty(combined_measures, :network_2_values) "combined_measures must contain :network_2_values"
-
-        #	Extract numeric vectors
-            x = Vector{Float64}(combined_measures.network_1_values)
-            y = Vector{Float64}(combined_measures.network_2_values)
-
-        #	Compute squared differences
-            diff = x .- y
-            sq_diff = diff .^ 2
-            total_sq = sum(sq_diff)
-
-        #	Compute Euclidean distance
-            dist = sqrt(total_sq)
-
-        #	Map distance to similarity
-            sim = 1.0 / (1.0 + dist)
-
-        #	Return summary
-            return (distance = dist,
-                    squared_distance = total_sq,
-                    similarity = sim)
-    end
-
-#	Helper: Compute Type-Level Distance Contributions
-    function _compute_type_contributions(combined_measures::DataFrame,
-                                        total_squared_distance::Float64)
-        """
-        Compute per-type contributions to overall network distance.
-        
-        Args:
-            combined_measures::DataFrame: Features with values and type labels
-            total_squared_distance::Float64: Total squared Euclidean distance
-        Returns:
-            DataFrame: Per-type distance metrics and contributions
-        Notes:
-            - Normalized contribution = type_distance_sq / total_distance_sq
-            - Type similarity = 1/(1+type_distance)
-        """
-
-        #	Validation
-            @assert hasproperty(combined_measures, :network_1_values) "combined_measures must contain :network_1_values"
-            @assert hasproperty(combined_measures, :network_2_values) "combined_measures must contain :network_2_values"
-            @assert hasproperty(combined_measures, :type) "combined_measures must contain :type"
-
-        #	Handle empty input
-            if nrow(combined_measures) == 0
-                return DataFrame(
-                    type = String[],
-                    n_measures = Int[],
-                    distance_sq = Float64[],
-                    distance = Float64[],
-                    normalized_contribution = Float64[],
-                    type_similarity = Float64[]
-                )
-            end
-
-        #	Compute squared differences per feature
-            x = Vector{Float64}(combined_measures.network_1_values)
-            y = Vector{Float64}(combined_measures.network_2_values)
-            sq_diff = (x .- y) .^ 2
-
-        #	Assemble per-feature table for grouping
-            tmp = DataFrame(
-                type = String.(combined_measures.type),
-                sq_diff = sq_diff
-            )
-
-        #	Summarize by type
-            type_df = combine(
-                groupby(tmp, :type),
-                :sq_diff => sum => :distance_sq,
-                nrow => :n_measures
-            )
-
-        #	Compute per-type distances
-            type_df.distance = sqrt.(type_df.distance_sq)
-
-        #	Compute normalized contributions
-            if total_squared_distance > 0.0
-                type_df.normalized_contribution = type_df.distance_sq ./ total_squared_distance
-            else
-                type_df.normalized_contribution = fill(0.0, nrow(type_df))
-            end
-
-        #	Map per-type distance to similarity
-            type_df.type_similarity = 1.0 ./ (1.0 .+ type_df.distance)
-
-        #	Return contributions table
-            return type_df
-    end
+#	Helper: Split Combined Features into Raw and Asinh Versions
+	function _split_js_features(combined_measures::DataFrame)
+		"""
+		Split combined measures into raw and asinh JS divergence versions.
+		
+		Args:
+			combined_measures::DataFrame: Combined features with both jsd_raw_ and jsd_asinh_ measures
+		Returns:
+			Tuple{DataFrame,DataFrame}: (raw_measures, asinh_measures)
+		Notes:
+			Each output contains only its respective JS measures plus all non-JS measures
+		"""
+		
+		#	Identify JS measures
+			is_raw_js = occursin.(r"^jsd_raw_", combined_measures.measure)
+			is_asinh_js = occursin.(r"^jsd_asinh_", combined_measures.measure)
+			is_non_js = .!(is_raw_js .| is_asinh_js)
+		
+		#	Create raw version (non-JS + raw JS)
+			raw_measures = combined_measures[is_non_js .| is_raw_js, :]
+		
+		#	Create asinh version (non-JS + asinh JS)
+			asinh_measures = combined_measures[is_non_js .| is_asinh_js, :]
+		
+		#	Return both versions
+			return raw_measures, asinh_measures
+	end
 
 #	Network Comparator: Compare Two Networks
-    function network_comparator(edges_1::DataFrame, nodes_1::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}},
-                            edges_2::DataFrame, nodes_2::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}};
-                            resolution_sweep::Bool = false, resolution::Float64 = 1.0, directed::Bool = true, 
-                            weighted::Bool = true, n_resolutions::Int = 15, n_runs_per_gamma::Int = 5,
-                            n_iterations_per_run::Int = 10, seed::Union{Int,Nothing} = nothing, 
-                            provided_membership_1::Union{Nothing,DataFrame,Vector{Int},Dict} = nothing,
-                            provided_membership_2::Union{Nothing,DataFrame,Vector{Int},Dict} = nothing)
-        """
-        Compare two networks by computing comprehensive feature vectors and measuring their similarity.
-        
-        Args:
-            edges_1, edges_2::DataFrame: Edge lists with :src, :dst, optional :weight
-            nodes_1, nodes_2: Node universes (include isolates if present)
-            resolution_sweep::Bool: Use CHAMP multi-resolution community detection
-            resolution::Float64: Resolution parameter for modularity
-            directed::Bool: Treat networks as directed (default true)
-            weighted::Bool: Use edge weights if present (default true)
-            n_resolutions::Int: Number of resolutions for CHAMP sweep
-            n_runs_per_gamma::Int: Leiden runs per resolution
-            n_iterations_per_run::Int: Iterations per Leiden run
-            seed: Random seed for reproducibility
-            provided_membership_1, provided_membership_2: Optional pre-computed communities
-        Returns:
-            NamedTuple with fields:
-                - combined_features: DataFrame of aligned feature vectors
-                - overall_distance: Euclidean distance between networks
-                - overall_similarity: Similarity score ∈ (0,1]
-                - type_contributions: Per-type distance breakdown
-        Notes:
-            - Automatically selects appropriate constructor based on directed/weighted flags
-            - Handles mismatched features by zero-filling
-            - Preserves feature ordering while ensuring completeness
-        """
+	function network_comparator(edges_1::DataFrame, nodes_1::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}},
+								edges_2::DataFrame, nodes_2::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}};
+								resolution_sweep::Bool = false, resolution::Float64 = 1.0, directed::Bool = true, 
+								weighted::Bool = true, n_resolutions::Int = 15, n_runs_per_gamma::Int = 5,
+								n_iterations_per_run::Int = 10, seed::Union{Int,Nothing} = nothing, 
+								provided_membership_1::Union{Nothing,DataFrame,Vector{Int},Dict} = nothing,
+								provided_membership_2::Union{Nothing,DataFrame,Vector{Int},Dict} = nothing)
+		"""
+		Compare two networks using both raw and asinh-normalized node measure distributions.
+		
+		Args:
+			edges_1, edges_2::DataFrame: Edge lists with :src, :dst, optional :weight
+			nodes_1, nodes_2: Node universes (include isolates if present)
+			resolution_sweep::Bool: Use CHAMP multi-resolution community detection
+			resolution::Float64: Resolution parameter for modularity
+			directed::Bool: Treat networks as directed (default true)
+			weighted::Bool: Use edge weights if present (default true)
+			n_resolutions::Int: Number of resolutions for CHAMP sweep
+			n_runs_per_gamma::Int: Leiden runs per resolution
+			n_iterations_per_run::Int: Iterations per Leiden run
+			seed: Random seed for reproducibility
+			provided_membership_1, provided_membership_2: Optional pre-computed communities
+		Returns:
+			NamedTuple with fields:
+				- combined_features: DataFrame of aligned feature vectors with weights
+				- overall_distance_raw: Euclidean distance using raw JS divergences
+				- overall_similarity_raw: Similarity score for raw comparison
+				- overall_distance_asinh: Euclidean distance using asinh JS divergences
+				- overall_similarity_asinh: Similarity score for asinh comparison
+				- type_contributions_raw: Per-type distance breakdown for raw
+				- type_contributions_asinh: Per-type distance breakdown for asinh
+		Notes:
+			- Applies category weights to multi-indicator measures
+			- Computes both raw and asinh-normalized comparisons simultaneously
+			- Raw comparison preserves tail differences in degree distributions
+			- Asinh comparison reduces influence of extreme values
+		"""
+		
+		#	Create working copies
+			clean_edges_1 = deepcopy(edges_1) 
+			clean_nodes_1 = deepcopy(nodes_1)
+			clean_edges_2 = deepcopy(edges_2)
+			clean_nodes_2 = deepcopy(nodes_2)
+		
+		#	========== CONSTRUCT FEATURE VECTORS ==========
+		
+		#	Select appropriate constructor and builder based on configuration
+			if !directed && !weighted
+				#	Undirected binary networks
+					global_stats_1, triad_census_counts_1, node_measures_1 = undirected_binary_constructor(
+						clean_edges_1, clean_nodes_1;
+						resolution_sweep = resolution_sweep,
+						resolution = resolution,
+						directed = directed,
+						weighted = weighted,
+						n_resolutions = n_resolutions,
+						n_runs_per_gamma = n_runs_per_gamma,
+						n_iterations_per_run = n_iterations_per_run,
+						seed = seed,
+						provided_membership = provided_membership_1
+					)
+				
+					global_stats_2, triad_census_counts_2, node_measures_2 = undirected_binary_constructor(
+						clean_edges_2, clean_nodes_2;
+						resolution_sweep = resolution_sweep,
+						resolution = resolution,
+						directed = directed,
+						weighted = weighted,
+						n_resolutions = n_resolutions,
+						n_runs_per_gamma = n_runs_per_gamma,
+						n_iterations_per_run = n_iterations_per_run,
+						seed = seed,
+						provided_membership = provided_membership_2
+					)
+				
+				#	Build feature vectors
+					feature_vector_1 = symmetric_binary_feature_builder(global_stats_1, triad_census_counts_1, node_measures_1)
+					feature_vector_2 = symmetric_binary_feature_builder(global_stats_2, triad_census_counts_2, node_measures_2)
+			
+			elseif !directed && weighted
+				#	Undirected weighted networks
+					global_stats_1, triad_census_counts_1, node_measures_1 = undirected_weighted_constructor(
+						clean_edges_1, clean_nodes_1;
+						resolution_sweep = resolution_sweep,
+						resolution = resolution,
+						directed = directed,
+						weighted = weighted,
+						n_resolutions = n_resolutions,
+						n_runs_per_gamma = n_runs_per_gamma,
+						n_iterations_per_run = n_iterations_per_run,
+						seed = seed,
+						provided_membership = provided_membership_1
+					)
+				
+					global_stats_2, triad_census_counts_2, node_measures_2 = undirected_weighted_constructor(
+						clean_edges_2, clean_nodes_2;
+						resolution_sweep = resolution_sweep,
+						resolution = resolution,
+						directed = directed,
+						weighted = weighted,
+						n_resolutions = n_resolutions,
+						n_runs_per_gamma = n_runs_per_gamma,
+						n_iterations_per_run = n_iterations_per_run,
+						seed = seed,
+						provided_membership = provided_membership_2
+					)
+				
+				#	Build feature vectors
+					feature_vector_1 = symmetric_weighted_feature_builder(global_stats_1, triad_census_counts_1, node_measures_1)
+					feature_vector_2 = symmetric_weighted_feature_builder(global_stats_2, triad_census_counts_2, node_measures_2)
+			
+			elseif directed && !weighted
+				#	Directed binary networks
+					global_stats_1, triad_census_counts_1, node_measures_1 = directed_binary_constructor(
+						clean_edges_1, clean_nodes_1;
+						resolution_sweep = resolution_sweep,
+						resolution = resolution,
+						directed = directed,
+						weighted = weighted,
+						n_resolutions = n_resolutions,
+						n_runs_per_gamma = n_runs_per_gamma,
+						n_iterations_per_run = n_iterations_per_run,
+						seed = seed,
+						provided_membership = provided_membership_1
+					)
+				
+					global_stats_2, triad_census_counts_2, node_measures_2 = directed_binary_constructor(
+						clean_edges_2, clean_nodes_2;
+						resolution_sweep = resolution_sweep,
+						resolution = resolution,
+						directed = directed,
+						weighted = weighted,
+						n_resolutions = n_resolutions,
+						n_runs_per_gamma = n_runs_per_gamma,
+						n_iterations_per_run = n_iterations_per_run,
+						seed = seed,
+						provided_membership = provided_membership_2
+					)
+				
+				#	Build feature vectors
+					feature_vector_1 = directed_binary_feature_builder(global_stats_1, triad_census_counts_1, node_measures_1)
+					feature_vector_2 = directed_binary_feature_builder(global_stats_2, triad_census_counts_2, node_measures_2)
+			
+			else
+				#	Directed weighted networks
+					global_stats_1, triad_census_counts_1, node_measures_1 = directed_weighted_constructor(
+						clean_edges_1, clean_nodes_1;
+						resolution_sweep = resolution_sweep,
+						resolution = resolution,
+						directed = directed,
+						weighted = weighted,
+						n_resolutions = n_resolutions,
+						n_runs_per_gamma = n_runs_per_gamma,
+						n_iterations_per_run = n_iterations_per_run,
+						seed = seed,
+						provided_membership = provided_membership_1
+					)
+				
+					global_stats_2, triad_census_counts_2, node_measures_2 = directed_weighted_constructor(
+						clean_edges_2, clean_nodes_2;
+						resolution_sweep = resolution_sweep,
+						resolution = resolution,
+						directed = directed,
+						weighted = weighted,
+						n_resolutions = n_resolutions,
+						n_runs_per_gamma = n_runs_per_gamma,
+						n_iterations_per_run = n_iterations_per_run,
+						seed = seed,
+						provided_membership = provided_membership_2
+					)
+				
+				#	Build feature vectors
+					feature_vector_1 = directed_weighted_feature_builder(global_stats_1, triad_census_counts_1, node_measures_1)
+					feature_vector_2 = directed_weighted_feature_builder(global_stats_2, triad_census_counts_2, node_measures_2)
+			end
+		
+		#	========== GLOBAL METRIC NORMALIZATIONS ==========
+		
+		#	Isolate Numerators
+			n_1 = parse(Int64, global_stats_1.value[1])
+			n_2 = parse(Int64, global_stats_2.value[1])
+		
+		#	Normalize Feature Vectors (includes both raw and asinh JS features)
+			feature_vector_1, feature_vector_2 = _global_metric_normalizer(feature_vector_1, feature_vector_2, 
+																		   node_measures_1, node_measures_2,
+																		   n_1, n_2, directed)
+		
+		#	========== ALIGN AND COMBINE FEATURE VECTORS ==========
+		
+		#	Rename columns for clarity
+			rename!(feature_vector_1, ["measure", "network_1_values", "type", "weight"])
+			rename!(feature_vector_2, ["measure", "network_2_values", "type", "weight"])
+		
+		#	Add weights if not present (will be present from _global_metric_normalizer)
+			if !hasproperty(feature_vector_1, :weight)
+				feature_vector_1.weight = ones(Float64, nrow(feature_vector_1))
+			end
+			if !hasproperty(feature_vector_2, :weight)
+				feature_vector_2.weight = ones(Float64, nrow(feature_vector_2))
+			end
+		
+		#	Create measure indices with sequential IDs
+			measures_1 = DataFrame(ID_1 = 1:nrow(feature_vector_1), measure = feature_vector_1.measure)
+			measures_2 = DataFrame(ID_2 = 1:nrow(feature_vector_2), measure = feature_vector_2.measure)
+		
+		#	Outer join to capture all unique measures
+			combined_measures = outerjoin(measures_1, measures_2; on = :measure)
+			combined_measures = select(combined_measures, :measure, :ID_1, :ID_2)
+		
+		#	Handle missing features by assigning sequential IDs
+			id_1_missing = sum(ismissing.(combined_measures.ID_1))
+			id_2_missing = sum(ismissing.(combined_measures.ID_2))
+		
+			if id_1_missing > 0
+				missing_number = maximum(skipmissing(combined_measures.ID_1)) + 1
+				combined_measures.ID_1[ismissing.(combined_measures.ID_1)] .= missing_number 
+			end
+		
+			if id_2_missing > 0
+				missing_number = maximum(skipmissing(combined_measures.ID_2)) + 1
+				combined_measures.ID_2[ismissing.(combined_measures.ID_2)] .= missing_number 
+			end
+		
+			combined_measures.ID_1 = convert.(Int64, combined_measures.ID_1)
+			combined_measures.ID_2 = convert.(Int64, combined_measures.ID_2)
+		
+		#	Sort by larger feature set to preserve ordering
+			feature_length_1 = nrow(feature_vector_1)
+			feature_length_2 = nrow(feature_vector_2)
+		
+			if feature_length_1 >= feature_length_2
+				sort!(combined_measures, [:ID_1, :ID_2])
+			else
+				sort!(combined_measures, [:ID_2, :ID_1])
+			end
+		
+			select!(combined_measures, :measure)
+		
+		#	Join values from both networks, zero-fill missing
+			leftjoin!(combined_measures, feature_vector_1[:, [:measure, :network_1_values]], on = :measure)
+			combined_measures.network_1_values[ismissing.(combined_measures.network_1_values)] .= 0.0
+			combined_measures.network_1_values = convert.(Float64, combined_measures.network_1_values)
+		
+			leftjoin!(combined_measures, feature_vector_2[:, [:measure, :network_2_values]], on = :measure)
+			combined_measures.network_2_values[ismissing.(combined_measures.network_2_values)] .= 0.0
+			combined_measures.network_2_values = convert.(Float64, combined_measures.network_2_values)
+		
+		#	Add feature types
+			types_index = unique(vcat(feature_vector_1[:, [:measure, :type]], feature_vector_2[:, [:measure, :type]]))
+			leftjoin!(combined_measures, types_index, on = :measure)
+			combined_measures.type = string.(combined_measures.type)
+		
+		#	Add weights (use average when both networks have the measure)
+			weight_df_1 = feature_vector_1[:, [:measure, :weight]]
+			weight_df_2 = feature_vector_2[:, [:measure, :weight]]
+			rename!(weight_df_1, :weight => :weight_1)
+			rename!(weight_df_2, :weight => :weight_2)
+		
+			leftjoin!(combined_measures, weight_df_1, on = :measure)
+			leftjoin!(combined_measures, weight_df_2, on = :measure)
+		
+			combined_measures.weight_1[ismissing.(combined_measures.weight_1)] .= 1.0
+			combined_measures.weight_2[ismissing.(combined_measures.weight_2)] .= 1.0
+			combined_measures.weight = (combined_measures.weight_1 .+ combined_measures.weight_2) ./ 2.0
+		
+			select!(combined_measures, Not([:weight_1, :weight_2]))
+		
+		#	========== COMPUTE SIMILARITY METRICS FOR BOTH VERSIONS ==========
+		
+		#	Split into raw and asinh versions
+			raw_measures, asinh_measures = _split_js_features(combined_measures)
+		
+		#	Compute overall Euclidean distances and similarities
+			dist_raw = _compute_overall_distance(raw_measures; use_weights = true)
+			dist_asinh = _compute_overall_distance(asinh_measures; use_weights = true)
+		
+		#	Compute type-level contributions
+			type_contrib_raw = _compute_type_contributions(raw_measures, dist_raw.squared_distance; use_weights = true)
+			type_contrib_asinh = _compute_type_contributions(asinh_measures, dist_asinh.squared_distance; use_weights = true)
+		
+		#	Return comprehensive results
+			return (combined_features = combined_measures,
+					overall_distance_raw = dist_raw.distance,
+					overall_similarity_raw = dist_raw.similarity,
+					overall_distance_asinh = dist_asinh.distance,
+					overall_similarity_asinh = dist_asinh.similarity,
+					type_contributions_raw = type_contrib_raw,
+					type_contributions_asinh = type_contrib_asinh)
+	end
+	@doc raw"""
+	**Description**
+	Compare two networks using both raw and asinh-normalized node measure distributions, with weighted multi-indicator categories for balanced structural comparison.
 
-        #	Create working copies
-            clean_edges_1 = deepcopy(edges_1) 
-            clean_nodes_1 = deepcopy(nodes_1)
-            clean_edges_2 = deepcopy(edges_2)
-            clean_nodes_2 = deepcopy(nodes_2)
+	**Usage**
+	`network_comparator(edges_1, nodes_1, edges_2, nodes_2; resolution_sweep=false, resolution=1.0, directed=true, weighted=true, n_resolutions=15, n_runs_per_gamma=5, n_iterations_per_run=10, seed=nothing, provided_membership_1=nothing, provided_membership_2=nothing)`
 
-        #	========== CONSTRUCT FEATURE VECTORS ==========
+	**Arguments**
+	- `edges_1, edges_2::DataFrame`: Edge lists with `:src` and `:dst` columns (string IDs), optional `:weight` column
+	- `nodes_1, nodes_2::Union{Nothing,DataFrame,Vector}`: Optional node universes to include isolates
+	- `resolution_sweep::Bool`: Use CHAMP multi-resolution community detection (default false)
+	- `resolution::Float64`: Resolution parameter for modularity optimization (default 1.0)
+	- `directed::Bool`: Treat networks as directed (default true)
+	- `weighted::Bool`: Use edge weights if present (default true)
+	- `n_resolutions::Int`: Number of resolutions for CHAMP sweep (default 15)
+	- `n_runs_per_gamma::Int`: Leiden algorithm runs per resolution (default 5)
+	- `n_iterations_per_run::Int`: Iterations per Leiden run (default 10)
+	- `seed::Union{Int,Nothing}`: Random seed for reproducibility (default nothing)
+	- `provided_membership_1, provided_membership_2`: Pre-computed community assignments as DataFrame, Vector, or Dict
 
-        #	Select appropriate constructor and builder based on configuration
-            if !directed && !weighted
-                #	Undirected binary networks
-                    global_stats_1, triad_census_counts_1, node_measures_1 = undirected_binary_constructor(
-                        clean_edges_1, clean_nodes_1;
-                        resolution_sweep = resolution_sweep,
-                        resolution = resolution,
-                        directed = directed,
-                        weighted = weighted,
-                        n_resolutions = n_resolutions,
-                        n_runs_per_gamma = n_runs_per_gamma,
-                        n_iterations_per_run = n_iterations_per_run,
-                        seed = seed,
-                        provided_membership = provided_membership_1
-                    )
+	**Details**
+	The function provides two comparison perspectives:
+	1. **Raw comparison**: Preserves tail differences in degree distributions and other node measures
+	2. **Asinh comparison**: Applies inverse hyperbolic sine transformation to reduce influence of extreme values
 
-                    global_stats_2, triad_census_counts_2, node_measures_2 = undirected_binary_constructor(
-                        clean_edges_2, clean_nodes_2;
-                        resolution_sweep = resolution_sweep,
-                        resolution = resolution,
-                        directed = directed,
-                        weighted = weighted,
-                        n_resolutions = n_resolutions,
-                        n_runs_per_gamma = n_runs_per_gamma,
-                        n_iterations_per_run = n_iterations_per_run,
-                        seed = seed,
-                        provided_membership = provided_membership_2
-                    )
+	Multi-indicator categories (Triad Census, K-Core, S-Core, Community Structure) are weighted by 1/n_indicators to ensure balanced contributions across structural aspects.
 
-                #	Build feature vectors
-                    feature_vector_1 = symmetric_binary_feature_builder(global_stats_1, triad_census_counts_1, node_measures_1)
-                    feature_vector_2 = symmetric_binary_feature_builder(global_stats_2, triad_census_counts_2, node_measures_2)
+	Feature computation includes:
+	- Global metrics (density, components, etc.) with appropriate transformations
+	- Node-level distributions compared via Jensen-Shannon divergence
+	- Category-weighted distances for balanced structural comparison
 
-            elseif !directed && weighted
-                #	Undirected weighted networks
-                    global_stats_1, triad_census_counts_1, node_measures_1 = undirected_weighted_constructor(
-                        clean_edges_1, clean_nodes_1;
-                        resolution_sweep = resolution_sweep,
-                        resolution = resolution,
-                        directed = directed,
-                        weighted = weighted,
-                        n_resolutions = n_resolutions,
-                        n_runs_per_gamma = n_runs_per_gamma,
-                        n_iterations_per_run = n_iterations_per_run,
-                        seed = seed,
-                        provided_membership = provided_membership_1
-                    )
+	**Value**
+	Returns a NamedTuple with fields:
+	- `combined_features::DataFrame`: Aligned feature vectors with columns [:measure, :network_1_values, :network_2_values, :type, :weight]
+	- `overall_distance_raw::Float64`: Weighted Euclidean distance using raw JS divergences
+	- `overall_similarity_raw::Float64`: Raw similarity score ∈ (0,1]
+	- `overall_distance_asinh::Float64`: Weighted Euclidean distance using asinh JS divergences
+	- `overall_similarity_asinh::Float64`: Asinh similarity score ∈ (0,1]
+	- `type_contributions_raw::DataFrame`: Per-type distance breakdown for raw comparison
+	- `type_contributions_asinh::DataFrame`: Per-type distance breakdown for asinh comparison
 
-                    global_stats_2, triad_census_counts_2, node_measures_2 = undirected_weighted_constructor(
-                        clean_edges_2, clean_nodes_2;
-                        resolution_sweep = resolution_sweep,
-                        resolution = resolution,
-                        directed = directed,
-                        weighted = weighted,
-                        n_resolutions = n_resolutions,
-                        n_runs_per_gamma = n_runs_per_gamma,
-                        n_iterations_per_run = n_iterations_per_run,
-                        seed = seed,
-                        provided_membership = provided_membership_2
-                    )
+	**Examples**
+	```julia
+		# Compare two social networks
+		edges1 = DataFrame(src=["A","B","C"], dst=["B","C","A"])
+		edges2 = DataFrame(src=["X","Y","Z"], dst=["Y","Z","X"])
+		result = network_comparator(edges1, nothing, edges2, nothing; directed=true, weighted=false)
+		println("Raw similarity: ", result.overall_similarity_raw)
+		println("Asinh similarity: ", result.overall_similarity_asinh)
 
-                #	Build feature vectors
-                    feature_vector_1 = symmetric_weighted_feature_builder(global_stats_1, triad_census_counts_1, node_measures_1)
-                    feature_vector_2 = symmetric_weighted_feature_builder(global_stats_2, triad_census_counts_2, node_measures_2)
-
-            elseif directed && !weighted
-                #	Directed binary networks
-                    global_stats_1, triad_census_counts_1, node_measures_1 = directed_binary_constructor(
-                        clean_edges_1, clean_nodes_1;
-                        resolution_sweep = resolution_sweep,
-                        resolution = resolution,
-                        directed = directed,
-                        weighted = weighted,
-                        n_resolutions = n_resolutions,
-                        n_runs_per_gamma = n_runs_per_gamma,
-                        n_iterations_per_run = n_iterations_per_run,
-                        seed = seed,
-                        provided_membership = provided_membership_1
-                    )
-
-                    global_stats_2, triad_census_counts_2, node_measures_2 = directed_binary_constructor(
-                        clean_edges_2, clean_nodes_2;
-                        resolution_sweep = resolution_sweep,
-                        resolution = resolution,
-                        directed = directed,
-                        weighted = weighted,
-                        n_resolutions = n_resolutions,
-                        n_runs_per_gamma = n_runs_per_gamma,
-                        n_iterations_per_run = n_iterations_per_run,
-                        seed = seed,
-                        provided_membership = provided_membership_2
-                    )
-
-                #	Build feature vectors
-                    feature_vector_1 = directed_binary_feature_builder(global_stats_1, triad_census_counts_1, node_measures_1)
-                    feature_vector_2 = directed_binary_feature_builder(global_stats_2, triad_census_counts_2, node_measures_2)
-
-            else
-                #	Directed weighted networks
-                    global_stats_1, triad_census_counts_1, node_measures_1 = directed_weighted_constructor(
-                        clean_edges_1, clean_nodes_1;
-                        resolution_sweep = resolution_sweep,
-                        resolution = resolution,
-                        directed = directed,
-                        weighted = weighted,
-                        n_resolutions = n_resolutions,
-                        n_runs_per_gamma = n_runs_per_gamma,
-                        n_iterations_per_run = n_iterations_per_run,
-                        seed = seed,
-                        provided_membership = provided_membership_1
-                    )
-
-                    global_stats_2, triad_census_counts_2, node_measures_2 = directed_weighted_constructor(
-                        clean_edges_2, clean_nodes_2;
-                        resolution_sweep = resolution_sweep,
-                        resolution = resolution,
-                        directed = directed,
-                        weighted = weighted,
-                        n_resolutions = n_resolutions,
-                        n_runs_per_gamma = n_runs_per_gamma,
-                        n_iterations_per_run = n_iterations_per_run,
-                        seed = seed,
-                        provided_membership = provided_membership_2
-                    )
-
-                #	Build feature vectors
-                    feature_vector_1 = directed_weighted_feature_builder(global_stats_1, triad_census_counts_1, node_measures_1)
-                    feature_vector_2 = directed_weighted_feature_builder(global_stats_2, triad_census_counts_2, node_measures_2)
-            end
-
-         #	========== GLOBAL METRIC NORMALIZATIONS ==========
-
-        #   Isolate Numerators
-            n_1 = parse(Int64, global_stats_1.value[1])
-            n_2 = parse(Int64, global_stats_2.value[1])
-
-        #   Normalize Feature Vectors
-            feature_vector_1, feature_vector_2 = _global_metric_normalizer(feature_vector_1,feature_vector_2, 
-                                                                           node_measures_1, node_measures_2,
-                                                                           n_1, n_2, directed)
-
-        #	========== ALIGN AND COMBINE FEATURE VECTORS ==========
-
-        #	Rename columns for clarity
-            rename!(feature_vector_1, ["measure", "network_1_values", "type"])
-            rename!(feature_vector_2, ["measure", "network_2_values", "type"])
-
-        #	Create measure indices with sequential IDs
-            measures_1 = DataFrame(ID_1 = 1:nrow(feature_vector_1), measure = feature_vector_1.measure)
-            measures_2 = DataFrame(ID_2 = 1:nrow(feature_vector_2), measure = feature_vector_2.measure)
-            
-        #	Outer join to capture all unique measures
-            combined_measures = outerjoin(measures_1, measures_2; on = :measure)
-            combined_measures = select(combined_measures, :measure, :ID_1, :ID_2)
-            
-        #	Handle missing features by assigning sequential IDs
-            id_1_missing = sum(ismissing.(combined_measures.ID_1))
-            id_2_missing = sum(ismissing.(combined_measures.ID_2))
-
-            if id_1_missing > 0
-                missing_number = maximum(skipmissing(combined_measures.ID_1)) + 1
-                combined_measures.ID_1[ismissing.(combined_measures.ID_1)] .= missing_number 
-            end
-        
-            if id_2_missing > 0
-                missing_number = maximum(skipmissing(combined_measures.ID_2)) + 1
-                combined_measures.ID_2[ismissing.(combined_measures.ID_2)] .= missing_number 
-            end
-            
-            combined_measures.ID_1 = convert.(Int64, combined_measures.ID_1)
-            combined_measures.ID_2 = convert.(Int64, combined_measures.ID_2)
-
-        #	Sort by larger feature set to preserve ordering
-            feature_length_1 = nrow(feature_vector_1)
-            feature_length_2 = nrow(feature_vector_2)
-
-            if feature_length_1 >= feature_length_2
-                sort!(combined_measures, [:ID_1, :ID_2])
-            else
-                sort!(combined_measures, [:ID_2, :ID_1])
-            end
-            
-            select!(combined_measures, :measure)
-
-        #	Join values from both networks, zero-fill missing
-            leftjoin!(combined_measures, feature_vector_1[:, 1:2], on = :measure)
-            combined_measures.network_1_values[ismissing.(combined_measures.network_1_values)] .= 0.0
-            combined_measures.network_1_values = convert.(Float64, combined_measures.network_1_values)
-
-            leftjoin!(combined_measures, feature_vector_2[:, 1:2], on = :measure)
-            combined_measures.network_2_values[ismissing.(combined_measures.network_2_values)] .= 0.0
-            combined_measures.network_2_values = convert.(Float64, combined_measures.network_2_values)
-
-        #	Add feature types
-            types_index = unique(vcat(feature_vector_1[:, [1, 3]], feature_vector_2[:, [1, 3]]))
-            leftjoin!(combined_measures, types_index, on = :measure)
-            combined_measures.type = string.(combined_measures.type)
-
-        #	========== COMPUTE SIMILARITY METRICS ==========
-
-        #	Compute overall Euclidean distance and similarity
-            dist_summary = _compute_overall_distance(combined_measures)
-
-        #	Compute type-level contributions
-            type_contrib = _compute_type_contributions(
-                combined_measures,
-                dist_summary.squared_distance
-            )
-
-        #	Return results
-            return (combined_features = combined_measures,
-                    overall_distance = dist_summary.distance,
-                    overall_similarity = dist_summary.similarity,
-                    type_contributions = type_contrib)
-    end
-    @doc raw"""
-    **Description**
-    Compare two networks by computing comprehensive feature vectors and measuring their similarity using Euclidean distance in feature space.
-
-    **Usage**
-    `network_comparator(edges_1, nodes_1, edges_2, nodes_2; resolution_sweep=false, resolution=1.0, directed=true, weighted=true, n_resolutions=15, n_runs_per_gamma=5, n_iterations_per_run=10, seed=nothing, provided_membership_1=nothing, provided_membership_2=nothing)`
-
-    **Arguments**
-    - `edges_1, edges_2::DataFrame`: Edge lists with `:src` and `:dst` columns (string IDs), optional `:weight` column
-    - `nodes_1, nodes_2::Union{Nothing,DataFrame,Vector}`: Optional node universes to include isolates
-    - `resolution_sweep::Bool`: Use CHAMP multi-resolution community detection (default false)
-    - `resolution::Float64`: Resolution parameter for modularity optimization (default 1.0)
-    - `directed::Bool`: Treat networks as directed (default true)
-    - `weighted::Bool`: Use edge weights if present (default true)
-    - `n_resolutions::Int`: Number of resolutions for CHAMP sweep (default 15)
-    - `n_runs_per_gamma::Int`: Leiden algorithm runs per resolution (default 5)
-    - `n_iterations_per_run::Int`: Iterations per Leiden run (default 10)
-    - `seed::Union{Int,Nothing}`: Random seed for reproducibility (default nothing)
-    - `provided_membership_1, provided_membership_2`: Pre-computed community assignments as DataFrame, Vector, or Dict
-
-    **Details**
-    The function automatically selects the appropriate network constructor and feature builder based on the `directed` and `weighted` parameters, resulting in four possible configurations:
-    - Undirected Binary: symmetric unweighted networks
-    - Undirected Weighted: symmetric weighted networks  
-    - Directed Binary: asymmetric unweighted networks
-    - Directed Weighted: asymmetric weighted networks
-
-    Features are computed at multiple levels (global, meso, node) and include component statistics, link statistics, degree distributions, clustering coefficients, community structure, and centrality measures. When features exist in one network but not the other, they are zero-filled to maintain alignment.
-
-    **Value**
-    Returns a NamedTuple with fields:
-    - `combined_features::DataFrame`: Aligned feature vectors with columns [:measure, :network_1_values, :network_2_values, :type]
-    - `overall_distance::Float64`: Euclidean distance between feature vectors
-    - `overall_similarity::Float64`: Similarity score ∈ (0,1] computed as 1/(1+distance)
-    - `type_contributions::DataFrame`: Per-type distance breakdown with normalized contributions
-
-    **Examples**
-    ```julia
-    # Compare two social networks
-    edges1 = DataFrame(src=["A","B","C"], dst=["B","C","A"])
-    edges2 = DataFrame(src=["X","Y","Z"], dst=["Y","Z","X"])
-    result = network_comparator(edges1, nothing, edges2, nothing; directed=true, weighted=false)
-    println("Similarity: ", result.overall_similarity)
-
-    # Compare weighted networks with community detection
-    edges1 = DataFrame(src=["A","B"], dst=["B","C"], weight=[1.5, 2.0])
-    edges2 = DataFrame(src=["X","Y"], dst=["Y","Z"], weight=[1.0, 3.0])
-    result = network_comparator(edges1, nothing, edges2, nothing; 
-                            directed=false, weighted=true, resolution_sweep=true)
-    ```
-
-    **See Also**
-    `undirected_binary_constructor`, `undirected_weighted_constructor`, `directed_binary_constructor`, `directed_weighted_constructor`
-    """ network_comparator
+		# Compare weighted networks with resolution sweep
+		edges1 = DataFrame(src=["A","B"], dst=["B","C"], weight=[1.5, 2.0])
+		edges2 = DataFrame(src=["X","Y"], dst=["Y","Z"], weight=[1.0, 3.0])
+		result = network_comparator(edges1, nothing, edges2, nothing; 
+									directed=false, weighted=true, resolution_sweep=true)
+		
+		# Examine type contributions
+		println(result.type_contributions_raw)
+		println(result.type_contributions_asinh)
+	```
+	**See Also**
+	`undirected_binary_constructor`, `undirected_weighted_constructor`, `directed_binary_constructor`, `directed_weighted_constructor`
+	""" network_comparator
 
 #   Exporting Objects
     export adjusted_rand_index,
