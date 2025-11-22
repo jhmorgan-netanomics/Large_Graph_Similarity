@@ -4298,10 +4298,12 @@ THE SOFTWARE.
 
 #	Helper Function: Single Leiden Run
 	function _leiden_single_run_preprocessed(adj::SparseMatrixCSC,
-	                                        resolution::Float64,
-	                                        n_iterations::Int;
-	                                        directed::Bool = false,
-	                                        seed::Union{Int,Nothing} = nothing)
+											resolution::Float64,
+											n_iterations::Int;
+											directed::Bool = false,
+											seed::Union{Int,Nothing} = nothing,
+											show_iteration_progress::Bool = false,
+											run_description::String = "")
 		"""
 		Args:
 			adj::SparseMatrixCSC: preprocessed adjacency matrix
@@ -4309,6 +4311,8 @@ THE SOFTWARE.
 			n_iterations::Int: maximum iterations per run
 			directed::Bool: graph type for modularity (default = false)
 			seed::Union{Int,Nothing}: random seed for this run
+			show_iteration_progress::Bool: show per-iteration progress (default = false)
+			run_description::String: description for progress bar (e.g., "Run 1/5")
 		Returns:
 			NamedTuple: (membership, modularity, n_communities)
 		Notes:
@@ -4335,10 +4339,21 @@ THE SOFTWARE.
 			iteration = 0
 			improved = true
 		
+		#	Optional Iteration Progress Bar
+			iter_prog = nothing
+			if show_iteration_progress
+				desc = isempty(run_description) ? "Iterations" : "$run_description - Iterations"
+				iter_prog = Progress(n_iterations, desc=desc, enabled=true)
+			end
+		
 		#	Main Leiden Loop
 			while improved && iteration < n_iterations
 				improved = false
 				iteration += 1
+				
+				if show_iteration_progress && iter_prog !== nothing
+					next!(iter_prog)
+				end
 				
 				#	Build Neighbor Lists for Current Level
 					n = size(adj, 1)
@@ -4396,9 +4411,9 @@ THE SOFTWARE.
 								#	Test Move
 									membership[node] = target
 									new_Q = calculate_modularity(adj, membership; 
-									                            weighted=true, 
-									                            directed=directed, 
-									                            γ=resolution)
+																weighted=true, 
+																directed=directed, 
+																γ=resolution)
 									
 									if new_Q > best_Q
 										best_Q = new_Q
@@ -4430,22 +4445,27 @@ THE SOFTWARE.
 					
 					#	Contract (already preprocessed, so preserve type)
 						adj = _contract_by_membership(adj, membership; 
-						                            directed=directed, 
-						                            weighted=true)
+													directed=directed, 
+													weighted=true)
 						
 						membership = collect(1:size(adj, 1))
 						Q = calculate_modularity(adj, membership; 
-						                        weighted=true, 
-						                        directed=directed, 
-						                        γ=resolution)
+												weighted=true, 
+												directed=directed, 
+												γ=resolution)
+			end
+		
+		#	Complete iteration progress if early termination
+			if show_iteration_progress && iter_prog !== nothing && iteration < n_iterations
+				finish!(iter_prog)
 			end
 		
 		#	Map Back to Original Nodes
 			final_membership = [membership[orig_to_curr[i]] for i in 1:n_original]
 			Q_final = calculate_modularity(adj_original, final_membership; 
-			                              weighted=true, 
-			                              directed=directed, 
-			                              γ=resolution)
+										  weighted=true, 
+										  directed=directed, 
+										  γ=resolution)
 		
 		#	Return Community Solution
 			return (
@@ -4455,16 +4475,18 @@ THE SOFTWARE.
 			)
 	end
 
-#	Leiden Community Detection (Main Interface)
+#	Leiden Community Detection Main Interface
 	function leiden_community_detection(edges::DataFrame;
-	                                   nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}}=nothing,
-	                                   n_iterations::Int=10,
-	                                   n_runs::Int=5,
-	                                   resolution::Float64=1.0,
-	                                   weighted::Bool=true,
-	                                   directed::Bool=true,
-	                                   seed::Union{Nothing,Int}=nothing,
-	                                   test_flag::Bool=false)
+									   nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}}=nothing,
+									   n_iterations::Int=10,
+									   n_runs::Int=5,
+									   resolution::Float64=1.0,
+									   weighted::Bool=true,
+									   directed::Bool=true,
+									   seed::Union{Nothing,Int}=nothing,
+									   test_flag::Bool=false,
+									   show_progress::Bool=true,
+									   show_iteration_progress::Bool=false)
 		"""
 		Args:
 			edges::DataFrame: edge list with :src, :dst, optional :weight
@@ -4476,6 +4498,8 @@ THE SOFTWARE.
 			directed::Bool: treat graph as directed (default = true)
 			seed::Union{Nothing,Int}: RNG seed per run if provided
 			test_flag::Bool: print diagnostics (default = false)
+			show_progress::Bool: show progress bar for runs (default = true)
+			show_iteration_progress::Bool: show detailed iteration progress (default = false)
 		Returns:
 			NamedTuple: (membership, modularity, n_communities, node_names)
 		Notes:
@@ -4488,8 +4512,8 @@ THE SOFTWARE.
 		
 		#	Build Raw Adjacency Matrix
 			adj, node_to_idx, idx_to_node = _graph_to_sparse_matrix(edges; 
-			                                                        nodes=nodes, 
-			                                                        weighted=true)
+																	nodes=nodes, 
+																	weighted=true)
 			@assert issparse(adj) "Adjacency must be sparse"
 			n = size(adj, 1)
 			@assert size(adj, 2) == n "Adjacency must be square"
@@ -4542,23 +4566,41 @@ THE SOFTWARE.
 				println("DEBUG leiden: nnz(A_eff)=", nnz(A_eff), "  sum(A_eff)=", sum(A_eff))
 			end
 		
-		#	Multi-Start Leiden Optimization
+		#	Multi-Start Leiden Optimization with Progress Bar
 			best_Q = -Inf
 			best_m = Vector{Int}()
+			
+			#	Create progress bar for runs
+				graph_type = string(weighted ? "Weighted" : "Unweighted", " ",
+								   directed ? "Directed" : "Undirected")
+				desc = "Leiden ($graph_type, γ=$resolution)"
+				
+				if show_progress
+					prog = Progress(n_runs, desc=desc, enabled=true)
+				end
 			
 			for run in 1:n_runs
 				#	Set Run-Specific Seed
 					local_seed = seed === nothing ? nothing : seed + run - 1
 				
 				#	Execute Single Run on Preprocessed Matrix
+					run_desc = "Run $run/$n_runs"
 					res = _leiden_single_run_preprocessed(A_eff, resolution, n_iterations; 
-					                                     directed=directed, 
-					                                     seed=local_seed)
+														 directed=directed, 
+														 seed=local_seed,
+														 show_iteration_progress=show_iteration_progress,
+														 run_description=run_desc)
 				
 				#	Update Best Solution
 					if res.modularity > best_Q
 						best_Q = res.modularity
 						best_m = res.membership
+					end
+				
+				#	Update progress bar
+					if show_progress
+						next!(prog, showvalues = [(:best_modularity, round(best_Q, digits=4)),
+												  (:best_communities, length(unique(best_m)))])
 					end
 			end
 		
