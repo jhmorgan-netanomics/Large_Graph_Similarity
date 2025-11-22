@@ -14299,6 +14299,35 @@ THE SOFTWARE.
 		   link_statistics,
 		   reciprocity,
 		   assortativity_degree,
+		   skew_about_mean,
+		   kurtosis_about_mean,
+		   undirected_binary_constructor,
+		   symmetric_binary_feature_builder,
+		   undirected_weighted_constructor,
+		   symmetric_weighted_feature_builder,
+		   directed_binary_constructor,
+		   directed_binary_feature_builder,
+		   directed_weighted_constructor,
+		   directed_weighted_feature_builder,
 		   network_comparator
+
+# 	Bring in the CLI submodule
+	include("CLI.jl")   # defines module diffusion_sim.CLI
+
+# 	Executable entrypoint for PackageCompiler:
+"""
+	Executable entrypoint. Returns 0 on success, non-zero on error.
+"""
+	function julia_main()::Cint
+		try
+			#	Delegate to CLI with ARGS when the binary starts
+				CLI.cli_main(ARGS)
+				return 0
+		catch err
+			#	Print a concise error + backtrace; non-zero exit for shell/R
+				@error "Fatal error" exception=(err, catch_backtrace())
+				return 1
+		end
+	end
 		   
 end # module julia_env

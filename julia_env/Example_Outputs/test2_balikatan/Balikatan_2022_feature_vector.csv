@@ -1,0 +1,192 @@
+measure,value,type
+num_nodes,1347.0,Component Measure
+num_edges,3146.0,Component Measure
+num_scc,1315.0,Component Measure
+largest_wcc_proportion,0.806978,Component Measure
+second_largest_wcc_proportion,0.040089,Component Measure
+min_wcc_size_proportion,0.000742,Component Measure
+largest_scc_proportion,0.013363,Component Measure
+second_largest_scc_proportion,0.005197,Component Measure
+num_isolates_proportion,0.764706,Component Measure
+num_dyads_proportion,0.095588,Component Measure
+num_triads_proportion,0.051471,Component Measure
+num_groups_proportion,0.088235,Component Measure
+bow_tie_scc_fraction,0.013363028953229399,Component Measure
+bow_tie_in_fraction,0.014847809948032665,Component Measure
+bow_tie_out_fraction,0.6139569413511508,Component Measure
+all_link_min,1.0,Link Measure
+all_link_max,1.0,Link Measure
+all_link_mean,1.0,Link Measure
+all_link_std,0.0,Link Measure
+all_link_sum,3146.0,Link Measure
+non_self_proportion,0.9869675778766688,Link Measure
+non_self_min,1.0,Link Measure
+non_self_max,1.0,Link Measure
+non_self_mean,1.0,Link Measure
+non_self_std,0.0,Link Measure
+non_self_sum,3105.0,Link Measure
+self_loops_proportion,0.013032422123331213,Link Measure
+self_loops_min,1.0,Link Measure
+self_loops_max,1.0,Link Measure
+self_loops_mean,1.0,Link Measure
+self_loops_std,0.0,Link Measure
+self_loops_sum,41.0,Link Measure
+degree assortativity,-0.165304,Global Network Measure
+transitivity,0.231834,Global Network Measure
+local clustering coefficient,0.426538,Global Network Measure
+reciprocity,0.010413,Global Network Measure
+density,0.001713,Global Network Measure
+resolution,1.0,Global Network Measure
+modularity,0.5961,Global Network Measure
+003,0.988838,Triad Census
+012,0.01026,Triad Census
+102,0.000111,Triad Census
+021D,0.000703,Triad Census
+021U,1.2e-5,Triad Census
+021C,5.1e-5,Triad Census
+111D,0.0,Triad Census
+111U,1.0e-5,Triad Census
+030T,1.2e-5,Triad Census
+030C,0.0,Triad Census
+201,0.0,Triad Census
+120D,0.0,Triad Census
+120U,2.0e-6,Triad Census
+120C,0.0,Triad Census
+210,0.0,Triad Census
+300,0.0,Triad Census
+k_core_in_0,0.273092,K-Core Decomposition
+k_core_in_1,0.499598,K-Core Decomposition
+k_core_in_2,0.227309,K-Core Decomposition
+k_core_out_0,0.939759,K-Core Decomposition
+k_core_out_1,0.039357,K-Core Decomposition
+k_core_out_2,0.020884,K-Core Decomposition
+k_core_undirected_0,0.001606,K-Core Decomposition
+k_core_undirected_1,0.416867,K-Core Decomposition
+k_core_undirected_2,0.259438,K-Core Decomposition
+k_core_undirected_3,0.114859,K-Core Decomposition
+k_core_undirected_4,0.058635,K-Core Decomposition
+k_core_undirected_5,0.035341,K-Core Decomposition
+k_core_undirected_6,0.032932,K-Core Decomposition
+k_core_undirected_7,0.010442,K-Core Decomposition
+k_core_undirected_8,0.016867,K-Core Decomposition
+k_core_undirected_9,0.010442,K-Core Decomposition
+k_core_undirected_10,0.008032,K-Core Decomposition
+k_core_undirected_11,0.034538,K-Core Decomposition
+Community_1,0.174297,Community Structure
+Community_2,0.168675,Community Structure
+Community_3,0.142169,Community Structure
+Community_4,0.11004,Community Structure
+Community_5,0.100402,Community Structure
+Community_6,0.069076,Community Structure
+Community_7,0.043373,Community Structure
+Community_8,0.038554,Community Structure
+Community_9,0.032932,Community Structure
+Community_10,0.032129,Community Structure
+Community_11,0.007229,Community Structure
+Community_12,0.005622,Community Structure
+Community_13,0.004819,Community Structure
+Community_14,0.004819,Community Structure
+Community_15,0.004819,Community Structure
+Community_16,0.004819,Community Structure
+Community_17,0.004016,Community Structure
+Community_18,0.003213,Community Structure
+Community_19,0.003213,Community Structure
+Community_20,0.003213,Community Structure
+Community_21,0.003213,Community Structure
+Community_22,0.00241,Community Structure
+Community_23,0.00241,Community Structure
+Community_24,0.00241,Community Structure
+Community_25,0.00241,Community Structure
+Community_26,0.00241,Community Structure
+Community_27,0.00241,Community Structure
+Community_28,0.00241,Community Structure
+Community_29,0.001606,Community Structure
+Community_30,0.001606,Community Structure
+Community_31,0.001606,Community Structure
+Community_32,0.001606,Community Structure
+Community_33,0.001606,Community Structure
+Community_34,0.001606,Community Structure
+Community_35,0.001606,Community Structure
+Community_36,0.001606,Community Structure
+Community_37,0.001606,Community Structure
+Community_38,0.001606,Community Structure
+Community_39,0.001606,Community Structure
+Community_40,0.001606,Community Structure
+Community_41,0.001606,Community Structure
+Community_42,0.000803,Community Structure
+Community_43,0.000803,Community Structure
+out_degree_normalized_mean,0.001853,Degree Measures
+out_degree_normalized_median,0.0,Degree Measures
+out_degree_normalized_std,0.01429,Degree Measures
+out_degree_normalized_skew,14.507539,Degree Measures
+out_degree_normalized_kurtosis,279.193772,Degree Measures
+in_degree_normalized_mean,0.001853,Degree Measures
+in_degree_normalized_median,0.001486,Degree Measures
+in_degree_normalized_std,0.002012,Degree Measures
+in_degree_normalized_skew,3.293997,Degree Measures
+in_degree_normalized_kurtosis,15.133383,Degree Measures
+in_out_ratio_mean,0.051179,Degree Measures
+in_out_ratio_median,0.0,Degree Measures
+in_out_ratio_std,0.302534,Degree Measures
+in_out_ratio_skew,9.107075,Degree Measures
+in_out_ratio_kurtosis,105.590967,Degree Measures
+in_group_indegree_ratio_mean,0.834424,Degree Measures
+in_group_indegree_ratio_median,1.0,Degree Measures
+in_group_indegree_ratio_std,0.28607,Degree Measures
+in_group_indegree_ratio_skew,-1.653714,Degree Measures
+in_group_indegree_ratio_kurtosis,1.694299,Degree Measures
+in_group_outdegree_ratio_mean,0.107446,Degree Measures
+in_group_outdegree_ratio_median,0.0,Degree Measures
+in_group_outdegree_ratio_std,0.301509,Degree Measures
+in_group_outdegree_ratio_skew,2.496506,Degree Measures
+in_group_outdegree_ratio_kurtosis,4.339853,Degree Measures
+in_reach_2_normalized_mean,0.009107,Local Reach
+in_reach_2_normalized_median,0.010401,Local Reach
+in_reach_2_normalized_std,0.006649,Local Reach
+in_reach_2_normalized_skew,0.433173,Local Reach
+in_reach_2_normalized_kurtosis,-0.658314,Local Reach
+out_reach_2_normalized_mean,0.009107,Local Reach
+out_reach_2_normalized_median,0.000743,Local Reach
+out_reach_2_normalized_std,0.053827,Local Reach
+out_reach_2_normalized_skew,7.681806,Local Reach
+out_reach_2_normalized_kurtosis,61.160143,Local Reach
+undirected_reach_2_normalized_mean,0.000154,Local Reach
+undirected_reach_2_normalized_median,0.000105,Local Reach
+undirected_reach_2_normalized_std,0.000122,Local Reach
+undirected_reach_2_normalized_skew,0.446198,Local Reach
+undirected_reach_2_normalized_kurtosis,-1.026078,Local Reach
+ego_density_mean,0.623537,Local Structure
+ego_density_median,0.5,Local Structure
+ego_density_std,0.255952,Local Structure
+ego_density_skew,0.270578,Local Structure
+ego_density_kurtosis,-0.270975,Local Structure
+density_clustering_coefficient_mean,0.432756,Local Structure
+density_clustering_coefficient_median,0.333333,Local Structure
+density_clustering_coefficient_std,0.36713,Local Structure
+density_clustering_coefficient_skew,0.381366,Local Structure
+density_clustering_coefficient_kurtosis,-1.253873,Local Structure
+page_rank_mean,0.000803,Influence
+page_rank_median,0.000744,Influence
+page_rank_std,0.000273,Influence
+page_rank_skew,10.218367,Influence
+page_rank_kurtosis,136.845138,Influence
+salsa_hub_mean,0.000803,Influence
+salsa_hub_median,0.0,Influence
+salsa_hub_std,0.002295,Influence
+salsa_hub_skew,2.508426,Influence
+salsa_hub_kurtosis,4.299106,Influence
+salsa_authority_mean,0.000803,Influence
+salsa_authority_median,0.000853,Influence
+salsa_authority_std,0.000201,Influence
+salsa_authority_skew,-3.761804,Influence
+salsa_authority_kurtosis,12.17072,Influence
+modularity_vitality_hub_mean,0.000215,Influence
+modularity_vitality_hub_median,0.000142,Influence
+modularity_vitality_hub_std,0.000818,Influence
+modularity_vitality_hub_skew,15.811631,Influence
+modularity_vitality_hub_kurtosis,292.990971,Influence
+modularity_vitality_bridge_mean,0.000204,Influence
+modularity_vitality_bridge_median,0.0,Influence
+modularity_vitality_bridge_std,0.001487,Influence
+modularity_vitality_bridge_skew,24.182547,Influence
+modularity_vitality_bridge_kurtosis,708.514922,Influence
