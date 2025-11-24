@@ -606,7 +606,6 @@ using Large_Graph_Similarity
 				- --function-help <name> (prints docstring for a function and exits)
 				- analysis / comparison modes for ORA or CSV inputs
 		"""
-
 		#	Parse arguments
 			s = ArgParseSettings(
 				prog = "Large Graph Similarity",
@@ -784,7 +783,7 @@ using Large_Graph_Similarity
 				
 					if parsed_args["partition-1"] !== nothing
 						partition_1 = _load_partition(parsed_args["partition-1"], nodes_1; 
-													verbose = verbose)
+													 verbose = verbose)
 					end
 			else
 				throw(ArgumentError("Must provide either --ora-xml-1 or --edgelist-1"))
@@ -792,7 +791,7 @@ using Large_Graph_Similarity
 		
 		#	Determine if comparison mode
 			if mode == "comparison" || parsed_args["ora-xml-2"] !== nothing || 
-			parsed_args["edgelist-2"] !== nothing
+			   parsed_args["edgelist-2"] !== nothing
 				mode = "comparison"
 			end
 		
@@ -829,7 +828,7 @@ using Large_Graph_Similarity
 					
 						if parsed_args["partition-2"] !== nothing
 							partition_2 = _load_partition(parsed_args["partition-2"], nodes_2; 
-														verbose = verbose)
+														 verbose = verbose)
 						end
 				else
 					throw(ArgumentError("Comparison mode requires second network"))
@@ -838,120 +837,101 @@ using Large_Graph_Similarity
 		
 		#	Execute analysis or comparison
 			if mode == "analysis"
-				if verbose
-					println("\n=== Running Network Analysis ===")
-				end
+				#	Announcing Analysis Mode
+					if verbose
+						println("\n=== Running Network Analysis ===")
+					end
 				
-				#	Undirected / unweighted
-				if !parsed_args["directed"] && !parsed_args["weighted"]
-					global_stats, triad_census_counts, node_measures = undirected_binary_constructor(
-						edges_1, nodes_1;
-						resolution_sweep = parsed_args["resolution-sweep"],
-						resolution = parsed_args["resolution"],
-						directed = parsed_args["directed"],
-						weighted = parsed_args["weighted"],
-						n_resolutions = parsed_args["n-resolutions"],
-						n_runs_per_gamma = parsed_args["n-runs"],
-						n_iterations_per_run = parsed_args["n-iterations"],
-						seed = parsed_args["seed"],
-						provided_membership = partition_1
-					)
+				#	Generating Data based on Network Type
+					if !parsed_args["directed"] && !parsed_args["weighted"]
+						#	Undirected / unweighted
+							global_stats, triad_census_counts, node_measures = undirected_binary_constructor(
+								edges_1, nodes_1;
+								resolution_sweep = parsed_args["resolution-sweep"],
+								resolution = parsed_args["resolution"],
+								directed = parsed_args["directed"],
+								weighted = parsed_args["weighted"],
+								n_resolutions = parsed_args["n-resolutions"],
+								n_runs_per_gamma = parsed_args["n-runs"],
+								n_iterations_per_run = parsed_args["n-iterations"],
+								seed = parsed_args["seed"],
+								provided_membership = partition_1
+							)
+							
+							feature_vector = symmetric_binary_feature_builder(
+								global_stats, triad_census_counts, node_measures
+							)
+					elseif !parsed_args["directed"] && parsed_args["weighted"]
+						#	Undirected / weighted
+							global_stats, triad_census_counts, node_measures = undirected_weighted_constructor(
+									edges_1, nodes_1;
+									resolution_sweep = parsed_args["resolution-sweep"],
+									resolution = parsed_args["resolution"],
+									directed = parsed_args["directed"],
+									weighted = parsed_args["weighted"],
+									n_resolutions = parsed_args["n-resolutions"],
+									n_runs_per_gamma = parsed_args["n-runs"],
+									n_iterations_per_run = parsed_args["n-iterations"],
+									seed = parsed_args["seed"],
+									provided_membership = partition_1
+							)
+								
+							feature_vector = symmetric_weighted_feature_builder(
+								global_stats, triad_census_counts, node_measures
+							)
+					elseif parsed_args["directed"] && !parsed_args["weighted"]
+						#	Directed / unweighted
+							global_stats, triad_census_counts, node_measures = directed_binary_constructor(
+									edges_1, nodes_1;
+									resolution_sweep = parsed_args["resolution-sweep"],
+									resolution = parsed_args["resolution"],
+									directed = parsed_args["directed"],
+									weighted = parsed_args["weighted"],
+									n_resolutions = parsed_args["n-resolutions"],
+									n_runs_per_gamma = parsed_args["n-runs"],
+									n_iterations_per_run = parsed_args["n-iterations"],
+									seed = parsed_args["seed"],
+									provided_membership = partition_1
+							)
+								
+							feature_vector = directed_binary_feature_builder(
+								global_stats, triad_census_counts, node_measures
+							)
+					else
+						#	Directed / weighted
+							global_stats, triad_census_counts, node_measures = directed_weighted_constructor(
+									edges_1, nodes_1;
+									resolution_sweep = parsed_args["resolution-sweep"],
+									resolution = parsed_args["resolution"],
+									directed = parsed_args["directed"],
+									weighted = parsed_args["weighted"],
+									n_resolutions = parsed_args["n-resolutions"],
+									n_runs_per_gamma = parsed_args["n-runs"],
+									n_iterations_per_run = parsed_args["n-iterations"],
+									seed = parsed_args["seed"],
+									provided_membership = partition_1
+							)
+								
+							feature_vector = directed_weighted_feature_builder(
+								global_stats, triad_census_counts, node_measures
+							)
+					end
 					
-					feature_vector = symmetric_binary_feature_builder(
-						global_stats, triad_census_counts, node_measures
-					)
-				
-				#	Undirected / weighted
-				elseif !parsed_args["directed"] && parsed_args["weighted"]
-					global_stats, triad_census_counts, node_measures = undirected_weighted_constructor(
-						edges_1, nodes_1;
-						resolution_sweep = parsed_args["resolution-sweep"],
-						resolution = parsed_args["resolution"],
-						directed = parsed_args["directed"],
-						weighted = parsed_args["weighted"],
-						n_resolutions = parsed_args["n-resolutions"],
-						n_runs_per_gamma = parsed_args["n-runs"],
-						n_iterations_per_run = parsed_args["n-iterations"],
-						seed = parsed_args["seed"],
-						provided_membership = partition_1
-					)
-					
-					feature_vector = symmetric_weighted_feature_builder(
-						global_stats, triad_census_counts, node_measures
-					)
-				
-				#	Directed / unweighted
-				elseif parsed_args["directed"] && !parsed_args["weighted"]
-					global_stats, triad_census_counts, node_measures = directed_binary_constructor(
-						edges_1, nodes_1;
-						resolution_sweep = parsed_args["resolution-sweep"],
-						resolution = parsed_args["resolution"],
-						directed = parsed_args["directed"],
-						weighted = parsed_args["weighted"],
-						n_resolutions = parsed_args["n-resolutions"],
-						n_runs_per_gamma = parsed_args["n-runs"],
-						n_iterations_per_run = parsed_args["n-iterations"],
-						seed = parsed_args["seed"],
-						provided_membership = partition_1
-					)
-					
-					feature_vector = directed_binary_feature_builder(
-						global_stats, triad_census_counts, node_measures
-					)
-				
-				#	Directed / weighted
-				else
-					global_stats, triad_census_counts, node_measures = directed_weighted_constructor(
-						edges_1, nodes_1;
-						resolution_sweep = parsed_args["resolution-sweep"],
-						resolution = parsed_args["resolution"],
-						directed = parsed_args["directed"],
-						weighted = parsed_args["weighted"],
-						n_resolutions = parsed_args["n-resolutions"],
-						n_runs_per_gamma = parsed_args["n-runs"],
-						n_iterations_per_run = parsed_args["n-iterations"],
-						seed = parsed_args["seed"],
-						provided_membership = partition_1
-					)
-					
-					feature_vector = directed_weighted_feature_builder(
-						global_stats, triad_census_counts, node_measures
-					)
-				end
-				
 				#	Write results
-				_write_analysis_results(
-					global_stats, triad_census_counts, node_measures, feature_vector,
-					output_dir, parsed_args["name-1"];
-					verbose = verbose
-				)
-			
+					_write_analysis_results(
+						global_stats, triad_census_counts, node_measures, feature_vector,
+							output_dir, parsed_args["name-1"];
+							verbose = verbose
+					)
 			else  # comparison mode
-				if verbose
-					println("\n=== Running Network Comparison ===")
-				end
+				#	Announcing Comparator Mode
+					if verbose
+						println("\n=== Running Network Comparison ===")
+					end
 				
-				#	Run comparator (constructors inside comparator handle partitions as needed)
-				result = network_comparator(
-					edges_1, nodes_1, edges_2, nodes_2;
-					resolution_sweep = parsed_args["resolution-sweep"],
-					resolution = parsed_args["resolution"],
-					directed = parsed_args["directed"],
-					weighted = parsed_args["weighted"],
-					n_resolutions = parsed_args["n-resolutions"],
-					n_runs_per_gamma = parsed_args["n-runs"],
-					n_iterations_per_run = parsed_args["n-iterations"],
-					seed = parsed_args["seed"],
-					provided_membership_1 = partition_1,
-					provided_membership_2 = partition_2
-				)
-				
-				#	Also save individual network analyses
-				
-				#	Network 1
-				if !parsed_args["directed"] && !parsed_args["weighted"]
-					global_stats_1, triad_census_1, node_measures_1 = undirected_binary_constructor(
-						edges_1, nodes_1;
+				#	Run comparator (constructors + feature building handled internally)
+					result = network_comparator(
+						edges_1, nodes_1, edges_2, nodes_2;
 						resolution_sweep = parsed_args["resolution-sweep"],
 						resolution = parsed_args["resolution"],
 						directed = parsed_args["directed"],
@@ -960,156 +940,48 @@ using Large_Graph_Similarity
 						n_runs_per_gamma = parsed_args["n-runs"],
 						n_iterations_per_run = parsed_args["n-iterations"],
 						seed = parsed_args["seed"],
-						provided_membership = partition_1
+						provided_membership_1 = partition_1,
+						provided_membership_2 = partition_2
 					)
-					
-					feature_vector_1 = symmetric_binary_feature_builder(
-						global_stats_1, triad_census_1, node_measures_1
-					)
+
+				#	Ensure output directory exists for per-network tables
+					mkpath(output_dir)
+
+				#	Write individual network analyses (no per-network feature builders here)
+					name_1 = parsed_args["name-1"]
+					name_2 = parsed_args["name-2"]
+
+					global_path_1 = joinpath(output_dir, "$(name_1)_global_stats.csv")
+					triad_path_1  = joinpath(output_dir, "$(name_1)_triad_census.csv")
+					node_path_1   = joinpath(output_dir, "$(name_1)_node_measures.csv")
+
+					CSV.write(global_path_1, result.global_stats_1)
+					CSV.write(triad_path_1,  result.triad_census_counts_1)
+					CSV.write(node_path_1,   result.node_measures_1)
+
+					if verbose
+						println("Wrote global statistics to: $global_path_1")
+						println("Wrote triad census to: $triad_path_1")
+						println("Wrote node measures to: $node_path_1")
+					end
+
+					global_path_2 = joinpath(output_dir, "$(name_2)_global_stats.csv")
+					triad_path_2  = joinpath(output_dir, "$(name_2)_triad_census.csv")
+					node_path_2   = joinpath(output_dir, "$(name_2)_node_measures.csv")
+
+					CSV.write(global_path_2, result.global_stats_2)
+					CSV.write(triad_path_2,  result.triad_census_counts_2)
+					CSV.write(node_path_2,   result.node_measures_2)
+
+					if verbose
+						println("Wrote global statistics to: $global_path_2")
+						println("Wrote triad census to: $triad_path_2")
+						println("Wrote node measures to: $node_path_2")
+					end
 				
-				elseif !parsed_args["directed"] && parsed_args["weighted"]
-					global_stats_1, triad_census_1, node_measures_1 = undirected_weighted_constructor(
-						edges_1, nodes_1;
-						resolution_sweep = parsed_args["resolution-sweep"],
-						resolution = parsed_args["resolution"],
-						directed = parsed_args["directed"],
-						weighted = parsed_args["weighted"],
-						n_resolutions = parsed_args["n-resolutions"],
-						n_runs_per_gamma = parsed_args["n-runs"],
-						n_iterations_per_run = parsed_args["n-iterations"],
-						seed = parsed_args["seed"],
-						provided_membership = partition_1
-					)
-					
-					feature_vector_1 = symmetric_weighted_feature_builder(
-						global_stats_1, triad_census_1, node_measures_1
-					)
-				
-				elseif parsed_args["directed"] && !parsed_args["weighted"]
-					global_stats_1, triad_census_1, node_measures_1 = directed_binary_constructor(
-						edges_1, nodes_1;
-						resolution_sweep = parsed_args["resolution-sweep"],
-						resolution = parsed_args["resolution"],
-						directed = parsed_args["directed"],
-						weighted = parsed_args["weighted"],
-						n_resolutions = parsed_args["n-resolutions"],
-						n_runs_per_gamma = parsed_args["n-runs"],
-						n_iterations_per_run = parsed_args["n-iterations"],
-						seed = parsed_args["seed"],
-						provided_membership = partition_1
-					)
-					
-					feature_vector_1 = directed_binary_feature_builder(
-						global_stats_1, triad_census_1, node_measures_1
-					)
-				
-				else
-					global_stats_1, triad_census_1, node_measures_1 = directed_weighted_constructor(
-						edges_1, nodes_1;
-						resolution_sweep = parsed_args["resolution-sweep"],
-						resolution = parsed_args["resolution"],
-						directed = parsed_args["directed"],
-						weighted = parsed_args["weighted"],
-						n_resolutions = parsed_args["n-resolutions"],
-						n_runs_per_gamma = parsed_args["n-runs"],
-						n_iterations_per_run = parsed_args["n-iterations"],
-						seed = parsed_args["seed"],
-						provided_membership = partition_1
-					)
-					
-					feature_vector_1 = directed_weighted_feature_builder(
-						global_stats_1, triad_census_1, node_measures_1
-					)
-				end
-				
-				_write_analysis_results(
-					global_stats_1, triad_census_1, node_measures_1, feature_vector_1,
-					output_dir, parsed_args["name-1"];
-					verbose = verbose
-				)
-				
-				#	Network 2
-				if !parsed_args["directed"] && !parsed_args["weighted"]
-					global_stats_2, triad_census_2, node_measures_2 = undirected_binary_constructor(
-						edges_2, nodes_2;
-						resolution_sweep = parsed_args["resolution-sweep"],
-						resolution = parsed_args["resolution"],
-						directed = parsed_args["directed"],
-						weighted = parsed_args["weighted"],
-						n_resolutions = parsed_args["n-resolutions"],
-						n_runs_per_gamma = parsed_args["n-runs"],
-						n_iterations_per_run = parsed_args["n-iterations"],
-						seed = parsed_args["seed"],
-						provided_membership = partition_2
-					)
-					
-					feature_vector_2 = symmetric_binary_feature_builder(
-						global_stats_2, triad_census_2, node_measures_2
-					)
-				
-				elseif !parsed_args["directed"] && parsed_args["weighted"]
-					global_stats_2, triad_census_2, node_measures_2 = undirected_weighted_constructor(
-						edges_2, nodes_2;
-						resolution_sweep = parsed_args["resolution-sweep"],
-						resolution = parsed_args["resolution"],
-						directed = parsed_args["directed"],
-						weighted = parsed_args["weighted"],
-						n_resolutions = parsed_args["n-resolutions"],
-						n_runs_per_gamma = parsed_args["n-runs"],
-						n_iterations_per_run = parsed_args["n-iterations"],
-						seed = parsed_args["seed"],
-						provided_membership = partition_2
-					)
-					
-					feature_vector_2 = symmetric_weighted_feature_builder(
-						global_stats_2, triad_census_2, node_measures_2
-					)
-				
-				elseif parsed_args["directed"] && !parsed_args["weighted"]
-					global_stats_2, triad_census_2, node_measures_2 = directed_binary_constructor(
-						edges_2, nodes_2;
-						resolution_sweep = parsed_args["resolution-sweep"],
-						resolution = parsed_args["resolution"],
-						directed = parsed_args["directed"],
-						weighted = parsed_args["weighted"],
-						n_resolutions = parsed_args["n-resolutions"],
-						n_runs_per_gamma = parsed_args["n-runs"],
-						n_iterations_per_run = parsed_args["n-iterations"],
-						seed = parsed_args["seed"],
-						provided_membership = partition_2
-					)
-					
-					feature_vector_2 = directed_binary_feature_builder(
-						global_stats_2, triad_census_2, node_measures_2
-					)
-				
-				else
-					global_stats_2, triad_census_2, node_measures_2 = directed_weighted_constructor(
-						edges_2, nodes_2;
-						resolution_sweep = parsed_args["resolution-sweep"],
-						resolution = parsed_args["resolution"],
-						directed = parsed_args["directed"],
-						weighted = parsed_args["weighted"],
-						n_resolutions = parsed_args["n-resolutions"],
-						n_runs_per_gamma = parsed_args["n-runs"],
-						n_iterations_per_run = parsed_args["n-iterations"],
-						seed = parsed_args["seed"],
-						provided_membership = partition_2
-					)
-					
-					feature_vector_2 = directed_weighted_feature_builder(
-						global_stats_2, triad_census_2, node_measures_2
-					)
-				end
-				
-				_write_analysis_results(
-					global_stats_2, triad_census_2, node_measures_2, feature_vector_2,
-					output_dir, parsed_args["name-2"];
-					verbose = verbose
-				)
-				
-				#	Write comparison results
-				_write_comparison_results(result, output_dir; verbose = verbose)
+				#	Write comparison results (uses result.combined_features and similarity scores)
+					_write_comparison_results(result, output_dir; name_1 = parsed_args["name-1"],
+    										  name_2 = parsed_args["name-2"], verbose = verbose)
 			end
 		
 			if verbose
@@ -1123,7 +995,7 @@ using Large_Graph_Similarity
 
 #	Test Configuration
 	const TEST_DATA_DIR = "/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data"
-	const OUTPUT_DIR = "/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/julia_env/Example_Outputs"
+	const OUTPUT_DIR = "/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Example_Outputs"
 
 #	Test 1: Documentation Lookup for network_comparator
 	function test_documentation_lookup()
@@ -1212,11 +1084,11 @@ using Large_Graph_Similarity
 		"""
 		Test network comparison mode with two metanetworks
 		"""
-		
-		println("\n" * "="^80)
-		println("TEST 3: Network Comparison - Balikatan vs Pac Rim")
-		println("="^80)
-		
+        #   Delcare Tests
+            println("\n" * "="^80)
+            println("TEST 3: Network Comparison - Balikatan vs Pac Rim")
+            println("="^80)
+            
 		#	Construct CLI arguments
 			args = [
 				"--mode", "comparison",
@@ -1235,49 +1107,56 @@ using Large_Graph_Similarity
 				"--verbose", "true"
 			]
 		
-		println("Comparing Balikatan 2022 vs Pac Rim Day 1...")
-		println("Command arguments:")
-		for i in 1:2:length(args)
-			println("  $(args[i]) $(args[i+1])")
-		end
+            println("Comparing Balikatan 2022 vs Pac Rim Day 1...")
+            println("Command arguments:")
+            for i in 1:2:length(args)
+                println("  $(args[i]) $(args[i+1])")
+            end
 		
 		#	Run comparison
-			CLI.cli_main(args)
+			Large_Graph_Similarity.CLI.cli_main(args)
 		
 		#	Verify output files exist
 			expected_files = [
-				# Network 1 analysis
-				"Balikatan_2022_global_stats.csv",
-				"Balikatan_2022_node_measures.csv",
-				# Network 2 analysis
-				"PacRim_Day1_global_stats.csv",
-				"PacRim_Day1_node_measures.csv",
-				# Comparison results
-				"comparison_raw.csv",
-				"comparison_asinh.csv",
-				"similarity_scores.csv",
-				"type_contributions_raw.csv",
-				"type_contributions_asinh.csv"
+				#   Network 1 analysis
+                    "Balikatan_2022_global_stats.csv",
+                    "Balikatan_2022_node_measures.csv",
+                    "Balikatan_2022_triad_census.csv",
+
+				#   Network 2 analysis
+                    "PacRim_Day1_global_stats.csv",
+                    "PacRim_Day1_node_measures.csv",
+                    "PacRim_Day1_triad_census.csv",
+
+				#   Comparison results
+                    "Balikatan_2022_PacRim_Day1_comparison_asinh.csv",
+                    "Balikatan_2022_PacRim_Day1_comparison_raw.csv",
+                    "Balikatan_2022_PacRim_Day1_similarity_scores.csv",
+                    "Balikatan_2022_PacRim_Day1_type_contributions_asinh.csv",
+                    "Balikatan_2022_PacRim_Day1_type_contributions_raw.csv"
 			]
 		
 			for file in expected_files
 				filepath = joinpath(OUTPUT_DIR, "test3_comparison", file)
-				@test isfile(filepath) "Expected output file not found: $file"
+				@test isfile(filepath) 
 				println("  ✓ Created: $file")
 			end
 		
-		println("\nTest 3 completed successfully")
+        #   Printing Results
+		    println("\nTest 3 completed successfully")
 	end
+
+    test_network_comparison()
 
 #	Test 4: Load Community Partition from ORA
 	function test_ora_leiden_partition()
 		"""
 		Test loading a pre-computed community partition from ORA XML
 		"""
-		
-		println("\n" * "="^80)
-		println("TEST 4: ORA Leiden Partition - Pac Rim Day 1")
-		println("="^80)
+        #   Announcing Test
+            println("\n" * "="^80)
+            println("TEST 4: ORA Leiden Partition - Pac Rim Day 1")
+            println("="^80)
 		
 		#	First, let's check what attributes are available
 			println("Checking available attributes in Pac Rim Day 1...")
@@ -1307,15 +1186,15 @@ using Large_Graph_Similarity
 				"--verbose", "true"
 			]
 		
-		println("\nAttempting to load 'leiden group' partition...")
-		println("Command arguments:")
-		for i in 1:2:length(args)
-			println("  $(args[i]) $(args[i+1])")
-		end
+            println("\nAttempting to load 'leiden group' partition...")
+            println("Command arguments:")
+            for i in 1:2:length(args)
+                println("  $(args[i]) $(args[i+1])")
+            end
 		
 		#	Run analysis with ORA partition
 			try
-				CLI.cli_main(args)
+				Large_Graph_Similarity.CLI.cli_main(args)
 				println("  ✓ Successfully loaded ORA Leiden partition")
 			catch e
 				if isa(e, ArgumentError) && occursin("Attribute 'leiden group' not found", e.msg)
@@ -1330,70 +1209,11 @@ using Large_Graph_Similarity
 		println("\nTest 4 completed")
 	end
 
-#	Main Test Runner
-	function run_all_tests()
-		"""
-		Execute all CLI tests in sequence
-		"""
-		
-		println("\n" * "="^80)
-		println("LARGE GRAPH SIMILARITY CLI TEST SUITE")
-		println("="^80)
-		
-		#	Create output directory
-			mkpath(OUTPUT_DIR)
-		
-		#	Run tests
-			@testset "CLI Functionality Tests" begin
-				@testset "Documentation System" begin
-					test_documentation_lookup()
-				end
-				
-				@testset "Single Network Analysis" begin
-					test_balikatan_analysis()
-				end
-				
-				@testset "Network Comparison" begin
-					test_network_comparison()
-				end
-				
-				@testset "ORA Partition Loading" begin
-					test_ora_leiden_partition()
-				end
-			end
-		
-		println("\n" * "="^80)
-		println("ALL TESTS COMPLETED")
-		println("Results saved to: $OUTPUT_DIR")
-		println("="^80)
-	end
+    test_ora_leiden_partition()
 
-#	Convenience function to run individual tests
-	function run_test(test_number::Int)
-		"""
-		Run a specific test by number
-		"""
-		
-		mkpath(OUTPUT_DIR)
-		
-		if test_number == 1
-			test_documentation_lookup()
-		elseif test_number == 2
-			test_balikatan_analysis()
-		elseif test_number == 3
-			test_network_comparison()
-		elseif test_number == 4
-			test_ora_leiden_partition()
-		else
-			error("Invalid test number. Choose 1-4")
-		end
-	end
+#   Test 5: Load a Nodelist and Edgelist as CSVs
 
-#	Execute tests
-	TestCLI.run_all_tests()
+#   Test 6: Load an Edgelist without a Nodelist 
 
-# Or run individual tests:
-# TestCLI.run_test(1)  # Documentation
-# TestCLI.run_test(2)  # Balikatan analysis
-# TestCLI.run_test(3)  # Network comparison
-# TestCLI.run_test(4)  # ORA partition
+#   Test 7: Compare an Edgelist and ORA Network 
+    

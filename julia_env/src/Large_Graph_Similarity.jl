@@ -10894,13 +10894,13 @@ THE SOFTWARE.
 					symmetric_edgelist; 
 					directed = false, 
 					resolution = resolution_used, 
-					weighted = false, 
+					weighted = weighted, 
 					resolution_sweep = false, 
 					provided_membership = partition_df
 				)
 			else
 				modularity_scores = modularity_vitality(clean_edges; directed = false, resolution = resolution_used, 
-									weighted = false, provided_membership = keep_index[:,["node", "community"]])
+									weighted = weighted, provided_membership = keep_index[:,["node", "community"]])
 			end
             leftjoin!(node_stats, modularity_scores.results_df[:,[1,3,4]], on = :node)
             
@@ -11514,10 +11514,10 @@ THE SOFTWARE.
         #	Modularity vitality (hub and bridge scores)
 			if provided_membership === nothing
 				modularity_scores = modularity_vitality(symmetric_edgelist; directed = false, resolution = resolution_used, 
-														weighted = true, resolution_sweep = false, provided_membership = partition_df)
+														weighted = weighted, resolution_sweep = false, provided_membership = partition_df)
 			else
 				modularity_scores = modularity_vitality(clean_edges; directed = false, resolution = resolution_used, 
-									weighted = true, provided_membership = keep_index[:,["node", "community"]])
+									weighted = weighted, provided_membership = keep_index[:,["node", "community"]])
 			end
             leftjoin!(node_stats, modularity_scores.results_df[:,[1,3,4]], on = :node)
             
@@ -12170,10 +12170,10 @@ THE SOFTWARE.
         #	Modularity vitality (hub and bridge scores)
             if provided_membership === nothing
 				modularity_scores = modularity_vitality(clean_edges; directed = false, resolution = resolution_used, 
-									weighted = true, resolution_sweep = resolution_sweep)
+									weighted = weighted, resolution_sweep = resolution_sweep)
 			else
 				modularity_scores = modularity_vitality(clean_edges; directed = false, resolution = resolution_used, 
-									weighted = true, provided_membership = keep_index[:,["node", "community"]])
+									weighted = weighted, provided_membership = keep_index[:,["node", "community"]])
 			end
             leftjoin!(node_stats, modularity_scores.results_df[:, [1, 3, 4]], on = :node)
           
@@ -12890,10 +12890,10 @@ THE SOFTWARE.
         #	Modularity vitality (hub and bridge scores)
             if provided_membership === nothing
 				modularity_scores = modularity_vitality(clean_edges; directed = false, resolution = resolution_used, 
-									weighted = true, resolution_sweep = resolution_sweep)
+									weighted = weighted, resolution_sweep = resolution_sweep)
 			else
 				modularity_scores = modularity_vitality(clean_edges; directed = false, resolution = resolution_used, 
-									weighted = true, provided_membership = keep_index[:,["node", "community"]])
+									weighted = weighted, provided_membership = keep_index[:,["node", "community"]])
 			end
             leftjoin!(node_stats, modularity_scores.results_df[:, [1, 3, 4]], on = :node)
             
@@ -13940,6 +13940,12 @@ THE SOFTWARE.
 			provided_membership_1, provided_membership_2: Optional pre-computed communities
 		Returns:
 			NamedTuple with fields:
+				- global_stats_1: DataFrame of global statistics for network 1
+				- triad_census_counts_1: DataFrame of triad census for network 1
+				- node_measures_1: DataFrame of node-level measures for network 1
+				- global_stats_2: DataFrame of global statistics for network 2
+				- triad_census_counts_2: DataFrame of triad census for network 2
+				- node_measures_2: DataFrame of node-level measures for network 2
 				- combined_features: DataFrame of aligned feature vectors with weights
 				- overall_distance_raw: Euclidean distance using raw JS divergences
 				- overall_similarity_raw: Similarity score for raw comparison
@@ -13948,6 +13954,7 @@ THE SOFTWARE.
 				- type_contributions_raw: Per-type distance breakdown for raw
 				- type_contributions_asinh: Per-type distance breakdown for asinh
 		Notes:
+			- Returns individual network analyses alongside comparison results
 			- Applies category weights to multi-indicator measures
 			- Computes both raw and asinh-normalized comparisons simultaneously
 			- Raw comparison preserves tail differences in degree distributions
@@ -14197,7 +14204,13 @@ THE SOFTWARE.
 			type_contrib_asinh = _compute_type_contributions(asinh_measures, dist_asinh.squared_distance; use_weights = true)
 		
 		#	Return comprehensive results
-			return (combined_features = combined_measures,
+			return (global_stats_1 = global_stats_1, 
+					triad_census_counts_1 = triad_census_counts_1, 
+					node_measures_1 = node_measures_1,
+					global_stats_2 = global_stats_2,
+					triad_census_counts_2 = triad_census_counts_2,
+					node_measures_2 = node_measures_2,
+					combined_features = combined_measures,
 					overall_distance_raw = dist_raw.distance,
 					overall_similarity_raw = dist_raw.similarity,
 					overall_distance_asinh = dist_asinh.distance,
@@ -14207,7 +14220,7 @@ THE SOFTWARE.
 	end
 	@doc raw"""
 	**Description**
-	Compare two networks using both raw and asinh-normalized node measure distributions, with weighted multi-indicator categories for balanced structural comparison.
+	Compare two networks using both raw and asinh-normalized node measure distributions, with weighted multi-indicator categories for balanced structural comparison. Returns both individual network analyses and comparison metrics.
 
 	**Usage**
 	`network_comparator(edges_1, nodes_1, edges_2, nodes_2; resolution_sweep=false, resolution=1.0, directed=true, weighted=true, n_resolutions=15, n_runs_per_gamma=5, n_iterations_per_run=10, seed=nothing, provided_membership_1=nothing, provided_membership_2=nothing)`
@@ -14239,6 +14252,16 @@ THE SOFTWARE.
 
 	**Value**
 	Returns a NamedTuple with fields:
+	
+	*Individual Network Analyses:*
+	- `global_stats_1::DataFrame`: Global statistics for network 1
+	- `triad_census_counts_1::DataFrame`: Triad census counts for network 1
+	- `node_measures_1::DataFrame`: Node-level measures for network 1
+	- `global_stats_2::DataFrame`: Global statistics for network 2
+	- `triad_census_counts_2::DataFrame`: Triad census counts for network 2
+	- `node_measures_2::DataFrame`: Node-level measures for network 2
+	
+	*Comparison Results:*
 	- `combined_features::DataFrame`: Aligned feature vectors with columns [:measure, :network_1_values, :network_2_values, :type, :weight]
 	- `overall_distance_raw::Float64`: Weighted Euclidean distance using raw JS divergences
 	- `overall_similarity_raw::Float64`: Raw similarity score ∈ (0,1]
@@ -14253,6 +14276,12 @@ THE SOFTWARE.
 		edges1 = DataFrame(src=["A","B","C"], dst=["B","C","A"])
 		edges2 = DataFrame(src=["X","Y","Z"], dst=["Y","Z","X"])
 		result = network_comparator(edges1, nothing, edges2, nothing; directed=true, weighted=false)
+		
+		# Access individual network analyses
+		println("Network 1 stats: ", result.global_stats_1)
+		println("Network 2 node measures: ", result.node_measures_2)
+		
+		# Access comparison metrics
 		println("Raw similarity: ", result.overall_similarity_raw)
 		println("Asinh similarity: ", result.overall_similarity_asinh)
 

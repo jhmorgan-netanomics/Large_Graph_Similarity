@@ -1,0 +1,29 @@
+measure,value
+num_nodes,468
+num_edges,1440
+num_wcc,6
+num_scc,457
+largest_wcc,463
+second_largest_wcc,1
+min_wcc_size,1
+largest_scc,8
+second_largest_scc,5
+num_isolates,5
+num_dyads,0
+num_triads,0
+num_groups,1
+bow_tie_in_size,11
+bow_tie_out_size,175
+bow_tie_scc_fraction,0.017094017094017096
+bow_tie_in_fraction,0.023504273504273504
+bow_tie_out_fraction,0.37393162393162394
+all_links,"(count = 1440, min = 1.0, max = 1.0, mean = 1.0, std = 0.0, sum = 1440.0)"
+nonself_links,"(count = 1437, min = 1.0, max = 1.0, mean = 1.0, std = 0.0, sum = 1437.0)"
+self_loops,"(count = 3, min = 1.0, max = 1.0, mean = 1.0, std = 0.0, sum = 3.0)"
+degree assortativity,-0.027552
+transitivity,0.427135
+local clustering coefficient,0.454382
+reciprocity,0.007008
+density,0.006575
+resolution,1.0
+modularity,0.417663
