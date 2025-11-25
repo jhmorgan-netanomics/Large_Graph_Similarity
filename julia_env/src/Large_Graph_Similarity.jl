@@ -5987,7 +5987,7 @@ THE SOFTWARE.
 #   CORE DECOMPOSITION 
 
 #	Helper: K-core neighbor degree updates (simple 1-per-edge decrement; binary)
-	function _update_k_neighbor_degrees!(adj::SparseMatrixCSC, u::Int, k::Int,
+	function _update_k_neighbor_degrees_binary!(adj::SparseMatrixCSC, u::Int, k::Int,
 										degrees::Vector{Int}, active::BitVector,
 										queue::Vector{Int}, mode::String)
 		"""
@@ -6062,51 +6062,8 @@ THE SOFTWARE.
 			end
 	end
 
-#	Helper: Update K-core sets → frontier (degree < k) and active core size
-	function _update_k_cores!(k::Int, degrees::Vector{Int},
-							cores::Vector{Int}, active::BitVector)
-		"""
-		Args:
-			k::Int: current k value
-			degrees::Vector{Int}: current degrees
-			cores::Vector{Int}: core assignments (modified elsewhere on removal)
-			active::BitVector: active node mask
-		Returns:
-			NamedTuple: (frontier::Vector{Int}, core_size::Int)
-		Notes:
-			- Returns indices with degree **< k** as the frontier to peel.
-			- Does not assign cores here; only counts and selects.
-			- Two-pass exact allocation for the frontier vector.
-		"""
-
-		#	Pass 1: count active + frontier size
-			core_size = 0
-			frontier_count = 0
-			@inbounds @simd for i in eachindex(degrees)
-				if active[i]
-					core_size += 1
-					frontier_count += (degrees[i] < k)
-				end
-			end
-
-		#	Allocate frontier
-			frontier = Vector{Int}(undef, frontier_count)
-
-		#	Pass 2: fill frontier
-			writepos = 0
-			@inbounds for i in eachindex(degrees)
-				if active[i] && degrees[i] < k
-					writepos += 1
-					frontier[writepos] = i
-				end
-			end
-
-		#	Return
-			return (frontier = frontier, core_size = core_size)
-	end
-
 #	Helper: K-core neighbor updates (weighted-aware decrement by stored value)
-	function _update_k_neighbor_degrees!(adj::SparseMatrixCSC, u::Int, k::Int,
+	function _update_k_neighbor_degrees_weighted!(adj::SparseMatrixCSC, u::Int, k::Int,
 										degrees::Vector{Int}, active::BitVector,
 										queue::Vector{Int}, mode::String)
 		"""
@@ -6189,6 +6146,87 @@ THE SOFTWARE.
 						end
 					end
 			end
+	end
+
+#   Helper: Dispatch K-core neighbor degree updates based on matrix type
+    function _update_k_neighbor_degrees!(adj::SparseMatrixCSC, u::Int, k::Int,
+                                         degrees::Vector{Int}, active::BitVector,
+                                         queue::Vector{Int}, mode::String)
+        """
+        Args:
+            adj::SparseMatrixCSC: adjacency matrix
+            u::Int: node being removed
+            k::Int: current k threshold
+            degrees::Vector{Int}: degree vector (modified in-place)
+            active::BitVector: active node mask
+            queue::Vector{Int}: removal queue/stack (modified in-place)
+            mode::String: neighbor semantics ("in" | "out" | "total" | "undirected")
+        Returns:
+            Nothing (modifies in-place)
+        Notes:
+            Dispatches to binary or weighted version based on matrix content.
+            Binary: decrements by 1
+            Weighted: decrements by rounded weight
+        """
+        
+        #   Determine Matrix Type
+            is_directed = (mode != "undirected")
+            is_binary   = _is_binary_matrix(adj; directed = is_directed)
+        
+        #   Dispatch to Appropriate Handler
+            if is_binary
+                #   Binary network: decrement by 1
+                    _update_k_neighbor_degrees_binary!(adj, u, k, degrees, active, queue, mode)
+            else
+                #   Weighted network: decrement by weight
+                    _update_k_neighbor_degrees_weighted!(adj, u, k, degrees, active, queue, mode)
+            end
+        
+        #   Return nothing
+            return nothing
+    end
+
+#	Helper: Update K-core sets → frontier (degree < k) and active core size
+	function _update_k_cores!(k::Int, degrees::Vector{Int},
+							cores::Vector{Int}, active::BitVector)
+		"""
+		Args:
+			k::Int: current k value
+			degrees::Vector{Int}: current degrees
+			cores::Vector{Int}: core assignments (modified elsewhere on removal)
+			active::BitVector: active node mask
+		Returns:
+			NamedTuple: (frontier::Vector{Int}, core_size::Int)
+		Notes:
+			- Returns indices with degree **< k** as the frontier to peel.
+			- Does not assign cores here; only counts and selects.
+			- Two-pass exact allocation for the frontier vector.
+		"""
+
+		#	Pass 1: count active + frontier size
+			core_size = 0
+			frontier_count = 0
+			@inbounds @simd for i in eachindex(degrees)
+				if active[i]
+					core_size += 1
+					frontier_count += (degrees[i] < k)
+				end
+			end
+
+		#	Allocate frontier
+			frontier = Vector{Int}(undef, frontier_count)
+
+		#	Pass 2: fill frontier
+			writepos = 0
+			@inbounds for i in eachindex(degrees)
+				if active[i] && degrees[i] < k
+					writepos += 1
+					frontier[writepos] = i
+				end
+			end
+
+		#	Return
+			return (frontier = frontier, core_size = core_size)
 	end
 
 #	Helper: Remove nodes via cascade (assign k-1 at removal; LIFO)
