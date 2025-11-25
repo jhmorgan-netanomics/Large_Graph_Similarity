@@ -11,20 +11,23 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 		"""
 		Args:
 			filepath::String: Path to CSV/TSV edge list file
-			verbose::Bool: Print diagnostic messages
+			verbose::Bool: Print diagnostic messages (default true)
 		Returns:
 			DataFrame: Edge list with :src, :dst, optional :weight columns
 		Notes:
-			Accepts variants: source/target, from/to
-			Auto-detects CSV vs TSV format
+			Accepts column name variants:
+			- src/dst (canonical)
+			- source/target, Source Node ID/Target Node ID
+			- from/to, From Node/To Node
+			Auto-detects CSV vs TSV delimiter
 		"""
 		
-		#	Check file exists
+		#	Validation
 			if !isfile(filepath)
 				throw(ArgumentError("Edge list file not found: $filepath"))
 			end
 		
-		#	Detect delimiter
+		#	Delimiter Detection
 			first_line = readline(filepath)
 			delimiter = occursin("\t", first_line) ? '\t' : ','
 			
@@ -34,57 +37,76 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 			end
 		
 		#	Load DataFrame
-			df = CSV.read(filepath, DataFrame; delim=delimiter)
+			df = CSV.read(filepath, DataFrame; delim = delimiter)
 		
-		#	Standardize column names
-			col_names = lowercase.(string.(names(df)))
+		#	Column Name Standardization
+			original_names = names(df)
+			lower_names = lowercase.(string.(original_names))
 			
-			if "src" in col_names && "dst" in col_names
-				#	Already correct
-					rename!(df, Dict(names(df)[i] => Symbol(col) 
-									for (i, col) in enumerate(col_names)))
-			elseif "source" in col_names && "target" in col_names
-				#	Transform source/target
-					idx_map = Dict("source" => findfirst(x -> x == "source", col_names),
-								  "target" => findfirst(x -> x == "target", col_names))
-					rename!(df, names(df)[idx_map["source"]] => :src,
-							   names(df)[idx_map["target"]] => :dst)
-			elseif "from" in col_names && "to" in col_names
-				#	Transform from/to
-					idx_map = Dict("from" => findfirst(x -> x == "from", col_names),
-								  "to" => findfirst(x -> x == "to", col_names))
-					rename!(df, names(df)[idx_map["from"]] => :src,
-							   names(df)[idx_map["to"]] => :dst)
+			idx_src = nothing
+			idx_dst = nothing
+		
+		#	Source/Destination Column Detection
+			if "src" in lower_names && "dst" in lower_names
+				#	Canonical names found
+					idx_src = findfirst(x -> x == "src", lower_names)
+					idx_dst = findfirst(x -> x == "dst", lower_names)
+			elseif any(occursin.("source", lower_names)) && any(occursin.("target", lower_names))
+				#	Source/target variant
+					idx_src = findfirst(n -> occursin("source", n), lower_names)
+					idx_dst = findfirst(n -> occursin("target", n), lower_names)
+			elseif any(occursin.("from", lower_names)) && any(occursin.("to", lower_names))
+				#	From/to variant
+					idx_src = findfirst(n -> occursin("from", n), lower_names)
+					idx_dst = findfirst(n -> occursin("to", n), lower_names)
 			else
-				throw(ArgumentError("Edge list must contain (src,dst), (source,target), or (from,to) columns. Found: $(join(names(df), ", "))"))
+				#	No valid column names found
+					throw(ArgumentError(
+						"Edge list must contain columns identifiable as (src,dst), " *
+						"(source,target), or (from,to). Found: $(join(original_names, ", "))"
+					))
 			end
 		
-		#	Handle weight column
-			if "weight" in lowercase.(string.(names(df)))
-				weight_idx = findfirst(col -> lowercase(string(col)) == "weight", names(df))
-				rename!(df, names(df)[weight_idx] => :weight)
-				df.weight = Float64.(df.weight)
+		#	Rename to Canonical Form
+			rename!(df, original_names[idx_src] => :src,
+					   original_names[idx_dst] => :dst)
+		
+		#	Weight Column Detection
+			current_names = names(df)
+			lower_current = lowercase.(string.(current_names))
+			
+			weight_idx = findfirst(n -> n == "weight", lower_current)
+			
+			if weight_idx === nothing
+				#	Check for common variants
+					weight_idx = findfirst(n -> occursin("weight", n) || occursin("link value", n), lower_current)
+			end
+			
+			if weight_idx !== nothing
+				#	Standardize weight column
+					rename!(df, current_names[weight_idx] => :weight)
+					df.weight = Float64.(df.weight)
 			elseif verbose
 				println("No weight column found - assuming unit weights")
 			end
 		
-		#	Ensure string node IDs
+		#	Type Conversion
 			df.src = string.(df.src)
 			df.dst = string.(df.dst)
 		
-		#	Select relevant columns
+		#	Assembling Result
 			result = select(df, :src, :dst)
 			if hasproperty(df, :weight)
 				result.weight = df.weight
 			end
-		
+			
 			if verbose
 				n_edges = nrow(result)
 				n_nodes = length(union(result.src, result.dst))
 				println("Loaded $n_edges edges connecting $n_nodes unique nodes")
 			end
 		
-		#	Return edge list
+		#	Return Edge List
 			return result
 	end
 
@@ -92,64 +114,101 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 	function _load_node_list(filepath::String; verbose::Bool = true)
 		"""
 		Args:
-			filepath::String: Path to node list file
-			verbose::Bool: Print diagnostic messages
+			filepath::String: Path to node list file (CSV/TSV/text)
+			verbose::Bool: Print diagnostic messages (default true)
 		Returns:
 			DataFrame: Node list with :id and :label columns
 		Notes:
-			Accepts CSV with id/label columns or text file with one node per line
+			ID column detection (case-insensitive):
+			- Exact: "id"
+			- Contains: "node" + "id" or "name" + "id"
+			Label column detection:
+			- Exact: "label"
+			- Contains: "node" + "label"
+			Single column files treated as node IDs
 		"""
-		
-		#	Check file exists
+		#	Validation
 			if !isfile(filepath)
 				throw(ArgumentError("Node list file not found: $filepath"))
 			end
-		
+			
 			if verbose
 				println("Loading node list from: $filepath")
 			end
 		
-		#	Try loading as CSV first
-			try
-				df = CSV.read(filepath, DataFrame)
+		#	Helper: Normalize Column Names
+			normalize_name(name::Symbol) = normalize_name(String(name))
+			function normalize_name(name::AbstractString)
+				#	Convert to standard form
+					s = lowercase(strip(name))
+				#	Replace non-alphanumeric with spaces
+					s = replace(s, r"[^0-9a-z]+" => " ")
+					s = replace(s, r"\s+" => " ")
+				#	Return normalized string
+					return s
+			end
+		
+		#	Helper: Detect ID Column
+			function is_id_col(norm::AbstractString)
+				#	Parse normalized name
+					words = split(norm, ' ')
 				
-				#	Check for id/label columns
-					col_names = lowercase.(string.(names(df)))
-					
-					if "id" in col_names && "label" in col_names
-						id_idx = findfirst(x -> x == "id", col_names)
-						label_idx = findfirst(x -> x == "label", col_names)
-						result = DataFrame(
-							id = string.(df[!, names(df)[id_idx]]),
-							label = string.(df[!, names(df)[label_idx]])
-						)
-					elseif "id" in col_names
-						id_idx = findfirst(x -> x == "id", col_names)
-						ids = string.(df[!, names(df)[id_idx]])
-						result = DataFrame(id = ids, label = ids)
-					elseif ncol(df) == 1
-						#	Single column treated as node IDs
-							ids = string.(df[!, 1])
-							result = DataFrame(id = ids, label = ids)
-					else
-						throw(ArgumentError("Node list must contain 'id' column or be single column. Found: $(join(names(df), ", "))"))
+				#	Check for ID patterns
+					if norm == "id"
+						return true
 					end
+					
+					has_id   = "id"   in words
+					has_node = "node" in words
+					has_name = "name" in words
+					
+					return (has_id && has_node) || (has_id && has_name)
+			end
+		
+		#	Helper: Detect Label Column
+			function is_label_col(norm::AbstractString)
+				#	Parse normalized name
+					words = split(norm, ' ')
 				
-				if verbose
-					println("Loaded $(nrow(result)) nodes from CSV")
-				end
-				
-				return result
-				
+				#	Check for label patterns
+					if norm == "label"
+						return true
+					end
+					
+					has_label = "label" in words
+					has_node  = "node"  in words
+					
+					return has_label && has_node
+			end
+		
+		#	First attempt: load as structured CSV/TSV
+			df = DataFrame()
+			try
+				#   Detect delimiter from first line
+					first_line = open(filepath) do io
+						readline(io)
+					end
+					delim = occursin('\t', first_line) ? '\t' : ','
+
+					if verbose
+						println("Detected delimiter: ", delim == '\t' ? "TAB" : "COMMA")
+					end
+
+        		#   Load as structured file with chosen delimiter
+            		df = CSV.read(filepath, DataFrame; delim = delim)
 			catch e
-				#	Try as plain text file
-					if isa(e, ArgumentError)
-						rethrow(e)
+				#	If CSV.read itself fails, fall back to line-based loader
+					if verbose
+						println("Failed to read as CSV/TSV ($(typeof(e))): falling back to text mode")
 					end
 				
 					lines = readlines(filepath)
 					ids = String[strip(line) for line in lines if !isempty(strip(line))]
 					result = DataFrame(id = ids, label = ids)
+				
+				#	Ensure String columns
+					result.id    = string.(result.id)
+					result.label = string.(result.label)
 				
 					if verbose
 						println("Loaded $(length(ids)) nodes from text file")
@@ -157,82 +216,320 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 				
 					return result
 			end
+		
+		#	At this point, df is a valid DataFrame from CSV/TSV
+			original_names = names(df)
+			norm_names     = normalize_name.(original_names)
+		
+		# 	Column Detection 
+			id_indices = Int[] 
+			label_indices = Int[] 
+			for (i, n) in enumerate(norm_names) 
+				if is_id_col(n) push!(id_indices, i) 
+				end 
+			
+				if is_label_col(n) push!(label_indices, i) 
+				end 
+			end 
+	
+		# 	Column Selection 
+			id_idx = isempty(id_indices) ? nothing : first(id_indices) 
+			label_idx = isempty(label_indices) ? nothing : first(label_indices) 
+			result = DataFrame()
+		
+		#	Build Result Based on Available Columns 
+			if id_idx !== nothing && label_idx !== nothing 
+				# 	Both columns found 
+					id_col = original_names[id_idx] 
+					label_col = original_names[label_idx] 
+					
+					if verbose println("Using ID column: '$id_col'") 
+						println("Using label column: '$label_col'") 
+					end 
+					
+					ids = strip.(string.(df[!, id_col])) 
+					
+					labels = strip.(string.(df[!, label_col])) 
+					
+					result = DataFrame(id = ids, label = labels) 
+		
+			elseif id_idx !== nothing 
+				# 	Only ID column found → use as both id and label 
+					id_col = original_names[id_idx] 
+		
+					if verbose println("Using ID column: '$id_col'") 
+						println("No label-like column found; using ID as label") 
+					end 
+		
+					ids = strip.(string.(df[!, id_col])) 
+		
+					result = DataFrame(id = ids, label = ids) 
+			elseif label_idx !== nothing 
+				# 	Only label-like column found → use as both id and label 
+					label_col = original_names[label_idx] 
+		
+					if verbose 
+						println("Using label column: '$label_col' as both id and label") 
+					end 
+			
+					labels = strip.(string.(df[!, label_col])) 
+			
+					result = DataFrame(id = labels, label = labels) 
+			elseif ncol(df) == 1 
+				#	Single column as IDs 
+					if verbose 
+						println("Single-column node file; using column '$(original_names[1])' as id and label") 
+					end 
+		
+					ids = strip.(string.(df[!, 1])) 
+			
+					result = DataFrame(id = ids, label = ids) 
+			else 
+				# 	No valid columns found msg = 
+					""" 
+					Node list must contain an ID-like column ('ID', 'Node ID', 'Name ID', etc.) 
+					or be a single-column file. Found columns: $(join(string.(original_names), ", ")) 
+					""" 
+					throw(ArgumentError(msg)) 
+			end 
+	
+		# 	Report Success 
+			if verbose 
+				println("Loaded $(nrow(result)) nodes from CSV/TSV") 
+			end 
+			
+		# 	ID & Label Are Proper String Vectors 
+			result.id = string.(result.id) 
+			result.label = string.(result.label) 
+			
+		# 	Return Nodelist 
+			return result
 	end
 
 #	Helper Function for CLI: Load Partition
-	function _load_partition(filepath::String, node_list::Union{Nothing,DataFrame}; 
-							 verbose::Bool = true)
+	function _load_partition(filepath::String; node_list = nothing, verbose::Bool = true)
 		"""
 		Args:
 			filepath::String: Path to partition file
 			node_list::Union{Nothing,DataFrame}: Reference node list for validation
 			verbose::Bool: Print diagnostic messages
 		Returns:
-			DataFrame: Partition with :id and :community columns
+			DataFrame: Partition with :id and :community columns (community as Int)
 		Notes:
-			Accepts CSV with id/(community|node community) columns
-			Warns if integer vector assumed to match node list order
+			- Accepts CSV with ID-like and community-like columns
+			- ID-like: "id" or any column whose name contains both "node" and "id"
+			(case-insensitive), e.g. "Node ID", "node_id", "node-id"
+			- Community-like: "community", "node community", or any column whose
+			name contains "leiden" (case-insensitive), e.g. "leiden group"
+			- If a single column is provided, it is treated as a community vector
+			aligned to node_list.id
 		"""
-		
-		#	Check file exists
+
+		#   Helper: coerce community vector to Int
+			_coerce_to_int(vec, colname::AbstractString) = begin
+				T = eltype(vec)
+				if T <: Integer
+					return Int.(vec)
+				elseif T <: AbstractFloat
+					return Int.(round.(vec))
+				elseif T <: AbstractString
+					try
+						return parse.(Int, strip.(vec))
+					catch
+						msg = """
+						Community column '$colname' must be coercible to Int.
+						Found string values that cannot be parsed as integers.
+						First few unique values: $(join(string.(unique(vec[1:min(end, 5)])), ", "))
+						"""
+						throw(ArgumentError(msg))
+					end
+				else
+					msg = """
+					Community column '$colname' has unsupported element type $(T).
+					Expected an integer, float, or string column that can be converted to Int.
+					"""
+					throw(ArgumentError(msg))
+				end
+			end
+
+		#   Validation
 			if !isfile(filepath)
 				throw(ArgumentError("Partition file not found: $filepath"))
 			end
-		
+
 			if verbose
 				println("Loading partition from: $filepath")
 			end
-		
-		#	Load DataFrame
-			df = CSV.read(filepath, DataFrame)
-			col_names = lowercase.(string.(names(df)))
-		
-		#	Check for expected columns
-			has_id = "id" in col_names
-			has_community = "community" in col_names
-			has_node_community = "node community" in col_names
-		
-			if has_id && (has_community || has_node_community)
-				#	Standard format with node IDs
-					id_idx = findfirst(x -> x == "id", col_names)
-					
-					if has_node_community
-						comm_idx = findfirst(x -> x == "node community", col_names)
-					else
-						comm_idx = findfirst(x -> x == "community", col_names)
+
+		#   Load DataFrame (CSV/TSV with delimiter detection)
+			df = DataFrame()
+			try
+				#   Detect delimiter from first line
+					first_line = open(filepath) do io
+						readline(io)
 					end
-				
-					result = DataFrame(
-						id = string.(df[!, names(df)[id_idx]]),
-						community = Int.(df[!, names(df)[comm_idx]])
-					)
-				
-			elseif ncol(df) == 1 && eltype(df[!, 1]) <: Number
-				#	Integer vector - warn about assumption
+					delim = occursin('\t', first_line) ? '\t' : ','
+
 					if verbose
-						println("WARNING: Single column of integers found - assuming order matches node list")
+						println("Detected delimiter: ", delim == '\t' ? "TAB" : "COMMA")
 					end
-				
-					if node_list === nothing
-						throw(ArgumentError("Integer partition vector requires node list for ID mapping"))
+
+				#   Load as structured file with chosen delimiter
+					df = CSV.read(filepath, DataFrame; delim = delim)
+			catch e
+				#   If CSV.read itself fails, fall back to line-based loader
+					if verbose
+						println("Failed to read partition as CSV/TSV ($(typeof(e))): falling back to text mode")
 					end
-				
-					result = DataFrame(
-						id = node_list.id,
-						community = Int.(df[!, 1])
-					)
-				
-			else
-				throw(ArgumentError("Partition must contain (id, community) or (id, 'node community') columns. Found: $(join(names(df), ", "))"))
+
+					lines = readlines(filepath)
+					vals = String[strip(line) for line in lines if !isempty(strip(line))]
+					result = DataFrame(community = vals)
+
+				#   Coerce to Int if possible
+					result.community = _coerce_to_int(result.community, "community")
+
+					if verbose
+						println("Loaded $(length(vals)) community assignments from text file")
+					end
+
+					return result
 			end
-		
+
+		#   Normalize column names for pattern matching
+			original_names = names(df)
+			lower_names    = lowercase.(string.(original_names))
+
+		#   Locate ID-like column:
+		#   - exact "id"
+		#   - or contains both "node" and "id" (e.g., "Node ID", "node_id", "node-id")
+			id_indices = Int[]
+			for (i, cname) in enumerate(lower_names)
+				if cname == "id"
+					push!(id_indices, i)
+				elseif occursin("node", cname) && occursin("id", cname)
+					push!(id_indices, i)
+				end
+			end
+
+			id_idx = nothing
+			if !isempty(id_indices)
+				id_idx = first(id_indices)
+				if length(id_indices) > 1 && verbose
+					println("WARNING: Multiple ID-like columns detected in partition; using column '$(original_names[id_idx])'")
+				end
+			end
+
+		#   Locate community-like column:
+		#   - exact "community" or "node community"
+		#   - OR any column whose name contains "leiden" (e.g., "leiden group")
+			comm_indices = Int[]
+
+		#   First pass: exact community names
+			for (i, cname) in enumerate(lower_names)
+				if cname == "community" || cname == "node community"
+					push!(comm_indices, i)
+				end
+			end
+
+		#   Second pass: leiden-based names, if nothing found yet
+			if isempty(comm_indices)
+				for (i, cname) in enumerate(lower_names)
+					if occursin("leiden", cname)
+						push!(comm_indices, i)
+					end
+				end
+			end
+
+			comm_idx = nothing
+			if !isempty(comm_indices)
+				comm_idx = first(comm_indices)
+				if length(comm_indices) > 1 && verbose
+					println("WARNING: Multiple community-like columns detected in partition; using column '$(original_names[comm_idx])'")
+				end
+			end
+
+		#   Main cases
+			result = DataFrame()
+			if id_idx !== nothing && comm_idx !== nothing
+				#   Standard case: both ID-like and community-like columns present
+					id_col   = original_names[id_idx]
+					comm_col = original_names[comm_idx]
+
+					if verbose
+						println("Using ID column: '$id_col'")
+						println("Using community column: '$comm_col'")
+					end
+
+					ids      = strip.(string.(df[!, id_col]))
+					raw_comm = df[!, comm_col]
+					communities = _coerce_to_int(raw_comm, string(comm_col))
+
+					result = DataFrame(id = ids, community = communities)
+
+			elseif ncol(df) == 1
+				#   Single column partition vector; must align with node_list
+					if node_list === nothing
+						msg = """
+						Single-column partition file detected, but no node list was provided.
+						When using a single community column, the partition is assumed to be
+						aligned with node_list.id, so a node list is required.
+						"""
+						throw(ArgumentError(msg))
+					end
+
+					raw_comm = df[!, 1]
+					communities = _coerce_to_int(raw_comm, string(original_names[1]))
+
+					if !hasproperty(node_list, :id)
+						msg = """
+						Provided node_list does not contain an :id column.
+						Expected node_list.id to align with the partition vector.
+						"""
+						throw(ArgumentError(msg))
+					end
+
+					ids = strip.(string.(node_list.id))
+
+					if length(ids) != length(communities)
+						msg = """
+						Length mismatch between node_list.id and partition vector.
+						node_list.id length = $(length(ids)), partition length = $(length(communities)).
+						They must be equal when using a single-column partition file.
+						"""
+						throw(ArgumentError(msg))
+					end
+
+					if verbose
+						println("WARNING: Single-column partition detected – assuming row order matches node_list.id")
+					end
+
+					result = DataFrame(id = ids, community = communities)
+
+			else
+				#   No valid ID/community combination found
+					msg = """
+					Partition file must contain:
+					- an ID-like column (e.g., 'id', 'Node ID', 'node_id', 'node-id'), and
+					- a community-like column (e.g., 'community', 'node community',
+					or any column name containing 'leiden'),
+					or it must be a single-column file of community assignments aligned
+					with node_list.id.
+					Found columns: $(join(string.(original_names), ", "))
+					"""
+					throw(ArgumentError(msg))
+			end
+
+		#   Diagnostics
 			if verbose
 				n_nodes = nrow(result)
 				n_comms = length(unique(result.community))
 				println("Loaded partition with $n_nodes nodes in $n_comms communities")
 			end
-		
-		#	Return partition
+
+		#   Return partition
+			rename!(result, ["node", "community"])
+			result.node = string.(result.node)
 			return result
 	end
 
@@ -820,7 +1117,7 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 					end
 				
 					if parsed_args["partition-1"] !== nothing
-						partition_1 = _load_partition(parsed_args["partition-1"], nodes_1; 
+						partition_1 = _load_partition(parsed_args["partition-1"]; node_list = nodes_1, 
 													 verbose = verbose)
 					end
 			else
@@ -865,7 +1162,7 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 						end
 					
 						if parsed_args["partition-2"] !== nothing
-							partition_2 = _load_partition(parsed_args["partition-2"], nodes_2; 
+							partition_2 = _load_partition(parsed_args["partition-2"];  node_list = nodes_2, 
 														 verbose = verbose)
 						end
 				else
