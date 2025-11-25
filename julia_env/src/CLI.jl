@@ -963,106 +963,106 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 				"--ora-xml-2"
 					help = "Path to second ORA metanetwork XML"
 					arg_type = String
-				
+					
 				"--network-name-1"
 					help = "Network name to extract from first ORA file"
 					arg_type = String
-				
+					
 				"--network-name-2"
 					help = "Network name to extract from second ORA file"
 					arg_type = String
-				
+					
 				"--ora-leiden"
 					help = "ORA community attribute name"
 					arg_type = String
-				
+					
 				"--edgelist-1"
 					help = "Path to first edge list CSV/TSV"
 					arg_type = String
-				
+					
 				"--edgelist-2"
 					help = "Path to second edge list CSV/TSV"
 					arg_type = String
-				
+					
 				"--nodelist-1"
 					help = "Path to first node list"
 					arg_type = String
-				
+					
 				"--nodelist-2"
 					help = "Path to second node list"
 					arg_type = String
-				
+					
 				"--partition-1"
 					help = "Path to first partition file"
 					arg_type = String
-				
+					
 				"--partition-2"
 					help = "Path to second partition file"
 					arg_type = String
-				
+					
 				"--output-dir"
 					help = "Output directory for results"
 					arg_type = String
 					default = "./output"
-				
+					
 				"--name-1"
 					help = "Name prefix for first network outputs"
 					arg_type = String
 					default = "network_1"
-				
+					
 				"--name-2"
 					help = "Name prefix for second network outputs"
 					arg_type = String
 					default = "network_2"
-				
+					
 				"--directed"
 					help = "Treat networks as directed"
 					arg_type = Bool
 					default = true
-				
+					
 				"--weighted"
 					help = "Use edge weights if present"
 					arg_type = Bool
 					default = true
-				
+					
 				"--resolution"
 					help = "Resolution parameter for community detection"
 					arg_type = Float64
 					default = 1.0
-				
+					
 				"--resolution-sweep"
 					help = "Use CHAMP multi-resolution community detection"
 					arg_type = Bool
 					default = false
-				
+					
 				"--n-resolutions"
 					help = "Number of resolutions for CHAMP"
 					arg_type = Int
 					default = 15
-				
+					
 				"--n-runs"
 					help = "Number of Leiden runs per resolution"
 					arg_type = Int
 					default = 5
-				
+					
 				"--n-iterations"
 					help = "Max iterations per Leiden run"
 					arg_type = Int
 					default = 10
-				
+					
 				"--seed"
 					help = "Random seed for reproducibility"
 					arg_type = Int
-				
+					
 				"--verbose"
 					help = "Print diagnostic messages"
 					arg_type = Bool
 					default = true
-				
+					
 				"--list-functions"
 					help = "List available functions"
 					action = :store_true
-				
+					
 				"--function-help"
 					help = "Show help for specific function"
 					arg_type = String
@@ -1082,13 +1082,13 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 			end
 
 		#	Extract common parameters
-			verbose = parsed_args["verbose"]
+			verbose    = parsed_args["verbose"]
 			output_dir = parsed_args["output-dir"]
-			mode = lowercase(parsed_args["mode"])
+			mode       = lowercase(parsed_args["mode"])
 
 		#	Load first network
-			edges_1 = nothing
-			nodes_1 = nothing
+			edges_1     = nothing
+			nodes_1     = nothing
 			partition_1 = nothing
 			
 			if parsed_args["ora-xml-1"] !== nothing
@@ -1104,20 +1104,36 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 						verbose = verbose
 					)
 					
-					edges_1 = ora_data.edges
-					nodes_1 = ora_data.nodes
+					edges_1     = ora_data.edges
+					nodes_1     = ora_data.nodes
 					partition_1 = ora_data.partition
 				
 			elseif parsed_args["edgelist-1"] !== nothing
-				#	Load from CSV
+				#	Load from CSV/TSV edge list
 					edges_1 = _load_edge_list(parsed_args["edgelist-1"]; verbose = verbose)
 				
+				#	Node list: use provided nodelist if present; else construct from edges
 					if parsed_args["nodelist-1"] !== nothing
 						nodes_1 = _load_node_list(parsed_args["nodelist-1"]; verbose = verbose)
+					else
+						#	Construct canonical node list from edge endpoints
+							all_ids = union(edges_1.src, edges_1.dst)
+							all_ids = string.(all_ids)
+							
+							if verbose
+								println("No node list provided for network 1; constructing node list from edge endpoints")
+								println("Constructed node list with $(length(all_ids)) unique nodes")
+							end
+							
+							nodes_1 = DataFrame(
+								id    = all_ids,
+								label = all_ids
+							)
 					end
 				
+				#	Partition (if provided) uses the node list for ID mapping / validation
 					if parsed_args["partition-1"] !== nothing
-						partition_1 = _load_partition(parsed_args["partition-1"]; node_list = nodes_1, 
+						partition_1 = _load_partition(parsed_args["partition-1"], node_list = nodes_1;
 													 verbose = verbose)
 					end
 			else
@@ -1131,8 +1147,8 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 			end
 		
 		#	Load second network if comparison mode
-			edges_2 = nothing
-			nodes_2 = nothing
+			edges_2     = nothing
+			nodes_2     = nothing
 			partition_2 = nothing
 			
 			if mode == "comparison"
@@ -1149,20 +1165,36 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 							verbose = verbose
 						)
 						
-						edges_2 = ora_data.edges
-						nodes_2 = ora_data.nodes
+						edges_2     = ora_data.edges
+						nodes_2     = ora_data.nodes
 						partition_2 = ora_data.partition
 					
 				elseif parsed_args["edgelist-2"] !== nothing
-					#	Load from CSV
+					#	Load from CSV/TSV edge list
 						edges_2 = _load_edge_list(parsed_args["edgelist-2"]; verbose = verbose)
 					
+					#	Node list: use provided nodelist if present; else construct from edges
 						if parsed_args["nodelist-2"] !== nothing
 							nodes_2 = _load_node_list(parsed_args["nodelist-2"]; verbose = verbose)
+						else
+							#	Construct canonical node list from edge endpoints
+								all_ids_2 = union(edges_2.src, edges_2.dst)
+								all_ids_2 = string.(all_ids_2)
+								
+								if verbose
+									println("No node list provided for network 2; constructing node list from edge endpoints")
+									println("Constructed node list with $(length(all_ids_2)) unique nodes")
+								end
+								
+								nodes_2 = DataFrame(
+									id    = all_ids_2,
+									label = all_ids_2
+								)
 						end
 					
+					#	Partition (if provided) uses the node list for ID mapping / validation
 						if parsed_args["partition-2"] !== nothing
-							partition_2 = _load_partition(parsed_args["partition-2"];  node_list = nodes_2, 
+							partition_2 = _load_partition(parsed_args["partition-2"], node_list = nodes_2;
 														 verbose = verbose)
 						end
 				else
@@ -1182,15 +1214,15 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 						#	Undirected / unweighted
 							global_stats, triad_census_counts, node_measures = undirected_binary_constructor(
 								edges_1, nodes_1;
-								resolution_sweep = parsed_args["resolution-sweep"],
-								resolution = parsed_args["resolution"],
-								directed = parsed_args["directed"],
-								weighted = parsed_args["weighted"],
-								n_resolutions = parsed_args["n-resolutions"],
-								n_runs_per_gamma = parsed_args["n-runs"],
+								resolution_sweep     = parsed_args["resolution-sweep"],
+								resolution           = parsed_args["resolution"],
+								directed             = parsed_args["directed"],
+								weighted             = parsed_args["weighted"],
+								n_resolutions        = parsed_args["n-resolutions"],
+								n_runs_per_gamma     = parsed_args["n-runs"],
 								n_iterations_per_run = parsed_args["n-iterations"],
-								seed = parsed_args["seed"],
-								provided_membership = partition_1
+								seed                 = parsed_args["seed"],
+								provided_membership  = partition_1
 							)
 							
 							feature_vector = symmetric_binary_feature_builder(
@@ -1199,16 +1231,16 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 					elseif !parsed_args["directed"] && parsed_args["weighted"]
 						#	Undirected / weighted
 							global_stats, triad_census_counts, node_measures = undirected_weighted_constructor(
-									edges_1, nodes_1;
-									resolution_sweep = parsed_args["resolution-sweep"],
-									resolution = parsed_args["resolution"],
-									directed = parsed_args["directed"],
-									weighted = parsed_args["weighted"],
-									n_resolutions = parsed_args["n-resolutions"],
-									n_runs_per_gamma = parsed_args["n-runs"],
-									n_iterations_per_run = parsed_args["n-iterations"],
-									seed = parsed_args["seed"],
-									provided_membership = partition_1
+								edges_1, nodes_1;
+								resolution_sweep     = parsed_args["resolution-sweep"],
+								resolution           = parsed_args["resolution"],
+								directed             = parsed_args["directed"],
+								weighted             = parsed_args["weighted"],
+								n_resolutions        = parsed_args["n-resolutions"],
+								n_runs_per_gamma     = parsed_args["n-runs"],
+								n_iterations_per_run = parsed_args["n-iterations"],
+								seed                 = parsed_args["seed"],
+								provided_membership  = partition_1
 							)
 								
 							feature_vector = symmetric_weighted_feature_builder(
@@ -1217,16 +1249,16 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 					elseif parsed_args["directed"] && !parsed_args["weighted"]
 						#	Directed / unweighted
 							global_stats, triad_census_counts, node_measures = directed_binary_constructor(
-									edges_1, nodes_1;
-									resolution_sweep = parsed_args["resolution-sweep"],
-									resolution = parsed_args["resolution"],
-									directed = parsed_args["directed"],
-									weighted = parsed_args["weighted"],
-									n_resolutions = parsed_args["n-resolutions"],
-									n_runs_per_gamma = parsed_args["n-runs"],
-									n_iterations_per_run = parsed_args["n-iterations"],
-									seed = parsed_args["seed"],
-									provided_membership = partition_1
+								edges_1, nodes_1;
+								resolution_sweep     = parsed_args["resolution-sweep"],
+								resolution           = parsed_args["resolution"],
+								directed             = parsed_args["directed"],
+								weighted             = parsed_args["weighted"],
+								n_resolutions        = parsed_args["n-resolutions"],
+								n_runs_per_gamma     = parsed_args["n-runs"],
+								n_iterations_per_run = parsed_args["n-iterations"],
+								seed                 = parsed_args["seed"],
+								provided_membership  = partition_1
 							)
 								
 							feature_vector = directed_binary_feature_builder(
@@ -1235,16 +1267,16 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 					else
 						#	Directed / weighted
 							global_stats, triad_census_counts, node_measures = directed_weighted_constructor(
-									edges_1, nodes_1;
-									resolution_sweep = parsed_args["resolution-sweep"],
-									resolution = parsed_args["resolution"],
-									directed = parsed_args["directed"],
-									weighted = parsed_args["weighted"],
-									n_resolutions = parsed_args["n-resolutions"],
-									n_runs_per_gamma = parsed_args["n-runs"],
-									n_iterations_per_run = parsed_args["n-iterations"],
-									seed = parsed_args["seed"],
-									provided_membership = partition_1
+								edges_1, nodes_1;
+								resolution_sweep     = parsed_args["resolution-sweep"],
+								resolution           = parsed_args["resolution"],
+								directed             = parsed_args["directed"],
+								weighted             = parsed_args["weighted"],
+								n_resolutions        = parsed_args["n-resolutions"],
+								n_runs_per_gamma     = parsed_args["n-runs"],
+								n_iterations_per_run = parsed_args["n-iterations"],
+								seed                 = parsed_args["seed"],
+								provided_membership  = partition_1
 							)
 								
 							feature_vector = directed_weighted_feature_builder(
@@ -1255,8 +1287,8 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 				#	Write results
 					_write_analysis_results(
 						global_stats, triad_census_counts, node_measures, feature_vector,
-							output_dir, parsed_args["name-1"];
-							verbose = verbose
+						output_dir, parsed_args["name-1"];
+						verbose = verbose
 					)
 			else  # comparison mode
 				#	Announcing Comparator Mode
@@ -1267,14 +1299,14 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 				#	Run comparator (constructors + feature building handled internally)
 					result = network_comparator(
 						edges_1, nodes_1, edges_2, nodes_2;
-						resolution_sweep = parsed_args["resolution-sweep"],
-						resolution = parsed_args["resolution"],
-						directed = parsed_args["directed"],
-						weighted = parsed_args["weighted"],
-						n_resolutions = parsed_args["n-resolutions"],
-						n_runs_per_gamma = parsed_args["n-runs"],
-						n_iterations_per_run = parsed_args["n-iterations"],
-						seed = parsed_args["seed"],
+						resolution_sweep      = parsed_args["resolution-sweep"],
+						resolution            = parsed_args["resolution"],
+						directed              = parsed_args["directed"],
+						weighted              = parsed_args["weighted"],
+						n_resolutions         = parsed_args["n-resolutions"],
+						n_runs_per_gamma      = parsed_args["n-runs"],
+						n_iterations_per_run  = parsed_args["n-iterations"],
+						seed                  = parsed_args["seed"],
 						provided_membership_1 = partition_1,
 						provided_membership_2 = partition_2
 					)
@@ -1315,12 +1347,17 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 					end
 				
 				#	Write comparison results (uses result.combined_features and similarity scores)
-					_write_comparison_results(result, output_dir; name_1 = parsed_args["name-1"],
-    										  name_2 = parsed_args["name-2"], verbose = verbose)
+					_write_comparison_results(
+						result, output_dir;
+						name_1 = parsed_args["name-1"],
+						name_2 = parsed_args["name-2"],
+						verbose = verbose
+					)
 			end
 		
 			if verbose
 				println("\nAnalysis complete. Results saved to: $output_dir")
 			end
 	end
+
 end # module CLI
