@@ -14,6 +14,8 @@ venv/
 /mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/julia_env/build/
 /mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/julia_env/build/*
 /mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/julia_env/build/**
+/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/julia_env/build/Large_Graph_Similarity_app/bin/large_graph_similarity
+/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/julia_env/build/Large_Graph_Similarity_app/lib/julia/sys.so
 
 # Sysimages generated during build
 *.so
