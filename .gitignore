@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.build/
+dist/
+.ipynb_checkpoints/
+
+# Virtual envs
+.venv/
+venv/
+
+# Julia / PackageCompiler build artifacts
+julia_env/build/
+julia_env/build/**
+
+# Sysimages generated during build
+*.so
+*.dylib
+*.dll
+
+# Temporary PackageCompiler files
+tmp/
+tmp/*
+jl_*.o
+jl_*.ji
