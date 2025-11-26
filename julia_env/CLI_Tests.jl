@@ -1718,7 +1718,7 @@ using Large_Graph_Similarity
 				#	Common options
 				"--output-dir", test_output_dir,
 				"--directed", "true",
-				"--weighted", "false",
+				"--weighted", "true",
 				"--resolution", "1.0",
 				"--n-runs", "3",
 				"--n-iterations", "5",

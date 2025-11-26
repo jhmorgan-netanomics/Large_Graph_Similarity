@@ -13340,49 +13340,51 @@ THE SOFTWARE.
 	function _apply_category_weights!(measures_df::DataFrame)
 		"""
 		Args:
-			measures_df::DataFrame: Features with :measure and :value columns
+			measures_df::DataFrame: Features with :measure, :value, and :type columns
 		Returns:
 			Nothing (modifies in place)
 		Notes:
 			Applies weights to normalize multi-indicator categories:
 			- Triad Census: weight = 1/n_triads
-			- K-Core: weight = 1/n_kcore_levels
-			- S-Core: weight = 1/n_score_levels
+			- K-Core Decomposition: weight = 1/n_kcore_levels
+			- S-Core Decomposition: weight = 1/n_score_levels (weighted only)
 			- Community Structure: weight = 1/n_community_measures
 		"""
 		
-		#	Identify measure patterns
-			triad_pattern = r"^triad_"
-			kcore_pattern = r"^k_core_"
-			score_pattern = r"^s_core_"
-			community_patterns = [r"^num_communities", r"^modularity", r"^largest_component_fraction", 
-								  r"^component_size_", r"^community_"]
+		#	Define Multi-Indicator Category Names
+			weighted_types = Set([
+				"Triad Census",
+				"K-Core Decomposition",
+				"S-Core Decomposition",
+				"Community Structure"
+			])
 		
-		#	Count measures in each category
-			n_triads = count(m -> occursin(triad_pattern, m), measures_df.measure)
-			n_kcores = count(m -> occursin(kcore_pattern, m), measures_df.measure)
-			n_scores = count(m -> occursin(score_pattern, m), measures_df.measure)
-			n_community = count(m -> any(p -> occursin(p, m), community_patterns), measures_df.measure)
+		#	Get Unique Types in Order
+			measure_types = unique(measures_df.type)
 		
-		#	Add weight column if not present
-			if !hasproperty(measures_df, :weight)
-				measures_df.weight = ones(Float64, nrow(measures_df))
-			end
-		
-		#	Apply category weights
-			for i in eachindex(measures_df.measure)
-				m = measures_df.measure[i]
+		#	Build Weight Vectors for Each Type
+			weight_vectors = Vector{Float64}[]
+			
+			for type_name in measure_types
+				#	Count measures of this type
+					type_mask = measures_df.type .== type_name
+					type_count = sum(type_mask)
 				
-				if occursin(triad_pattern, m) && n_triads > 0
-					measures_df.weight[i] = 1.0 / n_triads
-				elseif occursin(kcore_pattern, m) && n_kcores > 0
-					measures_df.weight[i] = 1.0 / n_kcores
-				elseif occursin(score_pattern, m) && n_scores > 0
-					measures_df.weight[i] = 1.0 / n_scores
-				elseif any(p -> occursin(p, m), community_patterns) && n_community > 0
-					measures_df.weight[i] = 1.0 / n_community
-				end
+				#	Apply appropriate weight
+					if type_name in weighted_types && type_count > 0
+						#	Multi-indicator category: normalized weight
+							push!(weight_vectors, fill(1.0 / type_count, type_count))
+					else
+						#	Regular category: unit weight
+							push!(weight_vectors, ones(Float64, type_count))
+					end
 			end
+		
+		#	Combine All Weights
+			measure_weights = vcat(weight_vectors...)
+		
+		#	Add Weight Column
+			measures_df.weight = measure_weights
 		
 		#	Return nothing (in-place modification)
 			return nothing
@@ -14196,21 +14198,106 @@ THE SOFTWARE.
 			leftjoin!(combined_measures, types_index, on = :measure)
 			combined_measures.type = string.(combined_measures.type)
 		
-		#	Add weights (use average when both networks have the measure)
-			weight_df_1 = feature_vector_1[:, [:measure, :weight]]
-			weight_df_2 = feature_vector_2[:, [:measure, :weight]]
-			rename!(weight_df_1, :weight => :weight_1)
-			rename!(weight_df_2, :weight => :weight_2)
-		
-			leftjoin!(combined_measures, weight_df_1, on = :measure)
-			leftjoin!(combined_measures, weight_df_2, on = :measure)
-		
-			combined_measures.weight_1[ismissing.(combined_measures.weight_1)] .= 1.0
-			combined_measures.weight_2[ismissing.(combined_measures.weight_2)] .= 1.0
-			combined_measures.weight = (combined_measures.weight_1 .+ combined_measures.weight_2) ./ 2.0
-		
-			select!(combined_measures, Not([:weight_1, :weight_2]))
-		
+		#   Add weights 
+            weight_df_1 = feature_vector_1[:, [:measure, :weight]]
+            weight_df_2 = feature_vector_2[:, [:measure, :weight]]
+            rename!(weight_df_1, :weight => :weight_1)
+            rename!(weight_df_2, :weight => :weight_2)
+
+            leftjoin!(combined_measures, weight_df_1, on = :measure)
+            leftjoin!(combined_measures, weight_df_2, on = :measure)
+
+        #   Treat "no weight in that network" as 0.0 (no contribution from that side)
+            combined_measures.weight_1 = coalesce.(combined_measures.weight_1, 0.0)
+            combined_measures.weight_2 = coalesce.(combined_measures.weight_2, 0.0)
+
+        #   Normalize by type, with special handling for multi-indicator measures       
+            measure_types = unique(combined_measures.type)
+
+        #   Types that get special multi-indicator weighting
+			special_measures = ["Triad Census"]
+			
+            special_mask    = in.(measure_types, Ref(special_measures))
+            special_present = measure_types[special_mask]
+            other_types     = measure_types[.!special_mask]
+
+        #   Special Multi-Indicator Types
+			special_type_weights = Vector{DataFrame}(undef, length(special_present))
+			for (i, type_name) in pairs(special_present)
+				#	Isolate rows for this special type
+					weight_vectors = combined_measures[combined_measures.type .== type_name,
+													  [:measure, :weight_1, :weight_2]]
+
+				# 	Keep an index so we can restore original order later
+					insertcols!(weight_vectors, 1, :Obs_ID => collect(1:nrow(weight_vectors)))
+
+				#	'keep' > 0 means feature is present in both networks
+					weight_vectors.keep = weight_vectors.weight_1 .* weight_vectors.weight_2
+
+				#	Handling instance of shared and singular features
+					if sum(iszero.(weight_vectors.keep)) == 0
+						# 	All elements are shared between networks:
+						# 	use either weight_1 or the (effectively identical) "average"
+							type_weights = weight_vectors.weight_1   # sum(type_weights) == 1 for this category
+
+							combined_weights = DataFrame(
+								measure = weight_vectors.measure,
+								weight  = type_weights,
+							)
+					else
+						# 	At least one element appears in only one network
+						# 	Shared elements: keep > 0
+							shared_weights = weight_vectors[weight_vectors.keep .> 0, :]
+							shared_denominator = sum(vcat(shared_weights.weight_1,
+														shared_weights.weight_2))
+							shared_numerator   = shared_weights.weight_1 .+ shared_weights.weight_2
+
+						# 	Proportional to (w1 + w2); shared subset sums to 1 (before final renorm)
+							shared_weights.weight = shared_numerator ./ shared_denominator
+
+						# 	Singular elements: keep == 0
+							singular_weights = weight_vectors[weight_vectors.keep .== 0, :]
+							singular_denominator = sum(vcat(singular_weights.weight_1,
+															singular_weights.weight_2))
+							singular_numerator   = singular_weights.weight_1 .+ singular_weights.weight_2
+
+						# 	Proportional to (w1 + w2); singular subset sums to 1 (before final renorm)
+							singular_weights.weight = singular_numerator ./ singular_denominator
+
+						# 	Put shared + singular back in original order
+							combined_weights = vcat(shared_weights, singular_weights)
+							sort!(combined_weights, [:Obs_ID])
+							select!(combined_weights, [:measure, :weight])
+
+						# 	Final renormalization: ensure the whole category sums to 1
+							total = sum(combined_weights.weight)
+							combined_weights.weight ./= total
+					end
+
+				# 	Store per-type weights
+					special_type_weights[i] = combined_weights
+			end
+			special_types_weight_df = reduce(vcat, special_type_weights; cols = :union)
+
+        #   Other (non-special) Types
+            other_type_weights = Vector{DataFrame}(undef, length(other_types))
+            for (i, type_name) in pairs(other_types)
+                #   Isolate Feature
+                    weight_vectors = combined_measures[combined_measures.type .== type_name,
+                                                    [:measure, :weight_1, :weight_2]]
+
+                    type_n = nrow(weight_vectors)
+
+                #   Unit weight for all features of these types
+                    weight_vectors.weight = ones(Float64, type_n)
+                    other_type_weights[i] = select!(weight_vectors, [:measure, :weight])
+            end
+            other_type_weights_df = reduce(vcat, other_type_weights; cols = :union)
+
+        #   Final Normalized Weights for All Measures
+            normalized_weight_types = [other_type_weights_df; special_types_weight_df]
+            leftjoin!(combined_measures, normalized_weight_types, on = :measure)
+
 		#	========== COMPUTE SIMILARITY METRICS FOR BOTH VERSIONS ==========
 		
 		#	Split into raw and asinh versions
@@ -14263,9 +14350,10 @@ THE SOFTWARE.
 	The function provides two comparison perspectives:
 	1. **Raw comparison**: Preserves tail differences in degree distributions and other node measures
 	2. **Asinh comparison**: Applies inverse hyperbolic sine transformation to reduce influence of extreme values
-
-	Multi-indicator categories (Triad Census, K-Core, S-Core, Community Structure) are weighted by 1/n_indicators to ensure balanced contributions across structural aspects.
-
+	3. **Category weighting**: Multi-indicator structural measures  
+       (Triad Census) are normalized *within each network* using `_apply_category_weights!`,  
+       ensuring that the **total weight of all features in each category equals 1**  
+       in each network. Single-indicator measures retain weight 1.
 	Feature computation includes:
 	- Global metrics (density, components, etc.) with appropriate transformations
 	- Node-level distributions compared via Jensen-Shannon divergence
@@ -14283,7 +14371,8 @@ THE SOFTWARE.
 	- `node_measures_2::DataFrame`: Node-level measures for network 2
 	
 	*Comparison Results:*
-	- `combined_features::DataFrame`: Aligned feature vectors with columns [:measure, :network_1_values, :network_2_values, :type, :weight]
+	- `combined_features::DataFrame`: Aligned feature vectors with columns [:measure, :network_1_values, :network_2_values, :type, 
+                                                                            :weight_1, weight_2, :weight]
 	- `overall_distance_raw::Float64`: Weighted Euclidean distance using raw JS divergences
 	- `overall_similarity_raw::Float64`: Raw similarity score ∈ (0,1]
 	- `overall_distance_asinh::Float64`: Weighted Euclidean distance using asinh JS divergences

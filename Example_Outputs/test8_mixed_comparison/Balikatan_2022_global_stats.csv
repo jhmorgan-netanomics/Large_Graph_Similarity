@@ -17,13 +17,13 @@ bow_tie_out_size,827
 bow_tie_scc_fraction,0.013363028953229399
 bow_tie_in_fraction,0.014847809948032665
 bow_tie_out_fraction,0.6139569413511508
-all_links,"(count = 3146, min = 1.0, max = 1.0, mean = 1.0, std = 0.0, sum = 3146.0)"
-nonself_links,"(count = 3105, min = 1.0, max = 1.0, mean = 1.0, std = 0.0, sum = 3105.0)"
-self_loops,"(count = 41, min = 1.0, max = 1.0, mean = 1.0, std = 0.0, sum = 41.0)"
-degree assortativity,-0.165304
+all_links,"(count = 3146, min = 1.0, max = 31.0, mean = 1.4326128417037507, std = 1.5473265012516062, sum = 4507.0)"
+nonself_links,"(count = 3105, min = 1.0, max = 23.0, mean = 1.421256038647343, std = 1.455623456186251, sum = 4413.0)"
+self_loops,"(count = 41, min = 1.0, max = 31.0, mean = 2.292682926829268, std = 4.7433851370093505, sum = 94.0)"
+degree assortativity,0.097475
 transitivity,0.231834
 local clustering coefficient,0.426538
-reciprocity,0.010413
+reciprocity,0.026286
 density,0.001713
 resolution,1.0
-modularity,0.586771
+modularity,0.571573

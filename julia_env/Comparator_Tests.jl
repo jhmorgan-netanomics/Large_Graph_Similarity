@@ -3242,7 +3242,7 @@ using Large_Graph_Similarity
 	function _apply_category_weights!(measures_df::DataFrame)
 		"""
 		Args:
-			measures_df::DataFrame: Features with :measure and :value columns
+			measures_df::DataFrame: Features with :measure, :value, and :type columns
 		Returns:
 			Nothing (modifies in place)
 		Notes:
@@ -3253,38 +3253,31 @@ using Large_Graph_Similarity
 			- Community Structure: weight = 1/n_community_measures
 		"""
 		
-		#	Identify measure patterns
-			triad_pattern = r"^triad_"
-			kcore_pattern = r"^k_core_"
-			score_pattern = r"^s_core_"
-			community_patterns = [r"^num_communities", r"^modularity", r"^largest_component_fraction", 
-								  r"^component_size_", r"^community_"]
+		#	Get Unique Types in Order
+			measure_types = unique(measures_df.type)
 		
-		#	Count measures in each category
-			n_triads = count(m -> occursin(triad_pattern, m), measures_df.measure)
-			n_kcores = count(m -> occursin(kcore_pattern, m), measures_df.measure)
-			n_scores = count(m -> occursin(score_pattern, m), measures_df.measure)
-			n_community = count(m -> any(p -> occursin(p, m), community_patterns), measures_df.measure)
+		#	Count Measures per Type
+			type_masks = [measures_df.type .== t for t in measure_types]
+			type_counts = [sum(mask) for mask in type_masks]
 		
-		#	Add weight column if not present
-			if !hasproperty(measures_df, :weight)
-				measures_df.weight = ones(Float64, nrow(measures_df))
-			end
-		
-		#	Apply category weights
-			for i in eachindex(measures_df.measure)
-				m = measures_df.measure[i]
-				
-				if occursin(triad_pattern, m) && n_triads > 0
-					measures_df.weight[i] = 1.0 / n_triads
-				elseif occursin(kcore_pattern, m) && n_kcores > 0
-					measures_df.weight[i] = 1.0 / n_kcores
-				elseif occursin(score_pattern, m) && n_scores > 0
-					measures_df.weight[i] = 1.0 / n_scores
-				elseif any(p -> occursin(p, m), community_patterns) && n_community > 0
-					measures_df.weight[i] = 1.0 / n_community
+		#	Initialize Weight Vectors
+			weight_vectors = Vector{Float64}[]
+			
+			for (i, count) in enumerate(type_counts)
+				if i in [4, 5, 6, 7] && count > 0
+					#	Special categories: normalized weights
+						push!(weight_vectors, fill(1.0 / count, count))
+				else
+					#	Regular categories: unit weights
+						push!(weight_vectors, ones(Float64, count))
 				end
 			end
+		
+		#	Combine All Weights
+			measure_weights = vcat(weight_vectors...)
+		
+		#	Add Weight Column
+			measures_df.weight = measure_weights
 		
 		#	Return nothing (in-place modification)
 			return nothing
@@ -3839,6 +3832,394 @@ using Large_Graph_Similarity
 			return raw_measures, asinh_measures
 	end
 
+#	Network Comparator: Compare Two Networks
+	function network_comparator(edges_1::DataFrame, nodes_1::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}},
+								edges_2::DataFrame, nodes_2::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}};
+								resolution_sweep::Bool = false, resolution::Float64 = 1.0, directed::Bool = true, 
+								weighted::Bool = true, n_resolutions::Int = 15, n_runs_per_gamma::Int = 5,
+								n_iterations_per_run::Int = 10, seed::Union{Int,Nothing} = nothing, 
+								provided_membership_1::Union{Nothing,DataFrame,Vector{Int},Dict} = nothing,
+								provided_membership_2::Union{Nothing,DataFrame,Vector{Int},Dict} = nothing)
+		"""
+		Compare two networks using both raw and asinh-normalized node measure distributions.
+		
+		Args:
+			edges_1, edges_2::DataFrame: Edge lists with :src, :dst, optional :weight
+			nodes_1, nodes_2: Node universes (include isolates if present)
+			resolution_sweep::Bool: Use CHAMP multi-resolution community detection
+			resolution::Float64: Resolution parameter for modularity
+			directed::Bool: Treat networks as directed (default true)
+			weighted::Bool: Use edge weights if present (default true)
+			n_resolutions::Int: Number of resolutions for CHAMP sweep
+			n_runs_per_gamma::Int: Leiden runs per resolution
+			n_iterations_per_run::Int: Iterations per Leiden run
+			seed: Random seed for reproducibility
+			provided_membership_1, provided_membership_2: Optional pre-computed communities
+		Returns:
+			NamedTuple with fields:
+				- global_stats_1: DataFrame of global statistics for network 1
+				- triad_census_counts_1: DataFrame of triad census for network 1
+				- node_measures_1: DataFrame of node-level measures for network 1
+				- global_stats_2: DataFrame of global statistics for network 2
+				- triad_census_counts_2: DataFrame of triad census for network 2
+				- node_measures_2: DataFrame of node-level measures for network 2
+				- combined_features: DataFrame of aligned feature vectors with weights
+				- overall_distance_raw: Euclidean distance using raw JS divergences
+				- overall_similarity_raw: Similarity score for raw comparison
+				- overall_distance_asinh: Euclidean distance using asinh JS divergences
+				- overall_similarity_asinh: Similarity score for asinh comparison
+				- type_contributions_raw: Per-type distance breakdown for raw
+				- type_contributions_asinh: Per-type distance breakdown for asinh
+		Notes:
+			- Returns individual network analyses alongside comparison results
+			- Applies category weights to multi-indicator measures
+			- Computes both raw and asinh-normalized comparisons simultaneously
+			- Raw comparison preserves tail differences in degree distributions
+			- Asinh comparison reduces influence of extreme values
+		"""
+		
+		#	Create working copies
+			clean_edges_1 = deepcopy(edges_1) 
+			clean_nodes_1 = deepcopy(nodes_1)
+			clean_edges_2 = deepcopy(edges_2)
+			clean_nodes_2 = deepcopy(nodes_2)
+		
+		#	========== CONSTRUCT FEATURE VECTORS ==========
+		
+		#	Select appropriate constructor and builder based on configuration
+			if !directed && !weighted
+				#	Undirected binary networks
+					global_stats_1, triad_census_counts_1, node_measures_1 = undirected_binary_constructor(
+						clean_edges_1, clean_nodes_1;
+						resolution_sweep = resolution_sweep,
+						resolution = resolution,
+						directed = directed,
+						weighted = weighted,
+						n_resolutions = n_resolutions,
+						n_runs_per_gamma = n_runs_per_gamma,
+						n_iterations_per_run = n_iterations_per_run,
+						seed = seed,
+						provided_membership = provided_membership_1
+					)
+				
+					global_stats_2, triad_census_counts_2, node_measures_2 = undirected_binary_constructor(
+						clean_edges_2, clean_nodes_2;
+						resolution_sweep = resolution_sweep,
+						resolution = resolution,
+						directed = directed,
+						weighted = weighted,
+						n_resolutions = n_resolutions,
+						n_runs_per_gamma = n_runs_per_gamma,
+						n_iterations_per_run = n_iterations_per_run,
+						seed = seed,
+						provided_membership = provided_membership_2
+					)
+				
+				#	Build feature vectors
+					feature_vector_1 = symmetric_binary_feature_builder(global_stats_1, triad_census_counts_1, node_measures_1)
+					feature_vector_2 = symmetric_binary_feature_builder(global_stats_2, triad_census_counts_2, node_measures_2)
+			
+			elseif !directed && weighted
+				#	Undirected weighted networks
+					global_stats_1, triad_census_counts_1, node_measures_1 = undirected_weighted_constructor(
+						clean_edges_1, clean_nodes_1;
+						resolution_sweep = resolution_sweep,
+						resolution = resolution,
+						directed = directed,
+						weighted = weighted,
+						n_resolutions = n_resolutions,
+						n_runs_per_gamma = n_runs_per_gamma,
+						n_iterations_per_run = n_iterations_per_run,
+						seed = seed,
+						provided_membership = provided_membership_1
+					)
+				
+					global_stats_2, triad_census_counts_2, node_measures_2 = undirected_weighted_constructor(
+						clean_edges_2, clean_nodes_2;
+						resolution_sweep = resolution_sweep,
+						resolution = resolution,
+						directed = directed,
+						weighted = weighted,
+						n_resolutions = n_resolutions,
+						n_runs_per_gamma = n_runs_per_gamma,
+						n_iterations_per_run = n_iterations_per_run,
+						seed = seed,
+						provided_membership = provided_membership_2
+					)
+				
+				#	Build feature vectors
+					feature_vector_1 = symmetric_weighted_feature_builder(global_stats_1, triad_census_counts_1, node_measures_1)
+					feature_vector_2 = symmetric_weighted_feature_builder(global_stats_2, triad_census_counts_2, node_measures_2)
+			
+			elseif directed && !weighted
+				#	Directed binary networks
+					global_stats_1, triad_census_counts_1, node_measures_1 = directed_binary_constructor(
+						clean_edges_1, clean_nodes_1;
+						resolution_sweep = resolution_sweep,
+						resolution = resolution,
+						directed = directed,
+						weighted = weighted,
+						n_resolutions = n_resolutions,
+						n_runs_per_gamma = n_runs_per_gamma,
+						n_iterations_per_run = n_iterations_per_run,
+						seed = seed,
+						provided_membership = provided_membership_1
+					)
+				
+					global_stats_2, triad_census_counts_2, node_measures_2 = directed_binary_constructor(
+						clean_edges_2, clean_nodes_2;
+						resolution_sweep = resolution_sweep,
+						resolution = resolution,
+						directed = directed,
+						weighted = weighted,
+						n_resolutions = n_resolutions,
+						n_runs_per_gamma = n_runs_per_gamma,
+						n_iterations_per_run = n_iterations_per_run,
+						seed = seed,
+						provided_membership = provided_membership_2
+					)
+				
+				#	Build feature vectors
+					feature_vector_1 = directed_binary_feature_builder(global_stats_1, triad_census_counts_1, node_measures_1)
+					feature_vector_2 = directed_binary_feature_builder(global_stats_2, triad_census_counts_2, node_measures_2)
+			
+			else
+				#	Directed weighted networks
+					global_stats_1, triad_census_counts_1, node_measures_1 = directed_weighted_constructor(
+						clean_edges_1, clean_nodes_1;
+						resolution_sweep = resolution_sweep,
+						resolution = resolution,
+						directed = directed,
+						weighted = weighted,
+						n_resolutions = n_resolutions,
+						n_runs_per_gamma = n_runs_per_gamma,
+						n_iterations_per_run = n_iterations_per_run,
+						seed = seed,
+						provided_membership = provided_membership_1
+					)
+				
+					global_stats_2, triad_census_counts_2, node_measures_2 = directed_weighted_constructor(
+						clean_edges_2, clean_nodes_2;
+						resolution_sweep = resolution_sweep,
+						resolution = resolution,
+						directed = directed,
+						weighted = weighted,
+						n_resolutions = n_resolutions,
+						n_runs_per_gamma = n_runs_per_gamma,
+						n_iterations_per_run = n_iterations_per_run,
+						seed = seed,
+						provided_membership = provided_membership_2
+					)
+				
+				#	Build feature vectors
+					feature_vector_1 = directed_weighted_feature_builder(global_stats_1, triad_census_counts_1, node_measures_1)
+					feature_vector_2 = directed_weighted_feature_builder(global_stats_2, triad_census_counts_2, node_measures_2)
+			end
+		
+		#	========== GLOBAL METRIC NORMALIZATIONS ==========
+		
+		#	Isolate Numerators
+			n_1 = parse(Int64, global_stats_1.value[1])
+			n_2 = parse(Int64, global_stats_2.value[1])
+		
+		#	Normalize Feature Vectors (includes both raw and asinh JS features)
+			feature_vector_1, feature_vector_2 = _global_metric_normalizer(feature_vector_1, feature_vector_2, 
+																		   node_measures_1, node_measures_2,
+																		   n_1, n_2, directed)
+		
+		#	========== ALIGN AND COMBINE FEATURE VECTORS ==========
+		
+		#	Rename columns for clarity
+			rename!(feature_vector_1, ["measure", "network_1_values", "type", "weight"])
+			rename!(feature_vector_2, ["measure", "network_2_values", "type", "weight"])
+		
+		#	Add weights if not present (will be present from _global_metric_normalizer)
+			if !hasproperty(feature_vector_1, :weight)
+				feature_vector_1.weight = ones(Float64, nrow(feature_vector_1))
+			end
+			if !hasproperty(feature_vector_2, :weight)
+				feature_vector_2.weight = ones(Float64, nrow(feature_vector_2))
+			end
+		
+		#	Create measure indices with sequential IDs
+			measures_1 = DataFrame(ID_1 = 1:nrow(feature_vector_1), measure = feature_vector_1.measure)
+			measures_2 = DataFrame(ID_2 = 1:nrow(feature_vector_2), measure = feature_vector_2.measure)
+		
+		#	Outer join to capture all unique measures
+			combined_measures = outerjoin(measures_1, measures_2; on = :measure)
+			combined_measures = select(combined_measures, :measure, :ID_1, :ID_2)
+		
+		#	Handle missing features by assigning sequential IDs
+			id_1_missing = sum(ismissing.(combined_measures.ID_1))
+			id_2_missing = sum(ismissing.(combined_measures.ID_2))
+		
+			if id_1_missing > 0
+				missing_number = maximum(skipmissing(combined_measures.ID_1)) + 1
+				combined_measures.ID_1[ismissing.(combined_measures.ID_1)] .= missing_number 
+			end
+		
+			if id_2_missing > 0
+				missing_number = maximum(skipmissing(combined_measures.ID_2)) + 1
+				combined_measures.ID_2[ismissing.(combined_measures.ID_2)] .= missing_number 
+			end
+		
+			combined_measures.ID_1 = convert.(Int64, combined_measures.ID_1)
+			combined_measures.ID_2 = convert.(Int64, combined_measures.ID_2)
+		
+		#	Sort by larger feature set to preserve ordering
+			feature_length_1 = nrow(feature_vector_1)
+			feature_length_2 = nrow(feature_vector_2)
+		
+			if feature_length_1 >= feature_length_2
+				sort!(combined_measures, [:ID_1, :ID_2])
+			else
+				sort!(combined_measures, [:ID_2, :ID_1])
+			end
+		
+			select!(combined_measures, :measure)
+		
+		#	Join values from both networks, zero-fill missing
+			leftjoin!(combined_measures, feature_vector_1[:, [:measure, :network_1_values]], on = :measure)
+			combined_measures.network_1_values[ismissing.(combined_measures.network_1_values)] .= 0.0
+			combined_measures.network_1_values = convert.(Float64, combined_measures.network_1_values)
+		
+			leftjoin!(combined_measures, feature_vector_2[:, [:measure, :network_2_values]], on = :measure)
+			combined_measures.network_2_values[ismissing.(combined_measures.network_2_values)] .= 0.0
+			combined_measures.network_2_values = convert.(Float64, combined_measures.network_2_values)
+		
+		#	Add feature types
+			types_index = unique(vcat(feature_vector_1[:, [:measure, :type]], feature_vector_2[:, [:measure, :type]]))
+			leftjoin!(combined_measures, types_index, on = :measure)
+			combined_measures.type = string.(combined_measures.type)
+		
+		#   Add weights 
+            weight_df_1 = feature_vector_1[:, [:measure, :weight]]
+            weight_df_2 = feature_vector_2[:, [:measure, :weight]]
+            rename!(weight_df_1, :weight => :weight_1)
+            rename!(weight_df_2, :weight => :weight_2)
+
+            leftjoin!(combined_measures, weight_df_1, on = :measure)
+            leftjoin!(combined_measures, weight_df_2, on = :measure)
+
+        #   Treat "no weight in that network" as 0.0 (no contribution from that side)
+            combined_measures.weight_1 = coalesce.(combined_measures.weight_1, 0.0)
+            combined_measures.weight_2 = coalesce.(combined_measures.weight_2, 0.0)
+
+        #   Normalize by type, with special handling for multi-indicator measures       
+            measure_types = unique(combined_measures.type)
+
+        #   Types that get special multi-indicator weighting
+            special_measures = ["Triad Census", "K-Core Decomposition",
+                                "S-Core Decomposition", "Community Structure"]
+
+            special_mask    = in.(measure_types, Ref(special_measures))
+            special_present = measure_types[special_mask]
+            other_types     = measure_types[.!special_mask]
+
+        #   Special Multi-Indicator Types
+            special_type_weights = Vector{DataFrame}(undef, length(special_present))
+            for (i, type_name) in pairs(special_present)
+                #   Isolate rows for this special type
+                    weight_vectors = combined_measures[combined_measures.type .== type_name,
+                                                      [:measure, :weight_1, :weight_2]]
+
+                #   Keep an index so we can restore original order later
+                    insertcols!(weight_vectors, 1, :Obs_ID => collect(1:nrow(weight_vectors)))
+
+                #   'keep' > 0 means feature is present in both networks
+                    weight_vectors.keep = weight_vectors.weight_1 .* weight_vectors.weight_2
+
+                #   Handling Instance of Shared and Singular Features
+                    if sum(iszero.(weight_vectors.keep)) == 0
+                        #   All elements are shared between networks:
+                        #   use either weight_1 or the (effectively identical) "average"
+                            type_weights = (weight_vectors.weight_1 .+ weight_vectors.weight_1) ./ 2.0
+
+                            combined_weights = DataFrame(
+                                measure = weight_vectors.measure,
+                                weight  = type_weights,
+                            )
+                    else
+                        #   At least one element appears in only one network
+                        #   Shared elements: keep > 0
+                            shared_weights = weight_vectors[weight_vectors.keep .> 0, :]
+                            shared_denominator = sum(vcat(shared_weights.weight_1,
+                                                        shared_weights.weight_2))
+                            shared_numerator   = shared_weights.weight_1 .+ shared_weights.weight_2
+
+                        #   Proportional to (w1 + w2), then scaled to contribute half of the type's mass
+                            shared_weights.weight = shared_numerator ./ shared_denominator
+                            shared_weights.weight ./= 2.0
+
+                        #   Singular elements: keep == 0
+                            singular_weights = weight_vectors[weight_vectors.keep .== 0, :]
+                            singular_denominator = sum(vcat(singular_weights.weight_1,
+                                                            singular_weights.weight_2))
+                            singular_numerator   = singular_weights.weight_1 .+ singular_weights.weight_2
+
+                        #   Proportional to (w1 + w2), then scaled to contribute half of the type's mass
+                            singular_weights.weight = singular_numerator ./ singular_denominator
+                            singular_weights.weight ./= 2.0
+
+                        #   Put shared + singular back in original order
+                            combined_weights = vcat(shared_weights, singular_weights)
+                            sort!(combined_weights, [:Obs_ID])
+                            select!(combined_weights, [:measure, :weight])
+                    end
+
+                #   Populate Vector
+                    special_type_weights[i] = combined_weights
+            end
+            special_types_weight_df = reduce(vcat, special_type_weights; cols = :union)
+
+        #   Other (non-special) Types
+            other_type_weights = Vector{DataFrame}(undef, length(other_types))
+            for (i, type_name) in pairs(other_types)
+                #   Isolate Feature
+                    weight_vectors = combined_measures[combined_measures.type .== type_name,
+                                                    [:measure, :weight_1, :weight_2]]
+
+                    type_n = nrow(weight_vectors)
+
+                #   Unit weight for all features of these types
+                    weight_vectors.weight = ones(Float64, type_n)
+                    other_type_weights[i] = select!(weight_vectors, [:measure, :weight])
+            end
+            other_type_weights_df = reduce(vcat, other_type_weights; cols = :union)
+
+        #   Final Normalized Weights for All Measures
+            normalized_weight_types = [other_type_weights_df; special_types_weight_df]
+            leftjoin!(combined_measures, normalized_weight_types, on = :measure)
+
+		#	========== COMPUTE SIMILARITY METRICS FOR BOTH VERSIONS ==========
+		
+		#	Split into raw and asinh versions
+			raw_measures, asinh_measures = _split_js_features(combined_measures)
+		
+		#	Compute overall Euclidean distances and similarities
+			dist_raw = _compute_overall_distance(raw_measures; use_weights = true)
+			dist_asinh = _compute_overall_distance(asinh_measures; use_weights = true)
+		
+		#	Compute type-level contributions
+			type_contrib_raw = _compute_type_contributions(raw_measures, dist_raw.squared_distance; use_weights = true)
+			type_contrib_asinh = _compute_type_contributions(asinh_measures, dist_asinh.squared_distance; use_weights = true)
+		
+		#	Return comprehensive results
+			return (global_stats_1 = global_stats_1, 
+					triad_census_counts_1 = triad_census_counts_1, 
+					node_measures_1 = node_measures_1,
+					global_stats_2 = global_stats_2,
+					triad_census_counts_2 = triad_census_counts_2,
+					node_measures_2 = node_measures_2,
+					combined_features = combined_measures,
+					overall_distance_raw = dist_raw.distance,
+					overall_similarity_raw = dist_raw.similarity,
+					overall_distance_asinh = dist_asinh.distance,
+					overall_similarity_asinh = dist_asinh.similarity,
+					type_contributions_raw = type_contrib_raw,
+					type_contributions_asinh = type_contrib_asinh)
+	end
+
 ############################
 #   IMPORT TEST NETWORKS   #
 ############################
@@ -3928,7 +4309,7 @@ using Large_Graph_Similarity
 #   COMPARATOR FUNCTION ASSESSMENT   #
 ######################################
 
-#   Performing Network Comparison of Balikatan and TOTO 2023: Raw Similarity (0.276296), Tail-Normalized Similarity(0.27697)
+#   Performing Network Comparison of Balikatan and TOTO 2023: Raw Similarity (0.27964), Tail-Normalized Similarity(0.2803)
     global_stats_1, triad_census_counts_1, node_measures_1,
     global_stats_2, triad_census_counts_2, node_measures_2,
     pac_rim_combined_features, 

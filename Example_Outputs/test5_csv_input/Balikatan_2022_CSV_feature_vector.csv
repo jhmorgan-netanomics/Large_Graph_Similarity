@@ -142,8 +142,8 @@ density_clustering_coefficient_kurtosis,-1.253873,Local Structure
 page_rank_mean,0.000803,Influence
 page_rank_median,0.000744,Influence
 page_rank_std,0.000273,Influence
-page_rank_skew,10.218369,Influence
-page_rank_kurtosis,136.845183,Influence
+page_rank_skew,10.218371,Influence
+page_rank_kurtosis,136.845208,Influence
 salsa_hub_mean,0.000803,Influence
 salsa_hub_median,0.0,Influence
 salsa_hub_std,0.002295,Influence

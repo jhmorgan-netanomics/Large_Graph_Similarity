@@ -37,7 +37,7 @@ local clustering coefficient,0.426538,Global Network Measure
 reciprocity,0.010413,Global Network Measure
 density,0.001713,Global Network Measure
 resolution,1.0,Global Network Measure
-modularity,0.599973,Global Network Measure
+modularity,0.598978,Global Network Measure
 003,0.988838,Triad Census
 012,0.01026,Triad Census
 102,0.000111,Triad Census
@@ -72,15 +72,15 @@ k_core_undirected_8,0.016867,K-Core Decomposition
 k_core_undirected_9,0.010442,K-Core Decomposition
 k_core_undirected_10,0.008032,K-Core Decomposition
 k_core_undirected_11,0.034538,K-Core Decomposition
-Community_1,0.1751,Community Structure
-Community_2,0.171084,Community Structure
-Community_3,0.141365,Community Structure
+Community_1,0.170281,Community Structure
+Community_2,0.167871,Community Structure
+Community_3,0.156627,Community Structure
 Community_4,0.11004,Community Structure
-Community_5,0.096386,Community Structure
-Community_6,0.071486,Community Structure
+Community_5,0.097992,Community Structure
+Community_6,0.06747,Community Structure
 Community_7,0.043373,Community Structure
-Community_8,0.036948,Community Structure
-Community_9,0.033735,Community Structure
+Community_8,0.033735,Community Structure
+Community_9,0.032129,Community Structure
 Community_10,0.032129,Community Structure
 Community_11,0.007229,Community Structure
 Community_12,0.005622,Community Structure
@@ -130,16 +130,16 @@ in_out_ratio_median,0.0,Degree Measures
 in_out_ratio_std,0.302534,Degree Measures
 in_out_ratio_skew,9.107075,Degree Measures
 in_out_ratio_kurtosis,105.590967,Degree Measures
-in_group_indegree_ratio_mean,0.835614,Degree Measures
+in_group_indegree_ratio_mean,0.837233,Degree Measures
 in_group_indegree_ratio_median,1.0,Degree Measures
-in_group_indegree_ratio_std,0.284084,Degree Measures
-in_group_indegree_ratio_skew,-1.664424,Degree Measures
-in_group_indegree_ratio_kurtosis,1.76503,Degree Measures
-in_group_outdegree_ratio_mean,0.107452,Degree Measures
+in_group_indegree_ratio_std,0.282077,Degree Measures
+in_group_indegree_ratio_skew,-1.688947,Degree Measures
+in_group_indegree_ratio_kurtosis,1.888271,Degree Measures
+in_group_outdegree_ratio_mean,0.10764,Degree Measures
 in_group_outdegree_ratio_median,0.0,Degree Measures
-in_group_outdegree_ratio_std,0.301452,Degree Measures
-in_group_outdegree_ratio_skew,2.495401,Degree Measures
-in_group_outdegree_ratio_kurtosis,4.335399,Degree Measures
+in_group_outdegree_ratio_std,0.301881,Degree Measures
+in_group_outdegree_ratio_skew,2.492512,Degree Measures
+in_group_outdegree_ratio_kurtosis,4.316795,Degree Measures
 in_reach_2_normalized_mean,0.009107,Local Reach
 in_reach_2_normalized_median,0.010401,Local Reach
 in_reach_2_normalized_std,0.006649,Local Reach
@@ -180,13 +180,13 @@ salsa_authority_median,0.000853,Influence
 salsa_authority_std,0.000201,Influence
 salsa_authority_skew,-3.761804,Influence
 salsa_authority_kurtosis,12.17072,Influence
-modularity_vitality_hub_mean,2.8e-5,Influence
+modularity_vitality_hub_mean,3.0e-5,Influence
 modularity_vitality_hub_median,0.0,Influence
-modularity_vitality_hub_std,0.000558,Influence
-modularity_vitality_hub_skew,21.172521,Influence
-modularity_vitality_hub_kurtosis,462.242912,Influence
-modularity_vitality_bridge_mean,0.004024,Influence
-modularity_vitality_bridge_median,0.003865,Influence
-modularity_vitality_bridge_std,0.001569,Influence
-modularity_vitality_bridge_skew,21.400245,Influence
-modularity_vitality_bridge_kurtosis,606.18629,Influence
+modularity_vitality_hub_std,0.000583,Influence
+modularity_vitality_hub_skew,20.732611,Influence
+modularity_vitality_hub_kurtosis,440.602561,Influence
+modularity_vitality_bridge_mean,0.00369,Influence
+modularity_vitality_bridge_median,0.003548,Influence
+modularity_vitality_bridge_std,0.001616,Influence
+modularity_vitality_bridge_skew,22.674727,Influence
+modularity_vitality_bridge_kurtosis,659.866421,Influence

@@ -124,7 +124,7 @@ page_rank_mean,0.002155,Influence
 page_rank_median,0.002078,Influence
 page_rank_std,0.000344,Influence
 page_rank_skew,11.145254,Influence
-page_rank_kurtosis,157.327594,Influence
+page_rank_kurtosis,157.327585,Influence
 salsa_hub_mean,0.002155,Influence
 salsa_hub_median,0.0,Influence
 salsa_hub_std,0.009447,Influence
