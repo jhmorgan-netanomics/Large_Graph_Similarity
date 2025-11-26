@@ -56,4 +56,5 @@
 # Platform-specific run instructions:
 # Linux:
 #   julia --project -e 'include("build_app_linux.jl")'
-#   ./julia_env/build/Large_Graph_Similarity_app/bin/large_graph_similarity --help
+#   cd /mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/julia_env/build/Large_Graph_Similarity_app/bin
+#   ./large_graph_similarity --help

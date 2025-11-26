@@ -4309,7 +4309,7 @@ using Large_Graph_Similarity
 #   COMPARATOR FUNCTION ASSESSMENT   #
 ######################################
 
-#   Performing Network Comparison of Balikatan and TOTO 2023: Raw Similarity (0.27964), Tail-Normalized Similarity(0.2803)
+#   Performing Network Comparison of Balikatan and TOTO 2023: Raw Similarity (0.2625), Tail-Normalized Similarity(0.263)
     global_stats_1, triad_census_counts_1, node_measures_1,
     global_stats_2, triad_census_counts_2, node_measures_2,
     pac_rim_combined_features, 
