@@ -4902,7 +4902,7 @@ THE SOFTWARE.
 						res = leiden_community_detection(clean_edges; nodes = nodes, resolution = γ,
 							                             n_iterations = n_iterations_per_run,
 														 n_runs = n_runs_per_gamma, weighted = weighted,
-													     directed = directed, seed = seed)
+													     directed = directed, seed = seed, show_progress=false)
 					
 					#	Calculate Coefficients
 						if directed
@@ -13336,7 +13336,6 @@ THE SOFTWARE.
 #   NETWORK COMPARISON FUNCTIONS   #
 ####################################
 
-
 #	Helper Function for network_comparator: Apply Category Weights to Multi-Indicator Measures
 	function _apply_category_weights!(measures_df::DataFrame)
 		"""
@@ -13701,60 +13700,44 @@ THE SOFTWARE.
 			types_list = ["Degree Measures", "Local Reach", "Local Structure", "Influence"]
 			fv1_node_measures = fv1[in(types_list).(fv1.type),:]
 			fv1_node_means = fv1_node_measures.measure[occursin.("_mean", fv1_node_measures.measure)]
+            fv1_node_types = fv1_node_measures.type[occursin.("_mean", fv1_node_measures.measure)]
 			fv1_features = replace.(fv1_node_means, "_mean" => "")
 		
 			fv2_node_measures = fv2[in(types_list).(fv2.type),:]
 			fv2_node_means = fv2_node_measures.measure[occursin.("_mean", fv2_node_measures.measure)]
 			fv2_features = replace.(fv2_node_means, "_mean" => "")
+            fv2_node_types = fv2_node_measures.type[occursin.("_mean", fv2_node_measures.measure)]
 			base_measures = unique([fv1_features; fv2_features])
-		
+
 		#	Compute both raw and asinh-normalized JS divergences
 			js_raw = _js_divergence_computation(node_measures_1, node_measures_2, base_measures; 
 												 apply_asinh = false)
 			js_asinh = _js_divergence_computation(node_measures_1, node_measures_2, base_measures; 
 												   apply_asinh = true)
 		
-		#	Build type mapping for JS features
-			type_map = Dict{String,String}()
-			for base in base_measures
-				#	Find the type for this base measure from fv1_node_measures
-					idx = findfirst(m -> startswith(m, base * "_"), fv1_node_means)
-					if idx !== nothing
-						type_map[base] = fv1_node_measures.type[idx]
-					else
-						#	Try fv2 if not in fv1
-							idx2 = findfirst(m -> startswith(m, base * "_"), fv2_node_means)
-							if idx2 !== nothing
-								type_map[base] = fv2_node_measures.type[idx2]
-							else
-								type_map[base] = "Unknown"
-							end
-					end
-			end
-		
 		#	Create JS feature DataFrames for both networks
 			fv1_js_raw = DataFrame(
 				measure = "jsd_raw_" .* js_raw.measure,
 				value = js_raw.network_1_value,
-				type = [get(type_map, m, "Unknown") for m in js_raw.measure]
+				type = fv1_node_types 
 			)
 		
 			fv1_js_asinh = DataFrame(
 				measure = "jsd_asinh_" .* js_asinh.measure,
 				value = js_asinh.network_1_value,
-				type = [get(type_map, m, "Unknown") for m in js_asinh.measure]
+				type = fv1_node_types 
 			)
 		
 			fv2_js_raw = DataFrame(
 				measure = "jsd_raw_" .* js_raw.measure,
 				value = js_raw.network_2_value,
-				type = [get(type_map, m, "Unknown") for m in js_raw.measure]
+				type = fv2_node_types
 			)
 		
 			fv2_js_asinh = DataFrame(
 				measure = "jsd_asinh_" .* js_asinh.measure,
 				value = js_asinh.network_2_value,
-				type = [get(type_map, m, "Unknown") for m in js_asinh.measure]
+				type = fv2_node_types
 			)
 		
 		#	Remove original moment-based summaries for those bases in the target types

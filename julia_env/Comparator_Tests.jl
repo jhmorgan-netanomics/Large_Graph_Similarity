@@ -3602,12 +3602,15 @@ using Large_Graph_Similarity
 			types_list = ["Degree Measures", "Local Reach", "Local Structure", "Influence"]
 			fv1_node_measures = fv1[in(types_list).(fv1.type),:]
 			fv1_node_means = fv1_node_measures.measure[occursin.("_mean", fv1_node_measures.measure)]
+            fv1_node_types = fv1_node_measures.type[occursin.("_mean", fv1_node_measures.measure)]
 			fv1_features = replace.(fv1_node_means, "_mean" => "")
 		
 			fv2_node_measures = fv2[in(types_list).(fv2.type),:]
 			fv2_node_means = fv2_node_measures.measure[occursin.("_mean", fv2_node_measures.measure)]
 			fv2_features = replace.(fv2_node_means, "_mean" => "")
+            fv2_node_types = fv2_node_measures.type[occursin.("_mean", fv2_node_measures.measure)]
 			base_measures = unique([fv1_features; fv2_features])
+
 		
 		#	Compute both raw and asinh-normalized JS divergences
 			js_raw = _js_divergence_computation(node_measures_1, node_measures_2, base_measures; 
@@ -3615,47 +3618,29 @@ using Large_Graph_Similarity
 			js_asinh = _js_divergence_computation(node_measures_1, node_measures_2, base_measures; 
 												   apply_asinh = true)
 		
-		#	Build type mapping for JS features
-			type_map = Dict{String,String}()
-			for base in base_measures
-				#	Find the type for this base measure from fv1_node_measures
-					idx = findfirst(m -> startswith(m, base * "_"), fv1_node_means)
-					if idx !== nothing
-						type_map[base] = fv1_node_measures.type[idx]
-					else
-						#	Try fv2 if not in fv1
-							idx2 = findfirst(m -> startswith(m, base * "_"), fv2_node_means)
-							if idx2 !== nothing
-								type_map[base] = fv2_node_measures.type[idx2]
-							else
-								type_map[base] = "Unknown"
-							end
-					end
-			end
-		
 		#	Create JS feature DataFrames for both networks
 			fv1_js_raw = DataFrame(
 				measure = "jsd_raw_" .* js_raw.measure,
 				value = js_raw.network_1_value,
-				type = [get(type_map, m, "Unknown") for m in js_raw.measure]
+				type = fv1_node_types 
 			)
 		
 			fv1_js_asinh = DataFrame(
 				measure = "jsd_asinh_" .* js_asinh.measure,
 				value = js_asinh.network_1_value,
-				type = [get(type_map, m, "Unknown") for m in js_asinh.measure]
+				type = fv1_node_types 
 			)
 		
 			fv2_js_raw = DataFrame(
 				measure = "jsd_raw_" .* js_raw.measure,
 				value = js_raw.network_2_value,
-				type = [get(type_map, m, "Unknown") for m in js_raw.measure]
+				type = fv2_node_types
 			)
 		
 			fv2_js_asinh = DataFrame(
 				measure = "jsd_asinh_" .* js_asinh.measure,
 				value = js_asinh.network_2_value,
-				type = [get(type_map, m, "Unknown") for m in js_asinh.measure]
+				type = fv2_node_types
 			)
 		
 		#	Remove original moment-based summaries for those bases in the target types
@@ -3944,12 +3929,17 @@ using Large_Graph_Similarity
 ######################################
 
 #   Performing Network Comparison of Balikatan and TOTO 2023: Raw Similarity (0.276296), Tail-Normalized Similarity(0.27697)
-    pac_rim_combined_features, pac_rim_overall_distance, pac_rim_overall_similarity, pac_rim_type_contributions = network_comparator(balikatan_arcs, balikatan_nodes, 
-                                                                                                      pac_rim_arcs, pac_rim_nodes; 
-                                                                                                      directed=true, weighted=true, 
-                                                                                                      resolution=1.0)
+    global_stats_1, triad_census_counts_1, node_measures_1,
+    global_stats_2, triad_census_counts_2, node_measures_2,
+    pac_rim_combined_features, 
+    pac_rim_overall_distance, 
+    pac_rim_overall_similarity, 
+    pac_rim_type_contributions = network_comparator(balikatan_arcs, balikatan_nodes, pac_rim_arcs, pac_rim_nodes; 
+                                                    directed=true, weighted=true, resolution=1.0)
 
-    directory = "mnt/c/Users/metal/OneDrive/Desktop"
+#   Constructing Directed/Weighted Feature Vector
+    feature_vector_1 = directed_weighted_feature_builder(global_stats_1, triad_census_counts_1, node_measures_1)
+    feature_vector_2 = directed_weighted_feature_builder(global_stats_2, triad_census_counts_2, node_measures_2)
 
 #   Performing Network Comparison of Balikatan and Pac Sentry: Raw Similarity (0.124638), Tail-Normalized Similarity (0.1246395)
     balikatan_partition = CSV.read("/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data/balikatan_all_comm_partition_leiden_gamma1.csv",
