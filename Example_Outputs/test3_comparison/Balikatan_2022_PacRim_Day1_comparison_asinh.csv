@@ -27,7 +27,7 @@ local clustering coefficient,0.426538,0.454382,Global Network Measure,1.0,1.0,1.
 reciprocity,0.010413,0.007008,Global Network Measure,1.0,1.0,1.0
 density,0.001713,0.006575,Global Network Measure,1.0,1.0,1.0
 resolution,1.0,1.0,Global Network Measure,1.0,1.0,1.0
-modularity,0.600347,0.417672,Global Network Measure,1.0,1.0,1.0
+modularity,0.597453,0.417663,Global Network Measure,1.0,1.0,1.0
 003,0.988838,0.968024,Triad Census,0.0625,0.0625,0.0625
 012,0.01026,0.023851,Triad Census,0.0625,0.0625,0.0625
 102,0.000111,0.000187,Triad Census,0.0625,0.0625,0.0625
@@ -62,14 +62,14 @@ k_core_undirected_8,0.016867,0.0,K-Core Decomposition,0.05555555555555555,0.0,1.
 k_core_undirected_9,0.010442,0.0,K-Core Decomposition,0.05555555555555555,0.0,1.0
 k_core_undirected_10,0.008032,0.0,K-Core Decomposition,0.05555555555555555,0.0,1.0
 k_core_undirected_11,0.034538,0.0,K-Core Decomposition,0.05555555555555555,0.0,1.0
-Community_1,0.173494,0.551724,Community Structure,0.023255813953488372,0.16666666666666666,1.0
-Community_2,0.169478,0.428879,Community Structure,0.023255813953488372,0.16666666666666666,1.0
-Community_3,0.137349,0.008621,Community Structure,0.023255813953488372,0.16666666666666666,1.0
-Community_4,0.11004,0.00431,Community Structure,0.023255813953488372,0.16666666666666666,1.0
-Community_5,0.097992,0.00431,Community Structure,0.023255813953488372,0.16666666666666666,1.0
-Community_6,0.075502,0.002155,Community Structure,0.023255813953488372,0.16666666666666666,1.0
+Community_1,0.174297,0.551724,Community Structure,0.023255813953488372,0.2,1.0
+Community_2,0.169478,0.43319,Community Structure,0.023255813953488372,0.2,1.0
+Community_3,0.142169,0.008621,Community Structure,0.023255813953488372,0.2,1.0
+Community_4,0.11004,0.00431,Community Structure,0.023255813953488372,0.2,1.0
+Community_5,0.095582,0.002155,Community Structure,0.023255813953488372,0.2,1.0
+Community_6,0.074699,0.0,Community Structure,0.023255813953488372,0.0,1.0
 Community_7,0.043373,0.0,Community Structure,0.023255813953488372,0.0,1.0
-Community_8,0.038554,0.0,Community Structure,0.023255813953488372,0.0,1.0
+Community_8,0.036145,0.0,Community Structure,0.023255813953488372,0.0,1.0
 Community_9,0.033735,0.0,Community Structure,0.023255813953488372,0.0,1.0
 Community_10,0.032129,0.0,Community Structure,0.023255813953488372,0.0,1.0
 Community_11,0.007229,0.0,Community Structure,0.023255813953488372,0.0,1.0
@@ -108,8 +108,8 @@ Community_43,0.000803,0.0,Community Structure,0.023255813953488372,0.0,1.0
 jsd_asinh_out_degree_normalized,0.03936286664163902,-0.03936286664163902,Degree Measures,1.0,1.0,1.0
 jsd_asinh_in_degree_normalized,0.3159473954588961,-0.3159473954588961,Degree Measures,1.0,1.0,1.0
 jsd_asinh_in_out_ratio,0.0464303444726042,-0.0464303444726042,Degree Measures,1.0,1.0,1.0
-jsd_asinh_in_group_indegree_ratio,0.1801152335255622,-0.1801152335255622,Degree Measures,1.0,1.0,1.0
-jsd_asinh_in_group_outdegree_ratio,0.047407880508422214,-0.047407880508422214,Degree Measures,1.0,1.0,1.0
+jsd_asinh_in_group_indegree_ratio,0.17996066409266293,-0.17996066409266293,Degree Measures,1.0,1.0,1.0
+jsd_asinh_in_group_outdegree_ratio,0.0399012849704504,-0.0399012849704504,Degree Measures,1.0,1.0,1.0
 jsd_asinh_in_reach_2_normalized,0.22364315822986913,-0.22364315822986913,Local Reach,1.0,1.0,1.0
 jsd_asinh_out_reach_2_normalized,0.06089644554356382,-0.06089644554356382,Local Reach,1.0,1.0,1.0
 jsd_asinh_undirected_reach_2_normalized,0.3394888671284737,-0.3394888671284737,Local Reach,1.0,1.0,1.0
@@ -118,5 +118,5 @@ jsd_asinh_density_clustering_coefficient,0.17623207678243727,-0.1762320767824372
 jsd_asinh_page_rank,0.41209174684629035,-0.41209174684629035,Influence,1.0,1.0,1.0
 jsd_asinh_salsa_hub,0.11709320440637908,-0.11709320440637908,Influence,1.0,1.0,1.0
 jsd_asinh_salsa_authority,0.40916209193822317,-0.40916209193822317,Influence,1.0,1.0,1.0
-jsd_asinh_modularity_vitality_hub,0.0394224530926168,-0.0394224530926168,Influence,1.0,1.0,1.0
-jsd_asinh_modularity_vitality_bridge,0.3811750423060133,-0.3811750423060133,Influence,1.0,1.0,1.0
+jsd_asinh_modularity_vitality_hub,0.03666960458590296,-0.03666960458590296,Influence,1.0,1.0,1.0
+jsd_asinh_modularity_vitality_bridge,0.23331221443204347,-0.23331221443204347,Influence,1.0,1.0,1.0
