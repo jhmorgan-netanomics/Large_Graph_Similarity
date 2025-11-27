@@ -14384,8 +14384,23 @@ THE SOFTWARE.
 	- `overall_similarity_raw::Float64`: Raw similarity score ∈ (0,1]
 	- `overall_distance_asinh::Float64`: Weighted Euclidean distance using asinh JS divergences
 	- `overall_similarity_asinh::Float64`: Asinh similarity score ∈ (0,1]
-	- `type_contributions_raw::DataFrame`: Per-type distance breakdown for raw comparison
-	- `type_contributions_asinh::DataFrame`: Per-type distance breakdown for asinh comparison
+	- `type_contributions_raw::DataFrame`: Per-type distance breakdown for the raw comparison.
+		-  For each `type`, `distance_sq` is the weighted sum of squared differences
+		   across all features of that type.
+		- `normalized_contribution` is the fraction of the *total squared distance*
+		   explained by that type (these values sum to 1 across all types). A type can
+		   have a **moderate per-type similarity** (e.g., `type_similarity ≈ 0.58`) and
+		   still have a **large `normalized_contribution`** (e.g., 0.18) if it accounts
+		   for a big share of the overall distance.
+		- `type_similarity` is a per-type similarity, computed as `1 / (1 + distance)`
+		   using only that type’s features (i.e., “how similar would the networks look
+		   if we only considered this block?”).
+	- `type_contributions_asinh::DataFrame`: Same structure and interpretation as
+	  `type_contributions_raw`, but based on the asinh-normalized feature space.
+
+	Note: The overall similarity is computed from the full weighted Euclidean distance
+	over all features and is **not** a simple average of the per-type `type_similarity`
+	values.
 
 	**Examples**
 	```julia
