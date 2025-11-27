@@ -11319,6 +11319,13 @@ THE SOFTWARE.
             else
                 #   Already symmetric — nothing to fix
                     symmetric_edgelist = deepcopy(clean_edges)
+
+				#	Creating ni Parameter
+					if nodes === nothing
+						ni = unique(vcat(symmetric_edgelist.src, symmetric_edgelist.dst))
+					else
+						ni = nodes
+					end
             end
 
         #	========== GLOBAL NETWORK MEASURES ==========

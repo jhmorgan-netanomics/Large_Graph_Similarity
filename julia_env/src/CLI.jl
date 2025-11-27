@@ -583,6 +583,9 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 			agent_nodes = metanet.nodesets[node_type]
 			nodes = agent_nodes[:, 1:2]
 			rename!(nodes, ["id", "label"])
+			if sum(isempty.(nodes.label)) == nrow(nodes)
+				nodes.label = nodes.id
+			end
 		
 		#	Extract partition if specified
 			partition = nothing

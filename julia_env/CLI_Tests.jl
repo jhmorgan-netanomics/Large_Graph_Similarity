@@ -15,6 +15,7 @@ using ArgParse
 using CSV
 using DataFrames
 using Dates
+using SparseArrays
 using Test
 using Large_Graph_Similarity 
 
@@ -598,7 +599,10 @@ using Large_Graph_Similarity
 			agent_nodes = metanet.nodesets[node_type]
 			nodes = agent_nodes[:, 1:2]
 			rename!(nodes, ["id", "label"])
-		
+			if sum(isempty.(nodes.label)) == nrow(nodes)
+				nodes.label = nodes.id
+			end
+
 		#	Extract partition if specified
 			partition = nothing
 			
@@ -1768,3 +1772,72 @@ using Large_Graph_Similarity
 	end
 
 	test_mixed_comparison_pacrim_ora_vs_balikatan_csv()
+
+#	Test 9: Network Comparison - Balikatan vs Pac Rim Hashtags
+	function test_network_comparison_hashtags()
+		"""
+		Test network comparison mode with two metanetworks
+		"""
+        #   Delcare Tests
+            println("\n" * "="^80)
+            println("TEST 9: Network Comparison - Balikatan vs Pac Rim Hashtag x Hashtag - Co-Occurrence")
+            println("="^80)
+            
+		#	Construct CLI arguments
+			args = [
+				"--mode", "comparison",
+				"--ora-xml-1", joinpath(TEST_DATA_DIR, "Balikatan_2022_Processed.xml"),
+				"--network-name-1", "Hashtag x Hashtag - Co-Occurrence",
+				"--ora-xml-2", joinpath(TEST_DATA_DIR, "Pac Rim Day 1.xml"),
+				"--network-name-2", "Hashtag x Hashtag - Co-Occurrence",
+				"--output-dir", joinpath(OUTPUT_DIR, "test9_comparison"),
+				"--name-1", "Balikatan_2022_Hashtags",
+				"--name-2", "PacRim_Day1_Hashtags",
+				"--directed", "false",
+				"--weighted", "true",
+				"--resolution", "1.0",
+				"--n-runs", "3",
+				"--n-iterations", "5",
+				"--verbose", "true"
+			]
+		
+            println("Comparing Balikatan 2022 vs Pac Rim Day 1...")
+            println("Command arguments:")
+            for i in 1:2:length(args)
+                println("  $(args[i]) $(args[i+1])")
+            end
+		
+		#	Run comparison
+			Large_Graph_Similarity.CLI.cli_main(args)
+		
+		#	Verify output files exist
+			expected_files = [
+				#   Network 1 analysis
+                    "Balikatan_2022_Hashtags_global_stats.csv",
+                    "Balikatan_2022_Hashtags_node_measures.csv",
+                    "Balikatan_2022_Hashtags_triad_census.csv",
+
+				#   Network 2 analysis
+                    "PacRim_Day1_Hashtags_global_stats.csv",
+                    "PacRim_Day1_Hashtags_node_measures.csv",
+                    "PacRim_Day1_Hashtags_triad_census.csv",
+
+				#   Comparison results
+                    "Balikatan_2022_Hashtags_PacRim_Day1_Hashtags_comparison_asinh.csv",
+                    "Balikatan_2022_Hashtags_PacRim_Day1_Hashtags_comparison_raw.csv",
+                    "Balikatan_2022_Hashtags_PacRim_Day1_Hashtags_similarity_scores.csv",
+                    "Balikatan_2022_Hashtags_PacRim_Day1_Hashtags_type_contributions_asinh.csv",
+                    "Balikatan_2022_Hashtags_PacRim_Day1_Hashtags_type_contributions_raw.csv"
+			]
+		
+			for file in expected_files
+				filepath = joinpath(OUTPUT_DIR, "test9_comparison", file)
+				@test isfile(filepath) 
+				println("  ✓ Created: $file")
+			end
+		
+        #   Printing Results
+		    println("\nTest 9 completed successfully")
+	end
+
+    test_network_comparison_hashtags()
