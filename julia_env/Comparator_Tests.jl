@@ -4316,7 +4316,7 @@ using Large_Graph_Similarity
     pac_rim_overall_distance, 
     pac_rim_overall_similarity, 
     pac_rim_type_contributions = network_comparator(balikatan_arcs, balikatan_nodes, pac_rim_arcs, pac_rim_nodes; 
-                                                    directed=true, weighted=true, resolution=1.0)
+                                                    directed=true, weighted=true, resolution_sweep=true)
 
 #   Constructing Directed/Weighted Feature Vector
     feature_vector_1 = directed_weighted_feature_builder(global_stats_1, triad_census_counts_1, node_measures_1)
@@ -4324,7 +4324,7 @@ using Large_Graph_Similarity
 
 #   Performing Network Comparison of Balikatan and Pac Sentry: Raw Similarity (0.124638), Tail-Normalized Similarity (0.1246395)
     balikatan_partition = CSV.read("/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data/balikatan_all_comm_partition_leiden_gamma1.csv",
-							   DataFrame, types=Dict(1 => String))
+							       DataFrame, types=Dict(1 => String))
 	rename!(balikatan_partition, ["node", "community"])
 
     pac_sentry_partition = CSV.read("/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity/Test_Data/pac_sentry_leiden.csv",
