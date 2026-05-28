@@ -53,3 +53,35 @@ using Large_Graph_Similarity
 			end
 	end
 
+#	Validate ORA import outputs
+	for file in test_files
+		#	Load XML
+			println("\nValidating: $file")
+			out = load_ora_xml(joinpath(test_dir, file))
+
+		#	Check top-level structure
+			@assert haskey(out, :nodesets)
+			@assert haskey(out, :nodeset_meta)
+			@assert haskey(out, :networks)
+
+		#	Check nodesets
+			for (key, df) in out.nodesets
+				@assert haskey(out.nodeset_meta, key)
+				@assert hasproperty(df, Symbol("Node ID"))
+				@assert hasproperty(df, Symbol("Node Label"))
+			end
+
+		#	Check networks
+			for (_, net) in out.networks
+				@assert haskey(out.nodesets, net.sourceNodeset)
+				@assert haskey(out.nodesets, net.targetNodeset)
+
+				@assert hasproperty(net.edges, :src)
+				@assert hasproperty(net.edges, :dst)
+				@assert hasproperty(net.edges, :weight)
+			end
+
+		#	Report success
+			println("  Passed validation")
+	end
+
