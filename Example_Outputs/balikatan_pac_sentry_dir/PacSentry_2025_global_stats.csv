@@ -25,5 +25,5 @@ transitivity,0.138257
 local clustering coefficient,0.439872
 reciprocity,0.032619
 density,0.000189
-resolution,0.5
-modularity,0.819319
+resolution,1.8
+modularity,0.670137

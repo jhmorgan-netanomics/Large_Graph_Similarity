@@ -545,120 +545,165 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 		Returns:
 			NamedTuple: (edges, nodes, partition)
 		Notes:
-			Uses existing load_ora_xml function
-			Lists available networks if requested network not found
-			Ensures partition.community is Vector{Int} before returning
+			Uses load_ora_xml to read an ORA XML file.
+			Lists available networks if requested network is not found.
+			Extracts the source nodeset from the selected network metadata.
+			Handles ORA partition attributes with missing values.
 			Partition schema: DataFrame(node = nodes.id, community = ::Vector{Int})
 		"""
+
 		#	Load ORA XML
 			if verbose
 				println("Loading ORA metanetwork from: $metanetwork_path")
 			end
-		
+
 			metanet = load_ora_xml(metanetwork_path)
-		
+
 		#	Check if network exists
 			available_networks = keys(metanet.networks)
-			
+
 			if !(network_name in available_networks)
 				error_msg = "Network '$network_name' not found in ORA file.\nAvailable networks:\n"
+
 				for net in sort(collect(available_networks))
 					error_msg *= "  - $net\n"
 				end
+
 				throw(ArgumentError(error_msg))
 			end
-		
-		#	Extract network edges
+
+		#	Extract network
 			network = metanet.networks[network_name]
 			edges = network.edges
-		
-		#	Determine node type from network name
-			node_type = split(network_name, " x ")[1]
-			
+
+		#	Determine source nodeset from network metadata
+			node_type = network.sourceNodeset
+
 			if !(node_type in keys(metanet.nodesets))
-				throw(ArgumentError("Node type '$node_type' not found in ORA file"))
+				throw(ArgumentError("Source nodeset '$node_type' not found in ORA file"))
 			end
-		
+
 		#	Extract nodes
-			agent_nodes = metanet.nodesets[node_type]
-			nodes = agent_nodes[:, 1:2]
+			source_nodes = metanet.nodesets[node_type]
+			nodes = source_nodes[:, 1:2]
 			rename!(nodes, ["id", "label"])
+
 			if sum(isempty.(nodes.label)) == nrow(nodes)
 				nodes.label = nodes.id
 			end
-		
+
 		#	Extract partition if specified
 			partition = nothing
-			
+
 			if ora_leiden !== nothing
-				#	Checking if Column Name Matches Attributes
-					if !(ora_leiden in names(agent_nodes))
-						available_attrs = names(agent_nodes)[3:end]  # Skip ID and label
+				#	Check attribute name
+					if !(ora_leiden in names(source_nodes))
+						available_attrs = names(source_nodes)[3:end]
 						error_msg = "Attribute '$ora_leiden' not found.\nAvailable attributes:\n"
+
 						for attr in available_attrs
 							error_msg *= "  - $attr\n"
 						end
+
 						throw(ArgumentError(error_msg))
 					end
-				
-				#	Raw column for the community membership
-					raw_col = agent_nodes[!, ora_leiden]
-					col_type = eltype(raw_col)
-				
-				#	Build integer community vector
-					comm = Vector[]
-					
-					if col_type <: Integer
-						#	Already integer-like; just normalize to Int
-							comm = Int.(raw_col)
-					
-					elseif col_type <: AbstractFloat
-						#	Floating but numeric; round to nearest Int
-							comm = round.(Int, raw_col)
-					
-					elseif col_type <: AbstractString
-						#	First try to parse as plain integers (e.g., "1", "2", "3")
-							parsed = tryparse.(Int, raw_col)
-						
-							if all(!isnothing, parsed)
-								#	All entries parse cleanly to Int
-									comm = Int.(something.(parsed))
-							else
-								#	General string labels: map each unique label to an Int code
-									unique_labels = unique(raw_col)
-									label_to_int = Dict{eltype(raw_col),Int}()
-									
-									for (i, lbl) in enumerate(unique_labels)
-										label_to_int[lbl] = i
-									end
-									
-									comm = [label_to_int[x] for x in raw_col]
-							end
-					
-					else
-						throw(ArgumentError("Unsupported type $(col_type) for ORA Leiden attribute '$ora_leiden'"))
+
+				#	Read raw community column
+					raw_col = source_nodes[!, ora_leiden]
+					nonmissing_col = collect(skipmissing(raw_col))
+
+				#	Validate nonmissing partition values
+					if isempty(nonmissing_col)
+						throw(ArgumentError("ORA Leiden attribute '$ora_leiden' contains only missing values"))
 					end
-				
-				#	Assemble partition DataFrame with integer communities
-				#	NOTE: node column is aligned with nodes.id (not raw "Node ID" column name)
+
+				#	Inspect nonmissing type
+					col_type = eltype(nonmissing_col)
+
+				#	Initialize community vector
+					comm = Vector{Union{Missing,Int}}(undef, length(raw_col))
+
+				#	Convert integer-like memberships
+					if col_type <: Integer
+						for i in eachindex(raw_col)
+							comm[i] = ismissing(raw_col[i]) ? missing : Int(raw_col[i])
+						end
+
+				#	Convert float-like memberships
+					elseif col_type <: AbstractFloat
+						for i in eachindex(raw_col)
+							comm[i] = ismissing(raw_col[i]) ? missing : round(Int, raw_col[i])
+						end
+
+				#	Convert string-like memberships
+					elseif col_type <: AbstractString
+						#	Try integer parsing first
+							clean_labels = strip.(String.(nonmissing_col))
+							parsed = tryparse.(Int, clean_labels)
+
+						if all(!isnothing, parsed)
+							#	Parse all string labels as integer communities
+								for i in eachindex(raw_col)
+									if ismissing(raw_col[i])
+										comm[i] = missing
+									else
+										comm[i] = parse(Int, strip(String(raw_col[i])))
+									end
+								end
+						else
+							#	Map general string labels to integer communities
+								unique_labels = unique(clean_labels)
+								label_to_int = Dict{String,Int}()
+
+								for i in eachindex(unique_labels)
+									label_to_int[unique_labels[i]] = i
+								end
+
+								for i in eachindex(raw_col)
+									if ismissing(raw_col[i])
+										comm[i] = missing
+									else
+										label = strip(String(raw_col[i]))
+										comm[i] = label_to_int[label]
+									end
+								end
+						end
+
+				#	Reject unsupported membership types
+					else
+						throw(ArgumentError("Unsupported type $(eltype(raw_col)) for ORA Leiden attribute '$ora_leiden'"))
+					end
+
+				#	Drop nodes without partition assignments
+					valid_partition = .!ismissing.(comm)
+
+				#	Assemble partition DataFrame
 					partition = DataFrame(
-						node = nodes.id,
-						community = comm
+						node = nodes.id[valid_partition],
+						community = Int.(comm[valid_partition])
 					)
-				
-				if verbose
-					n_comms = length(unique(partition.community))
-					println("Extracted ORA partition '$ora_leiden' with $n_comms communities")
-				end
+
+				#	Validate partition size
+					if nrow(partition) == 0
+						throw(ArgumentError("ORA Leiden attribute '$ora_leiden' produced an empty partition after dropping missing values"))
+					end
+
+				#	Report partition extraction
+					if verbose
+						n_missing = count(ismissing, comm)
+						n_comms = length(unique(partition.community))
+						println("Extracted ORA partition '$ora_leiden' with $n_comms communities")
+						println("Partition rows: $(nrow(partition)); missing assignments dropped: $n_missing")
+					end
 			end
-		
+
 		#	Verbose summary of extracted network
 			if verbose
 				n_edges = nrow(edges)
 				n_nodes = nrow(nodes)
 				println("Extracted network '$network_name': $n_edges edges, $n_nodes nodes")
 			end
-		
+
 		#	Return components
 			return (edges = edges, nodes = nodes, partition = partition)
 	end
