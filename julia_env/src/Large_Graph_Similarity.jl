@@ -45,152 +45,194 @@ THE SOFTWARE.
 
 #	DATA PROCESSING FUNCTIONS
 
-#	Joiner for multi-valued string properties
+#	Shared Import Constants
 	const MULTI_SEP = " | "
-
-#	Standardized nodeset name for Url
 	const URL_KEY = "URL"
 
-#	Map ORA "type" → preferred nodeset key
-	const TYPE_TO_STDKEY = Dict(
-		"Agent"     => "Agent",
-		"Event"     => "Tweet",
-		"Knowledge" => "Hashtag",
-		"Resource"  => URL_KEY,
-	)
-
-#	Map ORA network source/targetType → nodeset key when `source`/`target` attrs are missing
-	const NETTYPE_TO_STDKEY = TYPE_TO_STDKEY
-
-#	Permissive list of ORA property data types
 	const ORA_DATA_TYPES = Set([
-		"Text", "Text Category",
-		"Number", "Number Category",
+		"Text",
+		"Text Category",
+		"Number",
+		"Number Category",
 		"URI",
-		"Date", "Datetime", "DateTime",
+		"Date",
+		"Datetime",
+		"DateTime",
 	])
 
-#	Helper: Coalesce multi-valued string-like fields into one String using MULTI_SEP
+#	Helper Function for _ingest_property!: string coalescence
 	function _coalesce_str!(dict::Dict{String,Any}, key::String, val::AbstractString)
 		"""
 		Args:
-			dict::Dict{String,Any}: target dictionary to modify in-place
+			dict::Dict{String,Any}: row dictionary modified in place
 			key::String: dictionary key to update
 			val::AbstractString: value to append or set
 		Returns:
 			Nothing
 		Notes:
-			- If key doesn't exist or is empty, sets it to val
-			- If key exists with content, appends val using MULTI_SEP separator
-			- Modifies dict in-place
+			Multi-valued strings are joined with MULTI_SEP.
 		"""
-		existing = get(dict, key, nothing)
-		if existing === nothing || existing === missing || isempty(String(existing))
-			dict[key] = String(val)
-		elseif !isempty(val)
-			dict[key] = String(existing) * MULTI_SEP * String(val)
-		end
-		return nothing
+
+		#	Read existing value
+			existing = get(dict, key, nothing)
+
+		#	Set or append value
+			if existing === nothing || existing === missing || isempty(String(existing))
+				dict[key] = String(val)
+			elseif !isempty(val)
+				dict[key] = String(existing) * MULTI_SEP * String(val)
+			end
+
+		#	Return nothing
+			return nothing
 	end
 
-#	Helper: Coerce a raw string into the requested ORA data type
+#	Helper Function for _ingest_property!: ORA value coercion
 	function _coerce_value(raw::AbstractString, dtype::AbstractString)
 		"""
 		Args:
-			raw::AbstractString: raw string value to coerce
-			dtype::AbstractString: target ORA data type ("Text", "Number", "Date", etc.)
+			raw::AbstractString: raw property value
+			dtype::AbstractString: normalized ORA data type
 		Returns:
-			Union{String,Float64,Int,DateTime,Missing}: coerced value or missing if parsing fails
+			Union{String,Float64,Int,DateTime,Missing}: coerced value
 		Notes:
-			- "Text"/"Text Category"/"URI" → String
-			- "Number" → Float64 or missing
-			- "Number Category" → Int or missing  
-			- "Date"/"Datetime"/"DateTime" → DateTime or missing
-			- Unknown types → String
+			Unknown data types are returned as strings.
 		"""
-		s = strip(String(raw))
-		if dtype == "Text" || dtype == "Text Category" || dtype == "URI"
-			return s
-		elseif dtype == "Number"
-			x = tryparse(Float64, s)
-			return x === nothing ? missing : x
-		elseif dtype == "Number Category"
-			x = tryparse(Int, s)
-			return x === nothing ? missing : x
-		elseif dtype in ("Date", "Datetime", "DateTime")
-			#	Try common ISO-8601 variants first
-			formats = (dateformat"yyyy-mm-ddTHH:MM:SS.szzzz",
-					dateformat"yyyy-mm-ddTHH:MM:SSzzzz",
-					dateformat"yyyy-mm-ddTHH:MM:SS",
-					dateformat"yyyy-mm-dd")
-			for fmt in formats
-				dt = tryparse(DateTime, s, fmt)
-				dt !== nothing && return dt
+
+		#	Normalize raw value
+			s = strip(String(raw))
+
+		#	Coerce by type
+			if dtype == "Text" || dtype == "Text Category" || dtype == "URI"
+				return s
+			elseif dtype == "Number"
+				x = tryparse(Float64, s)
+				return x === nothing ? missing : x
+			elseif dtype == "Number Category"
+				x = tryparse(Int, s)
+				return x === nothing ? missing : x
+			elseif dtype in ("Date", "Datetime", "DateTime")
+				#	Try ISO-8601 variants
+					formats = (
+						dateformat"yyyy-mm-ddTHH:MM:SS.szzzz",
+						dateformat"yyyy-mm-ddTHH:MM:SSzzzz",
+						dateformat"yyyy-mm-ddTHH:MM:SS",
+						dateformat"yyyy-mm-dd",
+					)
+
+				#	Parse date-time
+					for fmt in formats
+						dt = tryparse(DateTime, s, fmt)
+						dt !== nothing && return dt
+					end
+
+				#	Parse date fallback
+					d = tryparse(Date, s, dateformat"yyyy-mm-dd")
+					return d === nothing ? missing : DateTime(d)
+			else
+				return s
 			end
-			d = tryparse(Date, s, dateformat"yyyy-mm-dd")
-			return d === nothing ? missing : DateTime(d)
-		else
-			return s
-		end
 	end
 
-#	Helper: Parse <propertyIdentities> to map property id → ORA data type
+#	Helper Function for _collect_nodeset_schema: ORA data type normalization
+	function _normalize_ora_dtype(dtype::AbstractString)
+		"""
+		Args:
+			dtype::AbstractString: raw ORA property type string
+		Returns:
+			String: normalized internal ORA data type label
+		Notes:
+			Supports both ORA-style `type` values and prior `dataType` values.
+		"""
+
+		#	Normalize input
+			s = lowercase(strip(String(dtype)))
+
+		#	Map string-like types
+			if s in ("text", "string")
+				return "Text"
+			elseif s in ("categorytext", "category text", "text category")
+				return "Text Category"
+			elseif s in ("uri", "url")
+				return "URI"
+
+		#	Map numeric types
+			elseif s in ("number", "double", "float")
+				return "Number"
+			elseif s in ("categorynumber", "category number", "number category", "integer", "int")
+				return "Number Category"
+
+		#	Map date-like types
+			elseif s == "date"
+				return "Date"
+			elseif s in ("datetime", "date time")
+				return "DateTime"
+
+		#	Fallback
+			else
+				return String(dtype)
+			end
+	end
+
+#	Helper Function for _parse_nodeset: nodeset schema collection
 	function _collect_nodeset_schema(nodeset::EzXML.Node)
 		"""
 		Args:
 			nodeset::EzXML.Node: XML nodeset element containing property definitions
 		Returns:
-			Dict{String,String}: mapping from property id to ORA data type
+			Dict{String,String}: property id to normalized ORA data type
 		Notes:
-			- Walks <propertyIdentities>/<propertyIdentity> elements
-			- Extracts id and dataType attributes
-			- Returns empty Dict if no schema found
+			Reads both `dataType` and `type` attributes on propertyIdentity nodes.
 		"""
-		#	Schema map
+
+		#	Initialize schema map
 			schema = Dict{String,String}()
 
-		#	Walk <propertyIdentities>/<propertyIdentity>
+		#	Walk property identities
 			for child in eachelement(nodeset)
 				if child.name == "propertyIdentities"
 					for p in eachelement(child)
 						if p.name == "propertyIdentity"
-							id_attr = haskey(p, "id") ? p["id"] : nothing
-							dt_attr = haskey(p, "dataType") ? p["dataType"] : nothing
-							if id_attr !== nothing && dt_attr !== nothing
-								dtype = String(dt_attr)
-								schema[String(id_attr)] = dtype
-							end
+							#	Extract identity attributes
+								id_attr = haskey(p, "id") ? p["id"] : nothing
+								dt_attr = haskey(p, "dataType") ? p["dataType"] :
+										  haskey(p, "type")     ? p["type"]     :
+										  nothing
+
+							#	Store normalized type
+								if id_attr !== nothing && dt_attr !== nothing
+									schema[String(id_attr)] = _normalize_ora_dtype(dt_attr)
+								end
 						end
 					end
 				end
 			end
 
-		#	Return
+		#	Return schema
 			return schema
 	end
 
-#	Helper: Extract one or more textual values from a <property> node
+#	Helper Function for _parse_nodeset: property value extraction
 	function _extract_property_values(p::EzXML.Node)
 		"""
 		Args:
 			p::EzXML.Node: XML property element
 		Returns:
-			Vector{String}: extracted values in file order
+			Vector{String}: property values in file order
 		Notes:
-			- Checks: (1) value attribute, (2) <value> child elements, (3) direct text content
-			- Returns empty vector if no values found
-			- Preserves file order, does not deduplicate
+			Checks value attribute, nested value nodes, and direct text content.
 		"""
-		#	Collect in file order, dedup later only if needed by callers
+
+		#	Initialize values
 			vals = String[]
 
-		#	1) value attribute
+		#	Read value attribute
 			if haskey(p, "value")
 				v = String(p["value"])
 				!isempty(strip(v)) && push!(vals, v)
 			end
 
-		#	2) <value> child elements
+		#	Read nested value elements
 			for c in eachelement(p)
 				if c.name == "value"
 					v = String(nodecontent(c))
@@ -198,308 +240,534 @@ THE SOFTWARE.
 				end
 			end
 
-		#	3) fallback: direct text content (if nothing else found)
+		#	Read direct text fallback
 			if isempty(vals)
 				v = String(nodecontent(p))
 				!isempty(strip(v)) && push!(vals, v)
 			end
 
-		#	Return
+		#	Return values
 			return vals
 	end
 
-#	Helper: Ingest a single <property> into row using schema rules
-	function _ingest_property!(row::Dict{String,Any}, p::EzXML.Node, schema::Dict{String,String}, prop_keys::Set{String})
+#	Helper Function for _parse_nodeset: property ingestion
+	function _ingest_property!(
+		row::Dict{String,Any},
+		p::EzXML.Node,
+		schema::Dict{String,String},
+		prop_keys::Set{String})
 		"""
 		Args:
-			row::Dict{String,Any}: target row dictionary (modified in-place)
-			p::EzXML.Node: XML property element to ingest
-			schema::Dict{String,String}: property id → datatype mapping
-			prop_keys::Set{String}: tracks all property keys seen (modified in-place)
+			row::Dict{String,Any}: target row dictionary modified in place
+			p::EzXML.Node: XML property element
+			schema::Dict{String,String}: property id to normalized ORA data type
+			prop_keys::Set{String}: set of observed property keys modified in place
 		Returns:
 			Nothing
 		Notes:
-			- Modifies row in-place based on property type
-			- Text types accumulate with MULTI_SEP separator
-			- Numeric/Date types keep last value only
-			- Updates prop_keys with encountered property id
+			String-like properties accumulate into a single joined string.
+			Numeric and date properties retain only the final parsed value.
 		"""
-		#	Property id and dtype
+
+		#	Extract property id
 			pid = haskey(p, "id") ? p["id"] : nothing
-			pid === nothing && return
+			pid === nothing && return nothing
+
+		#	Resolve key and type
 			key = String(pid)
 			dtype = get(schema, key, "Text")
 
-		#	Extract one or more values (from attribute/child/fallback)
-			vals = _extract_property_values(p)
+		#	Track property key
+			push!(prop_keys, key)
 
-		#	Type-specific accumulation
+		#	Process string-like properties
 			if dtype == "Text" || dtype == "Text Category" || dtype == "URI"
-				if !isempty(vals)
-					for v in vals
-						_coalesce_str!(row, key, v)
+				#	Initialize accumulation buffer
+					buffer = IOBuffer()
+					first_value = true
+
+				#	Read value attribute
+					if haskey(p, "value")
+						v = strip(String(p["value"]))
+
+						if !isempty(v)
+							write(buffer, v)
+							first_value = false
+						end
 					end
-				end
+
+				#	Read nested value elements
+					for c in eachelement(p)
+						if c.name == "value"
+							v = strip(String(nodecontent(c)))
+
+							if !isempty(v)
+								if !first_value
+									write(buffer, MULTI_SEP)
+								end
+
+								write(buffer, v)
+								first_value = false
+							end
+						end
+					end
+
+				#	Read direct text fallback
+					if first_value
+						v = strip(String(nodecontent(p)))
+
+						if !isempty(v)
+							write(buffer, v)
+							first_value = false
+						end
+					end
+
+				#	Store accumulated string
+					if !first_value
+						row[key] = String(take!(buffer))
+					end
+
+		#	Process numeric property
 			elseif dtype == "Number"
-				if !isempty(vals)
-					row[key] = _coerce_value(vals[end], "Number")
-				end
-			elseif dtype == "Number Category"
-				if !isempty(vals)
-					row[key] = _coerce_value(vals[end], "Number Category")
-				end
-			elseif dtype == "Date" || dtype == "Datetime" || dtype == "DateTime"
-				if !isempty(vals)
-					row[key] = _coerce_value(vals[end], "DateTime")
-				end
-			else
-				#	Unknown dtype → safe string accumulation
-				if !isempty(vals)
-					for v in vals
-						_coalesce_str!(row, key, v)
+				#	Read value attribute
+					if haskey(p, "value")
+						row[key] = _coerce_value(String(p["value"]), "Number")
 					end
-				end
+
+				#	Read nested value elements
+					for c in eachelement(p)
+						if c.name == "value"
+							row[key] = _coerce_value(String(nodecontent(c)), "Number")
+						end
+					end
+
+		#	Process categorical numeric property
+			elseif dtype == "Number Category"
+				#	Read value attribute
+					if haskey(p, "value")
+						row[key] = _coerce_value(String(p["value"]), "Number Category")
+					end
+
+				#	Read nested value elements
+					for c in eachelement(p)
+						if c.name == "value"
+							row[key] = _coerce_value(String(nodecontent(c)), "Number Category")
+						end
+					end
+
+		#	Process date-like property
+			elseif dtype in ("Date", "Datetime", "DateTime")
+				#	Read value attribute
+					if haskey(p, "value")
+						row[key] = _coerce_value(String(p["value"]), "DateTime")
+					end
+
+				#	Read nested value elements
+					for c in eachelement(p)
+						if c.name == "value"
+							row[key] = _coerce_value(String(nodecontent(c)), "DateTime")
+						end
+					end
+
+		#	Fallback string handling
+			else
+				#	Initialize accumulation buffer
+					buffer = IOBuffer()
+					first_value = true
+
+				#	Read value attribute
+					if haskey(p, "value")
+						v = strip(String(p["value"]))
+
+						if !isempty(v)
+							write(buffer, v)
+							first_value = false
+						end
+					end
+
+				#	Read nested value elements
+					for c in eachelement(p)
+						if c.name == "value"
+							v = strip(String(nodecontent(c)))
+
+							if !isempty(v)
+								if !first_value
+									write(buffer, MULTI_SEP)
+								end
+
+								write(buffer, v)
+								first_value = false
+							end
+						end
+					end
+
+				#	Read direct text fallback
+					if first_value
+						v = strip(String(nodecontent(p)))
+
+						if !isempty(v)
+							write(buffer, v)
+							first_value = false
+						end
+					end
+
+				#	Store accumulated string
+					if !first_value
+						row[key] = String(take!(buffer))
+					end
 			end
 
-		#	Track presence
-			push!(prop_keys, key)
+		#	Return nothing
 			return nothing
 	end
 
-#	Helper: Read one <nodeset> block into (standardized_key, DataFrame)
+#	ORA Nodeset Parsing
 	function _parse_nodeset(nodeset::EzXML.Node)
 		"""
 		Args:
 			nodeset::EzXML.Node: XML nodeset element to parse
 		Returns:
-			Tuple{String,DataFrame}: (standardized_key, DataFrame with node data)
+			Tuple{String,DataFrame,NamedTuple}: nodeset key, node table, and metadata
 		Notes:
-			- Standardizes nodeset type to canonical key using TYPE_TO_STDKEY
-			- Enforces column order: "Node ID", "Node Label", schema properties, extra properties
-			- Guarantees "Node ID" and "Node Label" columns exist
-			- Handles missing values based on datatype
-			- Throws error if required attributes missing
+			Uses the file-native nodeset id as the canonical key. ORA type is preserved as metadata.
 		"""
-		#	Attributes
-			ns_type = haskey(nodeset, "type") ? nodeset["type"] : nothing
-			ns_id   = haskey(nodeset, "id")   ? nodeset["id"]   : nothing
-			ns_type === nothing && error("nodeset missing 'type' attribute")
-			ns_id   === nothing && error("nodeset missing 'id' attribute")
 
-		#	Standardized key
-			stdkey = get(TYPE_TO_STDKEY, String(ns_type), String(ns_id))
+		#	Extract nodeset attributes
+			ns_type = haskey(nodeset, "type") ? nodeset["type"] : nothing
+			ns_id = haskey(nodeset, "id") ? nodeset["id"] : nothing
+
+		#	Validate nodeset attributes
+			ns_type === nothing && throw(ArgumentError("nodeset missing 'type' attribute"))
+			ns_id === nothing && throw(ArgumentError("nodeset missing 'id' attribute"))
+
+		#	Use file-native nodeset id
+			stdkey = String(ns_id)
 			stdkey == "Url" && (stdkey = URL_KEY)
 
-		#	Schema from <propertyIdentities>
+		#	Collect schema
 			schema = _collect_nodeset_schema(nodeset)
 
-		#	Collect rows as Dicts, then materialize (canonical keys first)
-			rows = Vector{Dict{String,Any}}()
-			prop_keys = Set{String}(["Node ID","Node Label"])
+		#	Collect node elements
+			node_elements = EzXML.Node[]
 
-		#	Walk <node> children
 			for child in eachelement(nodeset)
 				if child.name == "node"
+					push!(node_elements, child)
+				end
+			end
+
+		#	Pre-allocate row storage
+			n_nodes = length(node_elements)
+			rows = Vector{Dict{String,Any}}(undef, n_nodes)
+			prop_keys = Set{String}(["Node ID", "Node Label"])
+
+		#	Parse node records
+			for i in eachindex(node_elements)
+				#	Initialize row
+					child = node_elements[i]
 					row = Dict{String,Any}()
 
-					#	Canonical Node ID
-						node_id = haskey(child, "id") ? child["id"] : nothing
-						node_id === nothing && error("node without 'id' in nodeset $(String(ns_id))")
-						row["Node ID"] = String(node_id)
+				#	Extract node id
+					node_id = haskey(child, "id") ? child["id"] : nothing
+					node_id === nothing && throw(ArgumentError("node without 'id' in nodeset $(String(ns_id))"))
+					row["Node ID"] = String(node_id)
 
-					#	Direct <property> elements
-						for p in eachelement(child)
-							if p.name == "property"
-								_ingest_property!(row, p, schema, prop_keys)
-							end
+				#	Read direct property elements
+					for p in eachelement(child)
+						if p.name == "property"
+							_ingest_property!(row, p, schema, prop_keys)
 						end
+					end
 
-					#	<properties>/<property> wrapper (common in ORA)
-						for pwrap in eachelement(child)
-							if pwrap.name == "properties"
-								for p in eachelement(pwrap)
-									if p.name == "property"
-										_ingest_property!(row, p, schema, prop_keys)
-									end
+				#	Read wrapped property elements
+					for pwrap in eachelement(child)
+						if pwrap.name == "properties"
+							for p in eachelement(pwrap)
+								if p.name == "property"
+									_ingest_property!(row, p, schema, prop_keys)
 								end
 							end
 						end
+					end
 
-					#	Guarantee "Node Label" field exists (empty string if absent)
-						haskey(row, "Node Label") || (row["Node Label"] = "")
+				#	Guarantee node label
+					haskey(row, "Node Label") || (row["Node Label"] = "")
 
-					push!(rows, row)
-				end
+				#	Store row
+					rows[i] = row
 			end
 
-		#	Column order: "Node ID", "Node Label", then schema-declared (excluding the two), then extras seen
-			ordered_keys = String["Node ID","Node Label"]
-			for k in keys(schema)
-				(k != "Node ID" && k != "Node Label") && push!(ordered_keys, k)
-			end
-			for k in prop_keys
-				if !(k in ordered_keys)
-					push!(ordered_keys, k)
-				end
-			end
+		#	Build ordered column names
+			schema_keys = collect(keys(schema))
+			extra_keys = setdiff(collect(prop_keys), vcat(["Node ID", "Node Label"], schema_keys))
+			ordered_keys = vcat(["Node ID", "Node Label"], filter(k -> !(k in ("Node ID", "Node Label")), schema_keys), extra_keys)
 
-		#	Allocate columns by dtype (canonical two are Strings)
+		#	Allocate typed columns
 			data = Dict{Symbol,Vector}()
+
 			for k in ordered_keys
 				if k == "Node ID" || k == "Node Label"
-					data[Symbol(k)] = String[]
+					data[Symbol(k)] = Vector{String}(undef, n_nodes)
 				else
 					dt = get(schema, k, "Text")
+
 					if dt == "Number"
-						data[Symbol(k)] = Vector{Union{Missing,Float64}}()
+						data[Symbol(k)] = Vector{Union{Missing,Float64}}(undef, n_nodes)
 					elseif dt == "Number Category"
-						data[Symbol(k)] = Vector{Union{Missing,Int64}}()
-					elseif dt == "Date" || dt == "Datetime" || dt == "DateTime"
-						data[Symbol(k)] = Vector{Union{Missing,DateTime}}()
+						data[Symbol(k)] = Vector{Union{Missing,Int64}}(undef, n_nodes)
+					elseif dt in ("Date", "Datetime", "DateTime")
+						data[Symbol(k)] = Vector{Union{Missing,DateTime}}(undef, n_nodes)
 					else
-						data[Symbol(k)] = String[]
+						data[Symbol(k)] = Vector{String}(undef, n_nodes)
 					end
 				end
 			end
 
 		#	Populate columns
-			for r in rows
-				push!(data[Symbol("Node ID")], String(get(r, "Node ID", "")))
-				push!(data[Symbol("Node Label")], String(get(r, "Node Label", "")))
-				for k in ordered_keys
-					(k == "Node ID" || k == "Node Label") && continue
-					col = data[Symbol(k)]
-					if haskey(r, k)
-						val = r[k]
-						if isa(col, Vector{String})
-							push!(col, String(val))
+			for i in eachindex(rows)
+				#	Read row
+					r = rows[i]
+
+				#	Populate canonical columns
+					data[Symbol("Node ID")][i] = String(get(r, "Node ID", ""))
+					data[Symbol("Node Label")][i] = String(get(r, "Node Label", ""))
+
+				#	Populate property columns
+					for k in ordered_keys
+						(k == "Node ID" || k == "Node Label") && continue
+
+						col = data[Symbol(k)]
+
+						if haskey(r, k)
+							val = r[k]
+
+							if isa(col, Vector{String})
+								col[i] = String(val)
+							else
+								col[i] = val === nothing ? missing : val
+							end
 						else
-							push!(col, val === nothing ? missing : val)
-						end
-					else
-						if isa(col, Vector{String})
-							push!(col, "")
-						else
-							push!(col, missing)
+							if isa(col, Vector{String})
+								col[i] = ""
+							else
+								col[i] = missing
+							end
 						end
 					end
+			end
+
+		#	Materialize dataframe
+			pairs_ordered = [Symbol(k) => data[Symbol(k)] for k in ordered_keys]
+			df = DataFrame(pairs_ordered)
+
+		#	Assemble metadata
+			meta = (;
+				id = stdkey,
+				ora_id = String(ns_id),
+				ora_type = String(ns_type),
+				n_nodes = nrow(df),
+				properties = collect(keys(schema)),
+			)
+
+		#	Return parsed nodeset
+			return stdkey, df, meta
+	end
+
+#	Helper Function for _parse_network: boolean attribute parsing
+	function _parse_bool_attr(node::EzXML.Node, attr::AbstractString, default::Bool)
+		"""
+		Args:
+			node::EzXML.Node: XML node containing the attribute
+			attr::AbstractString: boolean attribute name
+			default::Bool: value returned when the attribute is absent
+		Returns:
+			Bool: parsed boolean value
+		Notes:
+			Recognizes true/false case-insensitively. Unknown values return the default.
+		"""
+
+		#	Return default when absent
+			if !haskey(node, attr)
+				return default
+			end
+
+		#	Normalize attribute value
+			val = lowercase(strip(String(node[attr])))
+
+		#	Parse known boolean values
+			if val == "true"
+				return true
+			elseif val == "false"
+				return false
+			else
+				return default
+			end
+	end
+
+#	Helper Function for _parse_network: nodeset type resolution
+	function _resolve_nodeset_by_type(
+		ora_type::AbstractString,
+		nodeset_meta::AbstractDict{String,<:NamedTuple},
+		net_id::AbstractString,
+		role::AbstractString)
+		"""
+		Args:
+			ora_type::AbstractString: ORA type to resolve
+			nodeset_meta::AbstractDict{String,<:NamedTuple}: nodeset metadata keyed by nodeset id
+			net_id::AbstractString: network id for error messages
+			role::AbstractString: source or target role for error messages
+		Returns:
+			String: resolved nodeset key
+		Notes:
+			Type-based resolution is allowed only when exactly one nodeset has the requested type.
+		"""
+
+		#	Find matching nodesets
+			matches = String[]
+
+			for (key, meta) in nodeset_meta
+				if meta.ora_type == String(ora_type)
+					push!(matches, key)
 				end
 			end
 
-		#	Materialize DataFrame in the **exact** column order (avoid Dict constructor)
-			pairs_ordered = [ Symbol(k) => data[Symbol(k)] for k in ordered_keys ]
-			df = DataFrame(pairs_ordered)
+		#	Validate match count
+			if isempty(matches)
+				throw(ArgumentError("network $(String(net_id)): no nodeset found for $(role)Type='$(String(ora_type))'"))
+			elseif length(matches) > 1
+				throw(ArgumentError(
+					"network $(String(net_id)): $(role)Type='$(String(ora_type))' is ambiguous; " *
+					"matching nodesets are $(join(matches, ", ")). Use explicit source/target attrs."
+				))
+			end
 
-		#	Return (key, df)
-			return stdkey, df
+		#	Return unique match
+			return matches[1]
 	end
 
-#	Helper: Parse one <network> block with strict node existence checking
-	function _parse_network(netnode::EzXML.Node, nodesets_map::Dict{String,DataFrame})
+#	ORA Network Parsing
+	function _parse_network(
+		netnode::EzXML.Node,
+		nodesets_map::AbstractDict{String,<:DataFrame},
+		nodeset_meta::AbstractDict{String,<:NamedTuple})
 		"""
 		Args:
 			netnode::EzXML.Node: XML network element to parse
-			nodesets_map::Dict{String,DataFrame}: mapping of nodeset keys to DataFrames
+			nodesets_map::AbstractDict{String,<:DataFrame}: parsed nodesets keyed by file-native nodeset id
+			nodeset_meta::AbstractDict{String,<:NamedTuple}: metadata for parsed nodesets
 		Returns:
-			Tuple{String,NamedTuple}: (network_id, meta_information)
-				meta contains: id, sourceType, targetType, sourceNodeset, targetNodeset,
-							isDirected, isBinary, allowSelfLoops, hadMissingWeights, edges
+			Tuple{String,NamedTuple}: network id and network metadata
 		Notes:
-			- Strictly validates all source/target nodes exist in respective nodesets
-			- Flags missing weights but continues processing
-			- Defaults: isDirected=true, isBinary=false, allowSelfLoops=false
-			- Standardizes URL nodeset key capitalization
-			- Throws error on missing attributes or unknown nodes
+			Prefers explicit network source/target attributes. Falls back to type only when unambiguous.
 		"""
-		#	Attributes
+
+		#	Extract network id
 			net_id = haskey(netnode, "id") ? netnode["id"] : nothing
-			net_id === nothing && error("<network> missing 'id'")
+			net_id === nothing && throw(ArgumentError("<network> missing 'id'"))
 
-			src_type   = haskey(netnode, "sourceType") ? netnode["sourceType"] : nothing
-			tgt_type   = haskey(netnode, "targetType") ? netnode["targetType"] : nothing
-			src_ns_att = haskey(netnode, "source")     ? netnode["source"]     : nothing
-			tgt_ns_att = haskey(netnode, "target")     ? netnode["target"]     : nothing
+		#	Extract endpoint attributes
+			src_type = haskey(netnode, "sourceType") ? netnode["sourceType"] : nothing
+			tgt_type = haskey(netnode, "targetType") ? netnode["targetType"] : nothing
+			src_ns_att = haskey(netnode, "source") ? netnode["source"] : nothing
+			tgt_ns_att = haskey(netnode, "target") ? netnode["target"] : nothing
 
-		#	Resolve nodeset keys (prefer explicit source/target attrs)
-			src_key = src_ns_att !== nothing ? String(src_ns_att) : (
-				src_type === nothing ? nothing : get(NETTYPE_TO_STDKEY, String(src_type), nothing)
-			)
-			tgt_key = tgt_ns_att !== nothing ? String(tgt_ns_att) : (
-				tgt_type === nothing ? nothing : get(NETTYPE_TO_STDKEY, String(tgt_type), nothing)
-			)
-			src_key === nothing && error("network $(String(net_id)) missing resolvable source nodeset")
-			tgt_key === nothing && error("network $(String(net_id)) missing resolvable target nodeset")
+		#	Resolve source nodeset
+			src_key =
+				src_ns_att !== nothing ? String(src_ns_att) :
+				src_type !== nothing ? _resolve_nodeset_by_type(src_type, nodeset_meta, net_id, "source") :
+				nothing
 
-		#	Standardize URL capitalization
+		#	Resolve target nodeset
+			tgt_key =
+				tgt_ns_att !== nothing ? String(tgt_ns_att) :
+				tgt_type !== nothing ? _resolve_nodeset_by_type(tgt_type, nodeset_meta, net_id, "target") :
+				nothing
+
+		#	Validate endpoint resolution
+			src_key === nothing && throw(ArgumentError("network $(String(net_id)) missing resolvable source nodeset"))
+			tgt_key === nothing && throw(ArgumentError("network $(String(net_id)) missing resolvable target nodeset"))
+
+		#	Normalize URL spelling
 			src_key == "Url" && (src_key = URL_KEY)
 			tgt_key == "Url" && (tgt_key = URL_KEY)
 
-		#	Nodeset presence
-			haskey(nodesets_map, src_key) || error("network $(String(net_id)): source nodeset '$src_key' not found")
-			haskey(nodesets_map, tgt_key) || error("network $(String(net_id)): target nodeset '$tgt_key' not found")
+		#	Validate nodeset presence
+			haskey(nodesets_map, src_key) || throw(ArgumentError("network $(String(net_id)): source nodeset '$src_key' not found"))
+			haskey(nodesets_map, tgt_key) || throw(ArgumentError("network $(String(net_id)): target nodeset '$tgt_key' not found"))
 
-		#	ID sets for strict checking (use canonical "Node ID" column)
+		#	Extract endpoint node tables
 			src_df = nodesets_map[src_key]
 			tgt_df = nodesets_map[tgt_key]
-			hasproperty(src_df, Symbol("Node ID")) || error("network $(String(net_id)): nodeset '$src_key' missing 'Node ID' column")
-			hasproperty(tgt_df, Symbol("Node ID")) || error("network $(String(net_id)): nodeset '$tgt_key' missing 'Node ID' column")
+
+		#	Validate node id columns
+			hasproperty(src_df, Symbol("Node ID")) || throw(ArgumentError("network $(String(net_id)): nodeset '$src_key' missing 'Node ID' column"))
+			hasproperty(tgt_df, Symbol("Node ID")) || throw(ArgumentError("network $(String(net_id)): nodeset '$tgt_key' missing 'Node ID' column"))
+
+		#	Build endpoint id sets
 			src_ids = Set(String.(src_df[!, Symbol("Node ID")]))
 			tgt_ids = Set(String.(tgt_df[!, Symbol("Node ID")]))
 
-		#	Flags
-			isDirected     = !(haskey(netnode,"isDirected")     && netnode["isDirected"] == "false")
-			isBinary       =  (haskey(netnode,"isBinary")       && netnode["isBinary"]   == "true")
-			allowSelfLoops =  (haskey(netnode,"allowSelfLoops") && netnode["allowSelfLoops"] == "true")
+		#	Read network flags
+			is_directed = _parse_bool_attr(netnode, "isDirected", true)
+			is_binary = _parse_bool_attr(netnode, "isBinary", false)
+			allow_self_loops = _parse_bool_attr(netnode, "allowSelfLoops", false)
 
-		#	Edge buffers
+		#	Initialize edge buffers
 			src_col = String[]
 			dst_col = String[]
 			wgt_col = Float64[]
-			hadMissingWeights = false
+			had_missing_weights = false
 
-		#	Read <link> edges
+		#	Read links
 			for lnk in eachelement(netnode)
 				if lnk.name == "link"
-					s = haskey(lnk, "source") ? lnk["source"] : nothing
-					t = haskey(lnk, "target") ? lnk["target"] : nothing
-					s === nothing && error("network $(String(net_id)): <link> missing 'source'")
-					t === nothing && error("network $(String(net_id)): <link> missing 'target'")
+					#	Extract endpoints
+						s = haskey(lnk, "source") ? lnk["source"] : nothing
+						t = haskey(lnk, "target") ? lnk["target"] : nothing
 
-					sid = String(s)
-					tid = String(t)
+					#	Validate endpoints
+						s === nothing && throw(ArgumentError("network $(String(net_id)): <link> missing 'source'"))
+						t === nothing && throw(ArgumentError("network $(String(net_id)): <link> missing 'target'"))
 
-					(sid in src_ids) || error("network $(String(net_id)): unknown source node '$sid' in '$src_key'")
-					(tid in tgt_ids) || error("network $(String(net_id)): unknown target node '$tid' in '$tgt_key'")
+					#	Normalize endpoint ids
+						sid = String(s)
+						tid = String(t)
 
-					if haskey(lnk, "value")
-						w = tryparse(Float64, String(lnk["value"]))
-						push!(wgt_col, w === nothing ? 1.0 : w)
-						hadMissingWeights |= (w === nothing)
-					else
-						push!(wgt_col, 1.0)
-						hadMissingWeights = true
-					end
+					#	Check endpoint membership
+						(sid in src_ids) || throw(ArgumentError("network $(String(net_id)): unknown source node '$sid' in '$src_key'"))
+						(tid in tgt_ids) || throw(ArgumentError("network $(String(net_id)): unknown target node '$tid' in '$tgt_key'"))
 
-					push!(src_col, sid)
-					push!(dst_col, tid)
+					#	Read link weight
+						if haskey(lnk, "value")
+							w = tryparse(Float64, String(lnk["value"]))
+							push!(wgt_col, w === nothing ? 1.0 : w)
+							had_missing_weights |= (w === nothing)
+						else
+							push!(wgt_col, 1.0)
+							had_missing_weights = true
+						end
+
+					#	Store edge
+						push!(src_col, sid)
+						push!(dst_col, tid)
 				end
 			end
 
-		#	Assemble meta
+		#	Assemble network metadata
 			meta = (;
-				id                = String(net_id),
-				sourceType        = src_type === nothing ? "" : String(src_type),
-				targetType        = tgt_type === nothing ? "" : String(tgt_type),
-				sourceNodeset     = src_key,
-				targetNodeset     = tgt_key,
-				isDirected        = isDirected,
-				isBinary          = isBinary,
-				allowSelfLoops    = allowSelfLoops,
-				hadMissingWeights = hadMissingWeights,
-				edges             = DataFrame(:src => src_col, :dst => dst_col, :weight => wgt_col),
+				id = String(net_id),
+				sourceType = src_type === nothing ? "" : String(src_type),
+				targetType = tgt_type === nothing ? "" : String(tgt_type),
+				sourceNodeset = src_key,
+				targetNodeset = tgt_key,
+				isDirected = is_directed,
+				isBinary = is_binary,
+				allowSelfLoops = allow_self_loops,
+				hadMissingWeights = had_missing_weights,
+				edges = DataFrame(:src => src_col, :dst => dst_col, :weight => wgt_col),
 			)
 
-		#	Return
+		#	Return network
 			return String(net_id), meta
 	end
 
@@ -1071,33 +1339,26 @@ THE SOFTWARE.
 #   IMPORT FUNCTIONS   #
 ########################
 
-#   ORA Meta-Network Import Function
+#	ORA Meta-Network Import Function
 	function load_ora_xml(filepath::AbstractString)
 		"""
 		Args:
 			filepath::AbstractString: path to ORA XML file
 		Returns:
-			NamedTuple: (nodesets::Dict{String,DataFrame}, networks::Dict{String,NamedTuple})
-				- nodesets: Dict with keys "Agent", "Tweet", "Hashtag", "URL"
-					Each DataFrame has "Node ID" column plus property columns
-				- networks: Dict keyed by network id, values contain:
-					id, sourceType, targetType, sourceNodeset, targetNodeset,
-					isDirected, isBinary, allowSelfLoops, hadMissingWeights, edges
+			NamedTuple: parsed ORA XML contents
 		Notes:
-			- Strict on network node references (throws on unknown nodes)
-			- Permissive on attributes (missing → "" or missing)
-			- Multi-valued string properties concatenated with MULTI_SEP
-			- Type conversions: Number→Float64, Number Category→Int64, Date→DateTime
-			- IDs remain Strings; "Url" nodeset standardized to "URL"
-			- Supports both <MetaNetwork> root and <DynamicMetaNetwork>/<MetaNetwork> nesting
+			Returns nodesets, nodeset metadata, and networks parsed from an ORA XML file.
+			Uses file-native nodeset ids rather than platform-specific aliases.
 		"""
+
 		#	Read and validate XML document
 			doc = readxml(filepath)
 			root = doc.root
-			(root === nothing) && error("Empty XML document")
+			root === nothing && throw(ArgumentError("Empty XML document"))
 
-		#	Locate <MetaNetwork> element (handle both root and nested cases)
+		#	Locate MetaNetwork element
 			meta = nothing
+
 			if root.name == "MetaNetwork"
 				meta = root
 			elseif root.name == "DynamicMetaNetwork"
@@ -1108,33 +1369,40 @@ THE SOFTWARE.
 					end
 				end
 			end
-			meta === nothing && error("No <MetaNetwork> element found")
 
-		#	Parse all nodesets into DataFrames
+			meta === nothing && throw(ArgumentError("No <MetaNetwork> element found"))
+
+		#	Initialize nodeset containers
 			nodesets_map = Dict{String,DataFrame}()
+			nodeset_meta = Dict{String,NamedTuple}()
+
+		#	Parse nodesets
 			for child in eachelement(meta)
 				if child.name == "nodes"
 					for ns in eachelement(child)
 						if ns.name == "nodeset"
-							key, df = _parse_nodeset(ns)
+							key, df, meta_nt = _parse_nodeset(ns)
+
 							nodesets_map[key] = df
+							nodeset_meta[key] = meta_nt
 						end
 					end
 				end
 			end
 
-		#	Validate expected nodesets exist (warn but continue if missing)
-			for must in ("Agent", "Tweet", "Hashtag", "URL")
-				haskey(nodesets_map, must) || @warn "Nodeset '$must' not found in file"
-			end
-
-		#	Parse all networks with strict node validation
+		#	Initialize network container
 			networks_map = Dict{String,NamedTuple}()
+
+		#	Parse networks
 			for child in eachelement(meta)
 				if child.name == "networks"
 					for net in eachelement(child)
 						if net.name == "network"
-							id, meta_nt = _parse_network(net, nodesets_map)
+							id, meta_nt = _parse_network(
+								net,
+								nodesets_map,
+								nodeset_meta)
+
 							networks_map[id] = meta_nt
 						end
 					end
@@ -1147,43 +1415,96 @@ THE SOFTWARE.
 		#	Return structured output
 			return (;
 				nodesets = nodesets_map,
+				nodeset_meta = nodeset_meta,
 				networks = networks_map,
 			)
 	end
 	@doc """
 		load_ora_xml(filepath::AbstractString) -> NamedTuple
 
-		Read an ORA **MetaNetwork** XML export and return:
-		- `nodesets::Dict{String,DataFrame}` with keys:
-		- `"Agent"`, `"Tweet"`, `"Hashtag"`, `"URL"` (standardized from `Url`)
-		- Each DataFrame has an `id::String` column plus one column per declared property.
-			* String-like (`Text`, `Text Category`, `URI`) are `String`. Multiple
-			occurrences are concatenated with the configured separator.
-			* `Number` → `Union{Missing,Float64}`
-			* `Number Category` → `Union{Missing,Int64}`
-			* `Date/Datetime/DateTime` → `Union{Missing,DateTime}`
-		- `networks::Dict{String,NamedTuple}` keyed by the network `id` in the file.
-		Each value contains:
-		- `id::String`, `sourceType::String`, `targetType::String`
-		- `sourceNodeset::String`, `targetNodeset::String`
-		- `isDirected::Bool`, `isBinary::Bool`, `allowSelfLoops::Bool`
-		- `hadMissingWeights::Bool` (true if any `<link>` lacked a `value`)
-		- `edges::DataFrame` with columns `:src::String`, `:dst::String`, `:weight::Float64`
+	Read an ORA MetaNetwork XML export and return parsed nodesets,
+	nodeset metadata, and network structures.
 
-		Behavior
-		--------
-		- **Strict on networks**: throws if any `<link>` references an unknown node id.
-		- **Permissive on attributes**: unknown/missing properties become `""` (strings)
-		or `missing` (numeric/date types).
-		- IDs are preserved as **Strings**. The `Url` nodeset is exposed as **"URL"**.
+	Returns
+	-------
+	NamedTuple with fields:
 
-		Example
-		-------
+	- `nodesets::Dict{String,DataFrame}`
+		Dictionary keyed by file-native ORA nodeset id.
+
+		Examples:
+		- `"Agent"`
+		- `"Tweet"`
+		- `"Message"`
+		- `"Hashtag"`
+		- `"Channel"`
+		- `"URL"`
+
+		Each DataFrame contains:
+		- `"Node ID"::String`
+		- `"Node Label"::String`
+		- one column per declared property
+
+		Type conversions:
+		- `Text`, `Text Category`, `URI` → `String`
+		- `Number` → `Union{Missing,Float64}`
+		- `Number Category` → `Union{Missing,Int64}`
+		- `Date`, `Datetime`, `DateTime`
+			→ `Union{Missing,DateTime}`
+
+		Multi-valued string properties are concatenated using `MULTI_SEP`.
+
+	- `nodeset_meta::Dict{String,NamedTuple}`
+
+		Dictionary keyed by nodeset id containing:
+		- `id`
+		- `ora_id`
+		- `ora_type`
+		- `n_nodes`
+		- `properties`
+
+	- `networks::Dict{String,NamedTuple}`
+
+		Dictionary keyed by network id.
+
+		Each network contains:
+		- `id::String`
+		- `sourceType::String`
+		- `targetType::String`
+		- `sourceNodeset::String`
+		- `targetNodeset::String`
+		- `isDirected::Bool`
+		- `isBinary::Bool`
+		- `allowSelfLoops::Bool`
+		- `hadMissingWeights::Bool`
+		- `edges::DataFrame`
+
+		The edge table contains:
+		- `:src::String`
+		- `:dst::String`
+		- `:weight::Float64`
+
+	Behavior
+	--------
+	- Strict on network node references
+	- Permissive on missing attributes
+	- Preserves ORA nodeset ids directly
+	- Standardizes `"Url"` to `"URL"`
+	- Supports both:
+		- `<MetaNetwork>`
+		- `<DynamicMetaNetwork><MetaNetwork>`
+
+	Example
+	-------
 	```julia
-		out = load_ora_xml("/path/to/Balikatan_2022_Processed.xml")
-		df_agents = out.nodesets["Agent"]
-		nt = out.networks["Agent x Tweet - Sender"]
-		first(nt.edges, 5)
+	out = load_ora_xml("telegram_export.xml")
+
+	users = out.nodesets["User"]
+	messages = out.nodesets["Message"]
+
+	reply_network = out.networks["User x Message - Author"]
+
+	first(reply_network.edges, 5)
 	```
 	""" load_ora_xml
 
@@ -3949,7 +4270,7 @@ THE SOFTWARE.
 	- Lempel, R., & Moran, S. (2001). *SALSA: The Stochastic Approach for Link-Structure Analysis.* ACM TOIS 19(2), 131–160.
 	""" salsa_centrality
 
-#	Helper Function: LogSumExp for numerical stability (Leiden)
+#	Modularity Helper Function: LogSumExp for numerical stability (Leiden)
 	function logsumexp(x::Vector{Float64})
 		"""
 		Args:
@@ -3976,8 +4297,7 @@ THE SOFTWARE.
 			return max_x + log(sum(exp.(x .- max_x)))
 	end
 
-
-#	Helper Function for calculate_modularity: Compact Membership Remap
+#	Modularity Helper Function for calculate_modularity: Compact Membership Remap
 	function _remap_membership(membership::Vector{Int})
 		"""
 		Args:
@@ -4015,7 +4335,7 @@ THE SOFTWARE.
 			return (mapped, C)
 	end
 
-#	Helper Function for calculate_modularity: Symmetrize Adjacency for Undirected
+#	Modularity Helper Function for calculate_modularity: Symmetrize Adjacency for Undirected
 	function _symmetrize_for_undirected(adj::SparseMatrixCSC{Float64,Int}, weighted::Bool)
 		"""
 		Args:
@@ -4045,7 +4365,7 @@ THE SOFTWARE.
 			end
 	end
 
-#	Helper Function for calculate_modularity: Block-Diagonal Internal Edge Weight
+#	Modularity Helper Function for calculate_modularity: Block-Diagonal Internal Edge Weight
 	function _internal_edge_weight(adj::SparseMatrixCSC{Float64,Int}, mapped::Vector{Int})
 		"""
 		Args:
@@ -4080,7 +4400,7 @@ THE SOFTWARE.
 			return internal
 	end
 
-#	Helper Function for calculate_modularity: Community Degree Sums
+#	Modularity Helper Function for calculate_modularity: Community Degree Sums
 	function _community_degree_sums(degree::Vector{Float64}, mapped::Vector{Int}, C::Int)
 		"""
 		Args:
@@ -4243,22 +4563,22 @@ THE SOFTWARE.
 	Returns a `Float64` in the range `[-1, 1]`. Higher values indicate stronger community structure. A value of `0.0` corresponds to no better-than-random community structure (e.g., when the graph has no edges or when the partition is trivial).
 
 	**Examples**
-```julia
-		using SparseArrays
+	```julia
+			using SparseArrays
 
-		#	Simple unweighted undirected graph
-			adj = sparse([1,2,3], [2,3,1], ones(3), 3, 3)
-			membership = [1, 1, 2]
-			Q = calculate_modularity(adj, membership; weighted = false)
+			#	Simple unweighted undirected graph
+				adj = sparse([1,2,3], [2,3,1], ones(3), 3, 3)
+				membership = [1, 1, 2]
+				Q = calculate_modularity(adj, membership; weighted = false)
 
-		#	Weighted directed graph
-			adj = sparse([1,2], [2,3], [0.5, 1.0], 3, 3)
-			Q = calculate_modularity(adj, membership; directed = true)
+			#	Weighted directed graph
+				adj = sparse([1,2], [2,3], [0.5, 1.0], 3, 3)
+				Q = calculate_modularity(adj, membership; directed = true)
 
-		#	Resolution sweep for community-size sensitivity
-			gammas = collect(0.5:0.1:2.0)
-			Qs = [calculate_modularity(adj, membership; γ = γ) for γ in gammas]
-```
+			#	Resolution sweep for community-size sensitivity
+				gammas = collect(0.5:0.1:2.0)
+				Qs = [calculate_modularity(adj, membership; γ = γ) for γ in gammas]
+	```
 
 	**See Also**
 	`calculate_modularity_cached`, `leiden_community_detection`, `champ_community_detection`
@@ -4269,7 +4589,7 @@ THE SOFTWARE.
 	Reichardt & Bornholdt (2006). "Statistical mechanics of community detection." Phys. Rev. E 74:016110.
 	""" calculate_modularity
 
-#	Helper Function for delta_modularity_best!: Undirected Best-Move Evaluation
+#	Leidden Community Helper Function for delta_modularity_best!: Undirected Best-Move Evaluation
 	function delta_modularity_undirected_best!(adj::SparseMatrixCSC{Float64,Int},
 	                                            i::Int,
 	                                            c_old::Int,
@@ -4366,7 +4686,7 @@ THE SOFTWARE.
 			return (best_c, best_ΔQ)
 	end
 
-#	Helper Function for delta_modularity_best!: Directed Best-Move Evaluation
+#	Leidden Community Helper Function for delta_modularity_best!: Directed Best-Move Evaluation
 	function delta_modularity_directed_best!(adj::SparseMatrixCSC{Float64,Int},
 	                                          i::Int,
 	                                          c_old::Int,
@@ -4525,7 +4845,7 @@ THE SOFTWARE.
 			return (best_c, best_ΔQ)
 	end
 
-#	Helper Function: Ensure Connectivity Within Communities
+#	Leidden Community Helper Function: Ensure Connectivity Within Communities
 	function _refine_connectivity!(adj::SparseMatrixCSC, membership::Vector{Int}; directed::Bool=false)
 		"""
 		Args:
@@ -4621,7 +4941,7 @@ THE SOFTWARE.
 			return nothing
 	end
 
-#	Helper Function: Contract Graph by Community Structure
+#	Leidden Community Helper Function: Contract Graph by Community Structure
 	function _contract_by_membership(adj::SparseMatrixCSC,
 									membership::Vector{Int};
 									directed::Bool=false,
@@ -4699,7 +5019,7 @@ THE SOFTWARE.
 			return S
 	end
 
-#	Helper Function: Single Leiden Run
+#	Leidden Community Helper Function: Single Leiden Run
 	function _leiden_single_run_preprocessed(adj::SparseMatrixCSC,
 											resolution::Float64,
 											n_iterations::Int;
@@ -5121,21 +5441,22 @@ THE SOFTWARE.
 	- `node_names::Vector`: Original node identifiers in adjacency-matrix order.
 
 	**Examples**
-```julia
-		#	Undirected weighted (default arguments)
-			result = leiden_community_detection(edges)
 
-		#	Directed weighted with node universe and isolates
-			result = leiden_community_detection(edges;
-											  nodes = node_df,
-											  resolution = 0.8,
-											  n_runs = 10,
-											  seed = 42)
+	```julia
+			#	Undirected weighted (default arguments)
+				result = leiden_community_detection(edges)
 
-		#	Multiple runs for robustness (parallelized)
-			result = leiden_community_detection(edges;
-											  n_runs = 20)
-```
+			#	Directed weighted with node universe and isolates
+				result = leiden_community_detection(edges;
+												nodes = node_df,
+												resolution = 0.8,
+												n_runs = 10,
+												seed = 42)
+
+			#	Multiple runs for robustness (parallelized)
+				result = leiden_community_detection(edges;
+												n_runs = 20)
+	```
 
 	**References**
 	Traag VA, Waltman L, van Eck NJ (2019) "From Louvain to Leiden: guaranteeing well-connected communities." Scientific Reports 9(1):5233.
@@ -5621,26 +5942,26 @@ THE SOFTWARE.
 
 	**Examples**
 
-```julia
-		#	Default analysis on a directed weighted network
-			result = champ_community_detection(edges;
-											weighted = true,
-											directed = true)
-			println("Selected γ: $(result.resolution_used)")
-			println("Modularity: $(result.modularity)")
+	```julia
+			#	Default analysis on a directed weighted network
+				result = champ_community_detection(edges;
+												weighted = true,
+												directed = true)
+				println("Selected γ: $(result.resolution_used)")
+				println("Modularity: $(result.modularity)")
 
-		#	Custom resolution range
-			result = champ_community_detection(edges;
-											resolution_range = (0.2, 2.0),
-											n_resolutions    = 40,
-											weighted         = true,
-											directed         = true)
+			#	Custom resolution range
+				result = champ_community_detection(edges;
+												resolution_range = (0.2, 2.0),
+												n_resolutions    = 40,
+												weighted         = true,
+												directed         = true)
 
-		#	Single-resolution Leiden via CHAMP (skips sweep, runs Leiden once)
-			result = champ_community_detection(edges;
-											resolution = 1.0,
-											weighted   = true)
-```
+			#	Single-resolution Leiden via CHAMP (skips sweep, runs Leiden once)
+				result = champ_community_detection(edges;
+												resolution = 1.0,
+												weighted   = true)
+	```
 
 	**References**
 	1. Weir WH, Emmons S, Gibson R, Taylor D, Mucha PJ (2017) "Post-processing partitions to identify domains of modularity optimization." *Algorithms* 10(3):93. doi:10.3390/a10030093
