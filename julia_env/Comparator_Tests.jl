@@ -1,6 +1,19 @@
 #Test Script of Large_Graph_Similarity's Design Matrices and Comparator Functions
 #Jonathan H. Morgan
-#10-21 November 2025
+#10-21 November 2025; revised 20 October 2026
+#
+#	REVISION NOTE. The CHAMP admissible-set computation in Large_Graph_Similarity.jl
+#	was found to reject admissible partitions: it probed a single gamma per
+#	competitor and dropped the partition if the competitor won there, which is
+#	not the admissibility question. It has been replaced by an exact half-line
+#	intersection (_admissible_set). Every call below with resolution_sweep=true
+#	selected its gamma over the defective set, so the similarity figures recorded
+#	in the comments of the comparator section were produced at a gamma that may
+#	differ from the corrected one; they are kept as the pre-fix record and must be
+#	re-recorded. The defect went unnoticed because these graphs have clear elbows:
+#	the partitions the old test dropped lay far from the bend, so the selected
+#	gamma barely moved. The TESTING section now carries a direct check of the
+#	admissible set against a brute-force envelope, which would have caught it.
 
 #   Pulling-In BEND_2022 & Activating Local Environment
     cd("/mnt/d/Dropbox/Netanomics_Resources/Documents/SBP_BRIMS_2025/Large_Graph_Similarity")
@@ -14,6 +27,7 @@
 using CSV
 using DataFrames
 using LinearAlgebra
+using Random
 using SparseArrays
 using Statistics
 using StatsBase
@@ -4265,6 +4279,10 @@ using Large_Graph_Similarity
 #   ASSESSMENT OF THE DESIGN MATRICES' CONSTRUCTORS & FEATURE VECTORS  #
 ########################################################################
 
+#   Every resolution_sweep=true call below selects its gamma from the admissible
+#   set; see the revision note at the top. Each constructor writes resolution_used
+#   into global_stats, which is how a result table can be traced to its gamma.
+
 #   Generating Undirected/Binary Graph Design Matrices from which to Create Feature Vectors
     global_stats, triad_census_counts, node_measures = undirected_binary_constructor(balikatan_arcs, balikatan_nodes; directed=false, 
                                                                                      weighted=false, resolution_sweep=true)
@@ -4309,7 +4327,9 @@ using Large_Graph_Similarity
 #   COMPARATOR FUNCTION ASSESSMENT   #
 ######################################
 
-#   Performing Network Comparison of Balikatan and TOTO 2023: Raw Similarity (0.2625), Tail-Normalized Similarity(0.263)
+#   Performing Network Comparison of Balikatan and TOTO 2023
+#   Pre-fix record (defective admissible set, resolution_sweep=true): Raw Similarity (0.2625), Tail-Normalized Similarity (0.263)
+#   Post-fix values: to be recorded on the next run, together with the resolution_used each constructor writes to global_stats
     global_stats_1, triad_census_counts_1, node_measures_1,
     global_stats_2, triad_census_counts_2, node_measures_2,
     pac_rim_combined_features, 
@@ -4613,3 +4633,179 @@ using Large_Graph_Similarity
     end
 
     test_global_clustering_coefficient_toys()
+
+#	Helper Function for test_admissible_set: Brute-Force Envelope on a Fine Grid
+	function _brute_force_admissible(A::Vector{Float64}, P::Vector{Float64}, gammas::Vector{Float64};
+	                                 n_points::Int = 20_001, rtol::Float64 = 1e-9)
+		"""
+		Args:
+			A::Vector{Float64}: intercepts
+			P::Vector{Float64}: minus slopes
+			gammas::Vector{Float64}: the swept range, used only for its extrema
+			n_points::Int: evaluation points across the range (default = 20,001)
+			rtol::Float64: a line within this relative margin of the maximum counts as tied
+		Returns:
+			Vector{Bool}: whether each line attains the maximum somewhere on the grid
+		Notes:
+			The reference the exact test is checked against. A line that is
+			optimal only on an interval narrower than the grid spacing can be
+			missed here, so the comparison allows the exact test to flag a few
+			more partitions than the brute force does, never fewer.
+		"""
+
+		#	Evaluate Every Line at Every Point
+			γmin, γmax = extrema(gammas)
+			grid = range(γmin, γmax; length = n_points)
+			winners = falses(length(A))
+			for γ in grid
+				q = A .- γ .* P
+				best = maximum(q)
+				winners .|= q .>= best - rtol * max(1.0, abs(best))
+			end
+
+		#	Assembling Result
+			return collect(winners)
+	end
+
+#	Test: The Admissible Set Against Hand-Built and Brute-Force Envelopes
+	function test_admissible_set(; verbose::Bool = true, n_random::Int = 50, seed::Int = 2026)
+		"""
+		Args:
+			verbose::Bool: print each case (default = true)
+			n_random::Int: random coefficient sets to check against brute force (default = 50)
+			seed::Int: RNG seed for the random cases (default = 2026)
+		Returns:
+			Nothing; throws on the first failure
+		Notes:
+			Three cases. The hand-built case has three lines that each win on a
+			known interval, plus one that never wins; the intervals are checked to
+			the crossing points. The probe-point case reproduces the situation the
+			old test got wrong: a partition that wins on an interval but loses at
+			the single gamma the old code examined. The random cases compare the
+			exact set against a brute-force envelope on a fine grid, which is the
+			check that would have caught the defect on its first run.
+		"""
+
+		#	Helpers
+			print_test(name, got, expected) = verbose && println("$(name): got=$(got), expected=$(expected)")
+			admissible_set = Large_Graph_Similarity._admissible_set
+
+		#	------------------------------------------------------------
+		#	Case 1: Three lines on the envelope, one below it
+		#	(A, P) = (100, 50) wins below gamma 0.5; (90, 30) between 0.5
+		#	and 1.0; (70, 10) above 1.0. (80, 40) is below (90, 30) wherever
+		#	(90, 30) is on the envelope and below (100, 50) at small gamma,
+		#	so it never wins.
+		#	------------------------------------------------------------
+			A1 = [100.0, 90.0, 70.0, 80.0]
+			P1 = [ 50.0, 30.0, 10.0, 40.0]
+			g1 = [0.1, 0.4, 2.0, 0.3]
+			r1 = admissible_set(A1, P1, g1)
+			print_test("Case 1 admissible", r1.admissible, [true, true, true, false])
+			@assert r1.admissible == [true, true, true, false]
+			print_test("Case 1 interval of (100, 50)", (r1.lower[1], r1.upper[1]), (0.1, 0.5))
+			@assert isapprox(r1.lower[1], 0.1; atol = 1e-9) && isapprox(r1.upper[1], 0.5; atol = 1e-9)
+			print_test("Case 1 interval of (90, 30)", (r1.lower[2], r1.upper[2]), (0.5, 1.0))
+			@assert isapprox(r1.lower[2], 0.5; atol = 1e-9) && isapprox(r1.upper[2], 1.0; atol = 1e-9)
+			print_test("Case 1 interval of (70, 10)", (r1.lower[3], r1.upper[3]), (1.0, 2.0))
+			@assert isapprox(r1.lower[3], 1.0; atol = 1e-9) && isapprox(r1.upper[3], 2.0; atol = 1e-9)
+			@assert isnan(r1.lower[4]) && isnan(r1.upper[4])
+
+		#	------------------------------------------------------------
+		#	Case 2: The probe-point failure
+		#	Line i = (90, 30) at its own gamma 1.8, line j = (70, 10). They cross
+		#	at gamma 1.0, and i wins below it, so i is optimal on [0.5, 1.0].
+		#	The old test computed the crossing with the wrong sign,
+		#	(Aj - Ai) / (Pi - Pj) = -1.0, found it outside the range, and fell
+		#	back to testing at i's own gamma of 1.8, where j is higher; it
+		#	rejected i. With the sign corrected it would have probed the midpoint
+		#	(1.0 + 1.8) / 2 = 1.4, where j is also higher, and rejected i too.
+		#	The exact test keeps it.
+		#	------------------------------------------------------------
+			A2 = [100.0, 90.0, 70.0]
+			P2 = [ 50.0, 30.0, 10.0]
+			g2 = [0.1, 1.8, 2.0]
+			r2 = admissible_set(A2, P2, g2)
+			print_test("Case 2 admissible", r2.admissible, [true, true, true])
+			@assert r2.admissible == [true, true, true]
+			print_test("Case 2 interval of (90, 30)", (r2.lower[2], r2.upper[2]), (0.5, 1.0))
+			@assert isapprox(r2.lower[2], 0.5; atol = 1e-9) && isapprox(r2.upper[2], 1.0; atol = 1e-9)
+
+		#	------------------------------------------------------------
+		#	Case 3: Parallel lines and duplicates
+		#	Two identical lines are both kept; a parallel line with the lower
+		#	intercept is rejected.
+		#	------------------------------------------------------------
+			A3 = [100.0, 100.0, 95.0, 60.0]
+			P3 = [ 50.0,  50.0, 50.0,  5.0]
+			g3 = [0.1, 0.2, 0.3, 3.0]
+			r3 = admissible_set(A3, P3, g3)
+			print_test("Case 3 admissible", r3.admissible, [true, true, false, true])
+			@assert r3.admissible == [true, true, false, true]
+
+		#	------------------------------------------------------------
+		#	Case 4: Random coefficients against a brute-force envelope
+		#	Coefficients are drawn so that P and A fall with gamma on average,
+		#	as a sweep's do, with noise so the envelope has slivers and gaps.
+		#	The exact test may keep a partition whose interval is narrower than
+		#	the brute-force grid spacing; it must never drop one the brute force
+		#	finds, and where both keep a partition the intervals must contain
+		#	every grid point at which the brute force saw it win.
+		#	------------------------------------------------------------
+			rng = MersenneTwister(seed)
+			n_checked = 0
+			for trial in 1:n_random
+				n_grid = rand(rng, 10:60)
+				gammas = collect(range(0.1, 6.0; length = n_grid))
+				P = sort(1000.0 .* rand(rng, n_grid); rev = true) .+ 20.0 .* randn(rng, n_grid)
+				A = 1000.0 .+ 0.3 .* P .+ 15.0 .* randn(rng, n_grid)
+				P = abs.(P)
+				exact = admissible_set(A, P, gammas)
+				brute = _brute_force_admissible(A, P, gammas)
+				missed = findall(brute .& .!exact.admissible)
+				if !isempty(missed)
+					error("Trial $trial: exact test dropped partitions the brute force found: $missed")
+				end
+				γmin, γmax = extrema(gammas)
+				grid = collect(range(γmin, γmax; length = 20_001))
+				for i in findall(exact.admissible .& brute)
+					q_i = A[i] .- grid .* P[i]
+					wins = [q_i[k] >= maximum(A .- grid[k] .* P) - 1e-9 * 1000 for k in eachindex(grid)]
+					win_pts = grid[wins]
+					step = grid[2] - grid[1]
+					if !isempty(win_pts) && (minimum(win_pts) < exact.lower[i] - step ||
+					                         maximum(win_pts) > exact.upper[i] + step)
+						error("Trial $trial: interval of partition $i excludes grid points where it wins")
+					end
+				end
+				n_checked += 1
+			end
+			print_test("Case 4 random trials agreeing with brute force", n_checked, n_random)
+			@assert n_checked == n_random
+
+		#	All tests passed
+			verbose && println("All admissible-set tests passed.")
+			return nothing
+	end
+
+	test_admissible_set()
+
+#	Test: The Elbow of a Real Sweep Is Computed Over the True Envelope
+#	A sweep on Balikatan, directed and weighted, with the admissible set checked
+#	against brute force on the returned coefficients. This is the check that
+#	would have caught the defect on the first run of the comparator.
+	balikatan_sweep = champ_community_detection(balikatan_arcs;
+	                                            nodes            = balikatan_nodes,
+	                                            resolution_range = (0.5, 1.8),
+	                                            n_resolutions    = 30,
+	                                            weighted         = true,
+	                                            directed         = true,
+	                                            seed             = 42,
+	                                            show_progress    = false)
+	balikatan_brute = _brute_force_admissible(balikatan_sweep.A_coeffs, balikatan_sweep.P_coeffs,
+	                                          balikatan_sweep.gammas)
+	@assert !any(balikatan_brute .& .!balikatan_sweep.dominant) "Balikatan sweep: admissible set missed envelope partitions"
+	@assert balikatan_sweep.dominant[balikatan_sweep.best_index] "Balikatan sweep: the elbow is not on the envelope"
+	println("Balikatan sweep: $(count(balikatan_sweep.dominant)) admissible of $(length(balikatan_sweep.gammas)); " *
+	        "elbow at gamma = $(balikatan_sweep.resolution_used); widest interval " *
+	        "$(round(maximum(filter(!isnan, balikatan_sweep.dominance_upper .- balikatan_sweep.dominance_lower)); digits = 3))")

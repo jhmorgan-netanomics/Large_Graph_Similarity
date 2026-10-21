@@ -5562,6 +5562,104 @@ THE SOFTWARE.
 			return (A, P)
 	end
 
+#	Helper Function for champ_community_detection: Admissible Set by Half-Line Intersection
+	function _admissible_set(A::AbstractVector{<:Real}, P::AbstractVector{<:Real},
+	                         gammas::AbstractVector{<:Real})
+		"""
+		Args:
+			A::AbstractVector: intercept of each partition's line, the internal weight
+			P::AbstractVector: minus the slope of each line, the null-model weight
+			gammas::AbstractVector: the swept resolutions, which fix the range
+		Returns:
+			NamedTuple: (admissible, lower, upper) -- a Bool per partition, and the
+				interval of gamma over which it is optimal (NaN when inadmissible)
+		Notes:
+			Partition i is admissible when some gamma in the swept range exists at
+			which no other partition scores higher:
+
+				{ gamma in [gmin, gmax] : A_i - gamma*P_i >= A_j - gamma*P_j for all j }
+				is non-empty.
+
+			Each competitor j imposes one half-line, because the inequality is
+			(A_i - A_j) >= gamma * (P_i - P_j). A competitor with SMALLER P than i
+			makes P_i - P_j positive and bounds gamma from ABOVE: i is the coarser,
+			steeper line and can beat j only at small gamma. A competitor with
+			LARGER P bounds gamma from below. Equal P reduces to a comparison of
+			intercepts. Intersecting the half-lines with the swept range leaves an
+			interval, and i is admissible exactly when it is non-empty. O(n^2) in the
+			number of grid points, and exact.
+
+			This replaces a test that probed a single gamma per competitor --
+			midway between the pair's crossing and partition i's own gamma -- and
+			rejected i if the competitor won there. A competitor can win at that one
+			point while i is still optimal elsewhere in the range, so the old test
+			rejected admissible partitions. The old test also computed the crossing
+			with the wrong sign, (Aj - Ai) / (Pi - Pj) rather than (Ai - Aj) /
+			(Pi - Pj), so a crossing inside the range was usually reported outside
+			it and the fallback -- a comparison at partition i's own gamma alone --
+			decided instead. On the caffeine era networks it flagged
+			13 of 24 envelope partitions for one era and moved the selected gamma
+			from 0.4 to 1.0 for another. The defect passed unnoticed on graphs with
+			a clear elbow, where the partitions it dropped were far from the bend.
+
+			Two grid points that recovered the same partition have identical lines.
+			Both are kept, with the same interval, so the count of admissible rows
+			can exceed the count of distinct admissible partitions.
+		"""
+
+		#	Validation
+			n = length(A)
+			if length(P) != n || length(gammas) != n
+				throw(ArgumentError("_admissible_set: A, P and gammas differ in length"))
+			end
+			if n == 0
+				return (admissible = Bool[], lower = Float64[], upper = Float64[])
+			end
+
+		#	Tolerance, Relative to the Scale of the Coefficients
+			scale = max(1.0, maximum(abs, A), maximum(abs, P))
+			tol   = 1e-9 * scale
+
+		#	Swept Range
+			γmin, γmax = extrema(gammas)
+
+		#	Intersect the Half-Lines for Each Partition
+			admissible = falses(n)
+			lower = fill(NaN, n)
+			upper = fill(NaN, n)
+			for i in 1:n
+				lo = Float64(γmin)
+				hi = Float64(γmax)
+				beaten = false
+				for j in 1:n
+					i == j && continue
+					dA = A[i] - A[j]
+					dP = P[i] - P[j]
+					if abs(dP) <= tol
+						#	Parallel lines: the higher intercept wins everywhere
+						if A[j] > A[i] + tol
+							beaten = true
+							break
+						end
+					elseif dP > 0
+						#	Competitor has smaller P: i wins only below the crossing
+						hi = min(hi, dA / dP)
+					else
+						#	Competitor has larger P: i wins only above the crossing
+						lo = max(lo, dA / dP)
+					end
+				end
+				if !beaten && lo <= hi + 1e-12
+					admissible[i] = true
+					lower[i] = lo
+					upper[i] = max(lo, hi)
+				end
+			end
+
+		#	Assembling Result
+			return (admissible = admissible, lower = lower, upper = upper)
+	end
+
 #	Helper Function for champ_community_detection: Curve-Intersection Selection
 	function _select_curve_intersection(result::NamedTuple)
 		"""
@@ -5675,7 +5773,7 @@ THE SOFTWARE.
 		Returns:
 			NamedTuple: (membership, resolution_used, modularity, n_communities, node_names,
 			             gammas, A_coeffs, P_coeffs, modularities, n_communities_per_gamma,
-			             dominant, best_index)
+			             dominant, dominance_lower, dominance_upper, best_index)
 		Notes:
 			The γ sweep is parallelized with Threads.@threads. Each γ task calls
 			leiden_community_detection with parallel_runs=false to avoid nested
@@ -5695,7 +5793,8 @@ THE SOFTWARE.
 				       n_communities=0, node_names=String[],
 				       gammas=Float64[], A_coeffs=Float64[], P_coeffs=Float64[],
 				       modularities=Float64[], n_communities_per_gamma=Int[],
-				       dominant=Bool[], best_index=0)
+				       dominant=Bool[], dominance_lower=Float64[], dominance_upper=Float64[],
+				       best_index=0)
 			end
 
 		#	Set Aggregation Strategy
@@ -5799,48 +5898,27 @@ THE SOFTWARE.
 					end
 			end
 
-		#	Phase 2: Dominance Analysis
-			dominant = trues(length(gammas))
-
+		#	Phase 2: Admissible Set
+		#	Exact half-line intersection; see _admissible_set for the defect this
+		#	replaced and the reason it went unnoticed on graphs with a clear elbow.
+			A_coeffs = [c[1] for c in all_coeffs]
+			P_coeffs = [c[2] for c in all_coeffs]
 			if length(gammas) > 1
-				nP = length(all_partitions)
-				γmin, γmax = minimum(gammas), maximum(gammas)
-
-				#	Check Dominance Relationships
-					for i in 1:nP
-						Ai, Pi = all_coeffs[i]
-						for j in 1:nP
-							i == j && continue
-							Aj, Pj = all_coeffs[j]
-
-							if !isapprox(Pi, Pj; atol=1e-12)
-								γcross = (Aj - Ai) / (Pi - Pj + 1e-12)
-								if γmin - 1e-6 < γcross < γmax + 1e-6
-									γtest = clamp((γcross + all_partitions[i].gamma)/2, γmin, γmax)
-									if (Aj - γtest*Pj) > (Ai - γtest*Pi) + 1e-12
-										dominant[i] = false
-										break
-									end
-								elseif (Aj - all_partitions[i].gamma*Pj) >
-								       (Ai - all_partitions[i].gamma*Pi) + 1e-12
-									dominant[i] = false
-									break
-								end
-							else
-								if Aj > Ai + 1e-12
-									dominant[i] = false
-									break
-								end
-							end
-						end
-					end
+				adm = _admissible_set(A_coeffs, P_coeffs, gammas)
+				dominant        = collect(adm.admissible)
+				dominance_lower = adm.lower
+				dominance_upper = adm.upper
+			else
+				dominant        = [true]
+				dominance_lower = [gammas[1]]
+				dominance_upper = [gammas[1]]
 			end
 
 		#	Build Intermediate Result for Selection Helper
 			intermediate = (
 				gammas                  = gammas,
-				A_coeffs                = [c[1] for c in all_coeffs],
-				P_coeffs                = [c[2] for c in all_coeffs],
+				A_coeffs                = A_coeffs,
+				P_coeffs                = P_coeffs,
 				modularities            = [p.modularity for p in all_partitions],
 				n_communities_per_gamma = [p.n_communities for p in all_partitions],
 				dominant                = dominant
@@ -5863,6 +5941,8 @@ THE SOFTWARE.
 				modularities            = intermediate.modularities,
 				n_communities_per_gamma = intermediate.n_communities_per_gamma,
 				dominant                = dominant,
+				dominance_lower         = dominance_lower,
+				dominance_upper         = dominance_upper,
 				best_index              = best_ix
 			)
 	end
@@ -5907,7 +5987,7 @@ THE SOFTWARE.
 	   - `A` — total edge weight within communities (the modularity "internal" term)
 	   - `P` — expected within-community weight under the null model (the modularity "penalty" term)
 	   The modularity at any γ for this partition equals `(A - γP) / m_total`, so the partition's modularity is a linear function of γ with intercept `A` and slope `-P`.
-	2. **Dominance**: For each partition i, test whether some other partition j has a higher `A - γP` value across the entire resolution range. Partitions that survive (are optimal somewhere in the range) form the *admissible set* on the convex hull.
+	2. **Admissible set**: Partition `i` is admissible when some γ in the swept range exists at which no other partition scores higher. Each competitor `j` constrains γ to a half-line, since `A_i - γP_i ≥ A_j - γP_j` is equivalent to `(A_i - A_j) ≥ γ(P_i - P_j)`: a competitor with smaller `P` bounds γ from above, one with larger `P` from below. The intersection of those half-lines with the swept range is the partition's dominance interval, returned as `dominance_lower` and `dominance_upper`; the partition is admissible exactly when the interval is non-empty. An earlier implementation probed a single γ per competitor and rejected admissible partitions; it passed unnoticed on graphs with a clear elbow because the partitions it dropped lay far from the bend.
 	3. **Selection at the convex-hull bend**: Identify the partition at the elbow of the upper envelope. Each admissible partition contributes a line with slope `-P`; the steep slopes (large P) come from low-γ partitions with many small communities, and the shallow slopes (small P) come from high-γ partitions with fewer larger communities. The bend of the envelope is the γ at which slope transitions most rapidly from steep to shallow. Trivial single-community partitions are excluded from selection because they always lie on the convex hull at low γ but represent the absence of community structure rather than its presence.
 
 	The γ sweep is parallelized using `Threads.@threads`. Each γ task calls `leiden_community_detection` with `parallel_runs=false` to prevent nested thread oversubscription.
@@ -5936,9 +6016,10 @@ THE SOFTWARE.
 	- `modularities::Vector{Float64}`: Modularity for each γ partition (computed at each partition's own γ).
 	- `n_communities_per_gamma::Vector{Int}`: Community count for each γ partition.
 	- `dominant::Vector{Bool}`: `true` for partitions in the admissible set (on the convex hull).
+	- `dominance_lower::Vector{Float64}`, `dominance_upper::Vector{Float64}`: the interval of γ over which each admissible partition is optimal; `NaN` for inadmissible ones. A wide interval is a partition that holds against its neighbours; a sliver is an artifact of where the grid points fell.
 	- `best_index::Int`: Index into `gammas` of the selected partition.
 
-	The sweep data fields enable post-hoc visualization (see `plot_champ_sweep`) for users who want to verify the selected partition against the full sweep.
+	The sweep data fields let the selected partition be checked against the full envelope: with `m` the arc total, the envelope at γ is the maximum over admissible rows of `(A - γP) / m`, and the elbow should sit where the dominance intervals change width most sharply. A graph whose intervals are all of comparable width has no clear elbow, and `best_index` should then be treated as a reporting choice rather than a selection.
 
 	**Examples**
 
@@ -5968,7 +6049,7 @@ THE SOFTWARE.
 	2. Github implementation: https://github.com/wweir827/CHAMP
 
 	**See Also**
-	`leiden_community_detection`, `calculate_modularity`, `plot_champ_sweep`
+	`leiden_community_detection`, `calculate_modularity`
 	""" champ_community_detection
 
 #	Helper Function for modularity_vitality: getSparseA(edges) → A
