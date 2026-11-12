@@ -4330,13 +4330,21 @@ using Large_Graph_Similarity
 #   Performing Network Comparison of Balikatan and TOTO 2023
 #   Pre-fix record (defective admissible set, resolution_sweep=true): Raw Similarity (0.2625), Tail-Normalized Similarity (0.263)
 #   Post-fix values: to be recorded on the next run, together with the resolution_used each constructor writes to global_stats
-    global_stats_1, triad_census_counts_1, node_measures_1,
-    global_stats_2, triad_census_counts_2, node_measures_2,
-    pac_rim_combined_features, 
-    pac_rim_overall_distance, 
-    pac_rim_overall_similarity, 
-    pac_rim_type_contributions = network_comparator(balikatan_arcs, balikatan_nodes, pac_rim_arcs, pac_rim_nodes; 
-                                                    directed=true, weighted=true, resolution_sweep=true)
+#	Reading the Comparator's Named Tuple by Field (positional unpacking broke when the tuple grew)
+	pac_rim_comparison = network_comparator(balikatan_arcs, balikatan_nodes, pac_rim_arcs, pac_rim_nodes; 
+											directed=true, weighted=true, resolution_sweep=true)
+
+	global_stats_1 = pac_rim_comparison.global_stats_1
+	triad_census_counts_1 = pac_rim_comparison.triad_census_counts_1
+	node_measures_1 = pac_rim_comparison.node_measures_1
+	global_stats_2 = pac_rim_comparison.global_stats_2
+	triad_census_counts_2 = pac_rim_comparison.triad_census_counts_2
+	node_measures_2 = pac_rim_comparison.node_measures_2
+	pac_rim_combined_features = pac_rim_comparison.combined_features
+	pac_rim_overall_distance = pac_rim_comparison.overall_distance_raw
+	pac_rim_overall_similarity = pac_rim_comparison.overall_similarity_raw
+	pac_rim_overall_similarity_asinh = pac_rim_comparison.overall_similarity_asinh
+	pac_rim_type_contributions = pac_rim_comparison.type_contributions_raw
 
 #   Constructing Directed/Weighted Feature Vector
     feature_vector_1 = directed_weighted_feature_builder(global_stats_1, triad_census_counts_1, node_measures_1)
@@ -4351,13 +4359,18 @@ using Large_Graph_Similarity
                                     DataFrame, types=Dict(1 => String))
     rename!(pac_sentry_partition, ["node", "community"])
 
-    pac_sentry_combined_features, pac_sentry_overall_distance,  
-    pac_sentry_overall_similarity, pac_sentry_type_contributions = network_comparator(balikatan_arcs, balikatan_nodes, 
-                                                                                      pac_sentry_arcs, pac_sentry_nodes; 
-                                                                                      directed=true, weighted=true, 
-                                                                                      resolution=1.0,
-                                                                                      provided_membership_1 =  balikatan_partition,
-                                                                                      provided_membership_2 =  pac_sentry_partition)
+	pac_sentry_comparison = network_comparator(balikatan_arcs, balikatan_nodes, 
+											pac_sentry_arcs, pac_sentry_nodes; 
+											directed=true, weighted=true, 
+											resolution=1.0,
+											provided_membership_1 =  balikatan_partition,
+											provided_membership_2 =  pac_sentry_partition)
+
+	pac_sentry_combined_features = pac_sentry_comparison.combined_features
+	pac_sentry_overall_distance = pac_sentry_comparison.overall_distance_raw
+	pac_sentry_overall_similarity = pac_sentry_comparison.overall_similarity_raw
+	pac_sentry_overall_similarity_asinh = pac_sentry_comparison.overall_similarity_asinh
+	pac_sentry_type_contributions = pac_sentry_comparison.type_contributions_raw
 
 ################
 #   TESTING    #

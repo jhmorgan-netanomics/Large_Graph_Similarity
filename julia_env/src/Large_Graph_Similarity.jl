@@ -1066,6 +1066,98 @@ THE SOFTWARE.
             return (summary_df, density_map)
     end
 
+#	Helper Function for network_comparator: Canonical Row Order
+	function _canonical_network_order(edges::DataFrame,
+									  nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}};
+									  keep_order::Bool = false)
+		"""
+		Args:
+			edges::DataFrame: edge list with :src and :dst, optional :weight
+			nodes::Union{Nothing,DataFrame,Vector}: optional node universe
+			keep_order::Bool: return the inputs untouched (default = false)
+		Returns:
+			Tuple: (edges, nodes) as sorted copies; the inputs are never mutated
+		Notes:
+			Edges are sorted by src, dst, then weight. Nodes are sorted by id.
+			IDs are compared as strings.
+			Row order fixes how nodes are indexed and how sums are accumulated.
+			Sorting first makes two listings of one network measure identically.
+			Use keep_order = true when another input is aligned to the node order.
+		"""
+
+		#	Early return
+			if keep_order
+				return edges, nodes
+			end
+
+		#	Sort Edges
+			sorted_edges = edges
+			if hasproperty(edges, :src) && hasproperty(edges, :dst) && nrow(edges) > 1
+				#	Order by endpoint ids
+					edge_order = Any[order(:src, by = string), order(:dst, by = string)]
+
+				#	Break ties by numeric weight
+					if hasproperty(edges, :weight) && eltype(edges.weight) <: Union{Missing,Real}
+						push!(edge_order, order(:weight))
+					end
+
+				#	Apply the order
+					sorted_edges = sort(edges, edge_order)
+			end
+
+		#	Sort Nodes
+			sorted_nodes = nodes
+			if nodes isa DataFrame
+				if hasproperty(nodes, :id)
+					sorted_nodes = sort(nodes, order(:id, by = string))
+				end
+			elseif nodes !== nothing
+				sorted_nodes = sort(nodes; by = string)
+			end
+
+		#	Assembling Result
+			return sorted_edges, sorted_nodes
+	end
+
+#	Helper Function for network_comparator: Parse Link Statistics by Name
+	function _parse_link_stats(values_str::AbstractString,
+							   stat_names::AbstractVector{<:AbstractString} = ["count", "min", "max", "mean", "std", "sum"])
+		"""
+		Args:
+			values_str::AbstractString: summary string from _summarize_link_stats, e.g.
+				"(count = 0, min = NaN, max = NaN, mean = NaN, std = NaN, sum = 0.0)"
+			stat_names::AbstractVector{<:AbstractString}: statistics to return, in order
+		Returns:
+			Vector{Float64}: one value per entry of stat_names
+		Notes:
+			Each statistic is matched by name, never by position.
+			NaN and Inf are valid values and are returned as such.
+			A statistic that is absent or unparseable is returned as NaN.
+		"""
+
+		#	Initialize Output
+			numbers = fill(NaN, length(stat_names))
+
+		#	Collect Name-Value Pairs
+			parsed = Dict{String,Float64}()
+			for m in eachmatch(r"(\w+)\s*=\s*([^,()]+)", values_str)
+				value = tryparse(Float64, strip(m.captures[2]))
+				parsed[String(m.captures[1])] = value === nothing ? NaN : value
+			end
+
+		#	Fill by Name
+			for (j, stat_name) in enumerate(stat_names)
+				if haskey(parsed, stat_name)
+					numbers[j] = parsed[stat_name]
+				else
+					@warn "Link statistic '$stat_name' not found in: $values_str"
+				end
+			end
+
+		#	Assembling Result
+			return numbers
+	end
+
 #	Helper Function for degree calculations: aggregate duplicate edges
 	function _aggregate_multi_edges(edges::DataFrame; agg_func::Function=sum)
 		"""
@@ -3627,24 +3719,26 @@ THE SOFTWARE.
 		adj::SparseMatrixCSC{<:Real,Int},
 		idx::Vector{Int};
 		alpha::Float64 = 0.85,
-		tol::Float64   = 1e-6,
+		tol::Float64   = 1e-10,
 		maxiter::Int   = 1000,
 		final_norm::Symbol = :L1,   # :L1 or :sup
 		mode::Symbol       = :in,   # :in or :out
 		personalization::Union{Nothing,AbstractVector{<:Real}} = nothing,
-		rng = Random.default_rng())
+		rng::Union{Nothing,AbstractRNG} = nothing)
 		"""
 		Args:
 			adj::SparseMatrixCSC{<:Real,Int}: full directed adjacency (weights allowed)
 			idx::Vector{Int}: component node indices (1-based) to solve on
 			alpha::Float64: damping factor in (0,1) (default = 0.85)
-			tol::Float64: sup-norm stopping tolerance (default = 1e-6)
+			tol::Float64: sup-norm stopping tolerance (default = 1e-10)
 			maxiter::Int: maximum iterations (default = 1000)
 			final_norm::Symbol: :L1 (sum 1) or :sup (max 1) cosmetic normalization
 			mode::Symbol: :in (use Aᵀ) or :out (use A) before column-normalization
 			personalization::Union{Nothing,AbstractVector{<:Real}}:
 				optional component-local teleport vector (L1-normalized internally)
-			rng: RNG for reproducible init (default = Random.default_rng())
+			rng::Union{Nothing,AbstractRNG}: nothing (default) starts the iteration
+				from the uniform vector, so the result is deterministic and does
+				not depend on node order; pass an RNG for a U(0,1) random start
 
 		Returns:
 			NamedTuple: (scores::Vector{Float64}, converged::Bool,
@@ -3696,9 +3790,13 @@ THE SOFTWARE.
 		# 	Dangling columns in M (pre-normalization)
 			dangling = vec(sum(M, dims=1) .== 0.0)
 
-			# Initialize x ~ U(0,1), sup-normalized
-			x = rand(rng, n)
-			x ./= maximum(x)
+		#	Initialize x (uniform start; random start only with an RNG)
+			if rng === nothing
+				x = ones(Float64, n)
+			else
+				x = rand(rng, n)
+				x ./= maximum(x)
+			end
 
 		# 	Applying Iterative Power Method
 			converged = false
@@ -3732,7 +3830,7 @@ THE SOFTWARE.
 #	Local ORA-Style PageRank on a Given Subgraph (indices)
 	function pagerank_local_ora(edges::DataFrame;
 		alpha::Float64 = 0.85,
-		tol::Float64   = 1e-6,
+		tol::Float64   = 1e-10,
 		maxiter::Int   = 1000,
 		final_norm::Symbol = :L1,      # :L1 or :sup
 		mode::Symbol       = :in,      # :in or :out
@@ -3740,7 +3838,7 @@ THE SOFTWARE.
 		agg_func::Union{Function,Nothing} = nothing,
 		nodes::Union{Nothing,Vector{String}} = nothing,  # optional subset by name
 		personalization::Union{Nothing,AbstractVector{<:Real}} = nothing,
-		rng = Random.default_rng())
+		rng::Union{Nothing,AbstractRNG} = nothing)
 		"""
 		Args:
 			edges::DataFrame: :src, :dst, optional :weight
@@ -3808,16 +3906,16 @@ THE SOFTWARE.
 
 	**Usage**
 	`pagerank_local_ora(edges::DataFrame;
-						alpha=0.85, tol=1e-6, maxiter=1000,
+						alpha=0.85, tol=1e-10, maxiter=1000,
 						final_norm=:L1, mode=:in,
 						weighted=true, agg_func=nothing,
 						nodes=nothing, personalization=nothing,
-						rng=Random.default_rng())`
+						rng=nothing)`
 
 	**Arguments**
 	- `edges::DataFrame`: Edge list with `:src`, `:dst`, and optional `:weight`.
 	- `alpha::Float64`: Damping in `(0,1)`. Default `0.85`.
-	- `tol::Float64`: Sup-norm convergence tolerance. Default `1e-6`.
+	- `tol::Float64`: Sup-norm convergence tolerance. Default `1e-10`.
 	- `maxiter::Int`: Maximum number of iterations. Default `1000`.
 	- `final_norm::Symbol`: Final cosmetic scaling — `:L1` (scores sum to 1) or `:sup` (max=1).
 	- `mode::Symbol`: `:in` (uses `A'` before column normalization) or `:out` (uses `A`).
@@ -3829,7 +3927,7 @@ THE SOFTWARE.
 	- `personalization::Union{Nothing,AbstractVector{<:Real}}`: Optional teleport vector for the
 	chosen node set (auto L1-normalized internally). Length must equal `length(nodes)` (or the
 	number of nodes selected by default).
-	- `rng`: RNG for reproducible starts. Default `Random.default_rng()`.
+	- `rng`: `nothing` (default) starts from the uniform vector, which is deterministic. Pass an RNG for a random U(0,1) start.
 
 	**Details**
 	- Builds the adjacency with your helpers (`_aggregate_multi_edges`, `_edgelist_to_sparse_matrix`),
@@ -3874,7 +3972,7 @@ THE SOFTWARE.
 	function pagerank_stitched(
 		edges::DataFrame;
 		alpha::Float64 = 0.85,
-		tol::Float64 = 1e-6,
+		tol::Float64 = 1e-10,
 		maxiter::Int = 1000,
 		mode::Symbol = :in, # :in or :out
 		final_norm::Symbol = :L1, # :L1 or :sup
@@ -3882,12 +3980,12 @@ THE SOFTWARE.
 		agg_func::Union{Function,Nothing} = nothing,
 		stitch_by::Symbol = :nodes, # :nodes | :edges | :personalization
 		personalization::Union{Nothing,AbstractVector{<:Real}} = nothing,
-		rng::AbstractRNG = Random.default_rng() )
+		rng::Union{Nothing,AbstractRNG} = nothing )
 		"""
 		Args:
 			edges::DataFrame: Edge list with :src, :dst, and optional :weight
 			alpha::Float64: Damping factor in (0,1) (default = 0.85)
-			tol::Float64: Sup-norm convergence tolerance (default = 1e-6)
+			tol::Float64: Sup-norm convergence tolerance (default = 1e-10)
 			maxiter::Int: Maximum number of iterations (default = 1000)
 			mode::Symbol: :in (uses Aᵀ) or :out (uses A) before column normalization
 			final_norm::Symbol: :L1 (sum to 1) or :sup (max = 1) final normalization
@@ -3901,8 +3999,8 @@ THE SOFTWARE.
 			personalization::Union{Nothing,AbstractVector{<:Real}}:
 				Global teleport vector of length N (L1-normalized internally);
 				required if stitch_by = :personalization
-			rng::AbstractRNG: Random number generator for reproducible starts
-				(default = Random.default_rng())
+			rng::Union{Nothing,AbstractRNG}: nothing (default) starts every component
+				from the uniform vector (deterministic); pass an RNG for random starts
 		Returns:
 			NamedTuple: (
 				scores::Vector{Float64},
@@ -4048,16 +4146,16 @@ THE SOFTWARE.
 
 	**Usage**
 	`pagerank_stitched(edges::DataFrame;
-	                   alpha=0.85, tol=1e-6, maxiter=1000,
+	                   alpha=0.85, tol=1e-10, maxiter=1000,
 	                   mode=:in, final_norm=:L1,
 	                   weighted=true, agg_func=nothing,
 	                   stitch_by=:nodes, personalization=nothing,
-	                   rng=Random.default_rng())`
+	                   rng=nothing)`
 
 	**Arguments**
 	- `edges::DataFrame`: Edge list with `:src`, `:dst`, and optional `:weight`.
 	- `alpha::Float64`: Damping factor in `(0,1)`. Default `0.85`.
-	- `tol::Float64`: Sup-norm convergence tolerance. Default `1e-6`.
+	- `tol::Float64`: Sup-norm convergence tolerance. Default `1e-10`.
 	- `maxiter::Int`: Maximum number of iterations. Default `1000`.
 	- `mode::Symbol`: `:in` (uses `A'` before column normalization) or `:out` (uses `A`).
 	- `final_norm::Symbol`: Final cosmetic scaling — `:L1` (scores sum to 1) or `:sup` (max=1).
@@ -4070,7 +4168,7 @@ THE SOFTWARE.
 	    (**requires** `personalization`).
 	- `personalization`: Global length-`N` teleport vector (L1-normalized internally) used only
 	  when `stitch_by = :personalization`.
-	- `rng`: RNG for reproducible starts. Default `Random.default_rng()`.
+	- `rng`: `nothing` (default) starts every component from the uniform vector, which is deterministic. Pass an RNG for random U(0,1) starts.
 
 	**Details**
 	Inside each component the solver is equivalent to `pagerank_local_ora`. The stitched
@@ -4113,34 +4211,108 @@ THE SOFTWARE.
 	`pagerank_local_ora` (component solver)
 	""" pagerank_stitched
 
-#   Hub & Authority Scores
+#	Helper Function for salsa_centrality: Root of a Node in a Union-Find Forest
+	function _find_root!(parent::Vector{Int}, node::Int)
+		"""
+		Args:
+			parent::Vector{Int}: parent of each element; a root is its own parent
+			node::Int: element to look up
+		Returns:
+			Int: root of the element's set
+		Notes:
+			Compresses the path it walks, so later lookups are short.
+		"""
+
+		#	Walk to the Root
+			root = node
+			while parent[root] != root
+				root = parent[root]
+			end
+
+		#	Compress the Path
+			while parent[node] != root
+				next_node = parent[node]
+				parent[node] = root
+				node = next_node
+			end
+
+		#	Assembling Result
+			return root
+	end
+
+#	Helper Function for salsa_centrality: Components of the Hub-Authority Graph
+	function _salsa_components(A::SparseMatrixCSC{Float64,Int})
+		"""
+		Args:
+			A::SparseMatrixCSC{Float64,Int}: adjacency matrix (rows send, columns receive)
+		Returns:
+			NamedTuple: (hub::Vector{Int}, authority::Vector{Int}), a component label per node
+				in each role; 0 for a node that does not play the role
+		Notes:
+			Every node is split into a hub copy and an authority copy.
+			A link u -> v joins the hub copy of u to the authority copy of v.
+			Two hubs share a component when a chain of common successors connects them;
+			two authorities when a chain of common predecessors does (the graphs of
+			A*A' and A'*A in Lempel & Moran, 2001).
+		"""
+
+		#	Union the Hub Copy of Each Sender With the Authority Copy of Each Receiver
+			n = size(A, 1)
+			parent = collect(1:(2 * n))
+			rows = rowvals(A)
+			for v in 1:n
+				for k in nzrange(A, v)
+					hub_root = _find_root!(parent, rows[k])
+					authority_root = _find_root!(parent, n + v)
+					if hub_root != authority_root
+						parent[max(hub_root, authority_root)] = min(hub_root, authority_root)
+					end
+				end
+			end
+
+		#	Label Each Role's Nodes by Their Root
+			out_links = vec(sum(A, dims = 2))
+			in_links = vec(sum(A, dims = 1))
+			hub_labels = [out_links[i] > 0 ? _find_root!(parent, i) : 0 for i in 1:n]
+			authority_labels = [in_links[i] > 0 ? _find_root!(parent, n + i) : 0 for i in 1:n]
+
+		#	Assembling Result
+			return (hub = hub_labels, authority = authority_labels)
+	end
+
+#	Hub & Authority Scores (SALSA)
 	function salsa_centrality(edges::DataFrame;
-	                          score::Symbol=:hub,
-	                          weighted::Bool=false,
-	                          include_self_loops::Bool=false,
-	                          tol::Float64=1e-9,
-	                          max_iter::Int=10_000,
-	                          agg_func::Function=(weighted ? sum : maximum),
-	                          init::Union{Nothing,AbstractVector{<:Real}}=nothing,
-	                          normalize::Symbol=:l1)
+							  score::Symbol=:hub,
+							  weighted::Bool=false,
+							  include_self_loops::Bool=false,
+							  tol::Float64=1e-9,
+							  max_iter::Int=10_000,
+							  agg_func::Function=(weighted ? sum : maximum),
+							  init::Union{Nothing,AbstractVector{<:Real}}=nothing,
+							  normalize::Symbol=:l1)
 		"""
 		Args:
 			edges::DataFrame: edge list with :src, :dst, optional :weight
 			score::Symbol: :hub or :authority
 			weighted::Bool: use weights if present (default = false, binary)
 			include_self_loops::Bool: retain self-loops (default = false)
-			tol::Float64: convergence tolerance on L1 norm (default = 1e-9)
-			max_iter::Int: maximum iterations (default = 10_000)
+			tol::Float64: not used; kept so existing calls still work
+			max_iter::Int: not used; kept so existing calls still work
 			agg_func::Function: aggregate parallel edges (default = sum if weighted, maximum if binary)
-			init::Union{Nothing,Vector}: initial distribution (default = uniform)
-			normalize::Symbol: :l1 or :l2 normalization per iteration (default = :l1)
+			init::Union{Nothing,Vector}: initial distribution over nodes (default = uniform)
+			normalize::Symbol: :l1 or :l2 normalization of the scores (default = :l1)
 		Returns:
 			DataFrame: columns [node, salsa_hub] or [node, salsa_authority]
 		Notes:
-			Implements SALSA centrality via sparse power method.
-			Hub chain: M_h = D_out^{-1} * A * D_in^{-1} * A^T
-			Auth chain: M_a = D_in^{-1} * A^T * D_out^{-1} * A
+			SALSA scores are the stationary distributions of two random walks
+			(Lempel & Moran, 2001): the hub chain D_out^{-1} A D_in^{-1} A' and the
+			authority chain D_in^{-1} A' D_out^{-1} A.
+			Both are known in closed form, so no iteration is run (Boldi & Vigna, 2014).
+			Within a component, a hub's score is its share of out-degree and an
+			authority's score is its share of in-degree (strength when weighted).
+			Each component carries the initial mass of its nodes.
 		"""
+
 		#	Validation
 			if !hasproperty(edges, :src) || !hasproperty(edges, :dst)
 				throw(ArgumentError("edges must have :src and :dst columns"))
@@ -4148,86 +4320,68 @@ THE SOFTWARE.
 			if !(score in (:hub, :authority))
 				throw(ArgumentError("score must be :hub or :authority"))
 			end
+			if !(normalize in (:l1, :l2))
+				throw(ArgumentError("normalize must be :l1 or :l2"))
+			end
 
-		#	Aggregate multi-edges (respecting weighted/binary mode)
+		#	Aggregate Multi-Edges (respecting weighted/binary mode)
 			clean = _aggregate_multi_edges(edges; agg_func=agg_func)
 
-		#	Build sparse adjacency (weighted iff requested and present)
+		#	Build Sparse Matrix (weighted iff requested and present)
 			use_weights = weighted && hasproperty(clean, :weight)
 			A, node_to_idx, idx_to_node = _edgelist_to_sparse_matrix(clean; weighted=use_weights)
+			A = SparseMatrixCSC{Float64,Int}(A)
 			n = size(A, 1)
 
-		#	Self-loops
+		#	Self-Loops
 			if !include_self_loops
 				for i in 1:n
-					A[i, i] = 0
+					A[i, i] = 0.0
 				end
-				dropzeros!(A)
+			end
+			dropzeros!(A)
+
+		#	Initial Distribution
+			mass = isnothing(init) ? fill(1.0 / max(n, 1), n) : Float64.(init)
+			if length(mass) != n
+				throw(ArgumentError("init vector length $(length(mass)) must equal number of nodes $n"))
 			end
 
-		#	Degrees (weighted if use_weights, else binary degrees)
-			outdeg = Vector{Float64}(undef, n)
-			indeg  = Vector{Float64}(undef, n)
+		#	Degree (or Strength) and Component of Each Node in the Scored Role
+			components = _salsa_components(A)
+			if score === :hub
+				strength = vec(sum(A, dims = 2))
+				labels = components.hub
+			else
+				strength = vec(sum(A, dims = 1))
+				labels = components.authority
+			end
+
+		#	Component Totals
+			component_strength = Dict{Int,Float64}()
+			component_mass = Dict{Int,Float64}()
 			for i in 1:n
-				outdeg[i] = sum(A[i, :])
-				indeg[i]  = sum(A[:, i])
-			end
-
-		#	Guard zeros to avoid division by zero (dangling rows/cols)
-			@inbounds for i in 1:n
-				if outdeg[i] == 0.0; outdeg[i] = 1.0; end
-				if indeg[i]  == 0.0; indeg[i]  = 1.0; end
-			end
-
-		#	Init vector
-			x = isnothing(init) ? fill(1.0 / n, n) : Float64.(init)
-			if length(x) != n
-				throw(ArgumentError("init vector length $(length(x)) must equal number of nodes $n"))
-			end
-
-		#	Normalization helper
-			normalize_vec!(v, how::Symbol) = begin
-				if how === :l1
-					s = sum(abs, v); if s > 0; v ./= s; end
-				elseif how === :l2
-					s = sqrt(sum(abs2, v)); if s > 0; v ./= s; end
+				if labels[i] != 0
+					component_strength[labels[i]] = get(component_strength, labels[i], 0.0) + strength[i]
+					component_mass[labels[i]] = get(component_mass, labels[i], 0.0) + mass[i]
 				end
-				v
-			end
-			normalize_vec!(x, normalize)
-
-		#	Work buffers
-			tmp1 = similar(x)
-			tmp2 = similar(x)
-			y    = similar(x)
-
-		#	Power iteration: y = M * x (hub/authority matvec), normalize, test convergence
-			for it in 1:max_iter
-				if score === :hub
-					#	y = D_out^{-1} * ( A * ( D_in^{-1} * ( Aᵀ * x ) ) )
-						mul!(tmp1, transpose(A), x)						# tmp1 = Aᵀ * x
-						@inbounds for i in 1:n; tmp1[i] /= indeg[i]; end	# tmp1 = D_in^{-1} * tmp1
-						mul!(tmp2, A, tmp1)								# tmp2 = A * tmp1
-						@inbounds for i in 1:n; y[i] = tmp2[i] / outdeg[i]; end
-				else
-					#	y = D_in^{-1} * ( Aᵀ * ( D_out^{-1} * ( A * x ) ) )
-						mul!(tmp1, A, x)								# tmp1 = A * x
-						@inbounds for i in 1:n; tmp1[i] /= outdeg[i]; end	# tmp1 = D_out^{-1} * tmp1
-						mul!(tmp2, transpose(A), tmp1)					# tmp2 = Aᵀ * tmp1
-						@inbounds for i in 1:n; y[i] = tmp2[i] / indeg[i]; end
-				end
-
-				normalize_vec!(y, normalize)
-
-				#	convergence (L1)
-				if sum(abs, y .- x) < tol
-					x .= y
-					break
-				end
-				x .= y
 			end
 
-		#	Result as DataFrame
+		#	Stationary Distribution: share of the component's degree, times the component's mass
+			x = zeros(Float64, n)
+			for i in 1:n
+				if labels[i] != 0
+					x[i] = strength[i] / component_strength[labels[i]] * component_mass[labels[i]]
+				end
+			end
+
+		#	Normalization
+			total = normalize === :l1 ? sum(abs, x) : sqrt(sum(abs2, x))
+			if total > 0
+				x ./= total
+			end
+
+		#	Assembling Result
 			if score === :hub
 				return DataFrame(node = idx_to_node, salsa_hub = x)
 			else
@@ -4235,39 +4389,57 @@ THE SOFTWARE.
 			end
 	end
 	@doc raw"""
-	**Description**  
-	SALSA centrality for directed networks using a scalable power method (no dense eigensolve).  
-	Computes either **hub** or **authority** scores following Lempel & Moran (2001).
+	**Description**
+	SALSA hub or authority centrality for directed networks (Lempel & Moran, 2001). A node is a good hub when it points to nodes that many hubs point to, and a good authority when it is pointed to by nodes that point to many authorities. The scores are the stationary distributions of two random walks on the network.
 
-	- **Hub chain:** \(M_h = L_r L_c^\top\), with \(L_r = D_{\text{out}}^{-1}A\), \(L_c = A D_{\text{in}}^{-1}\).  
-	Implemented as \(y = D_{\text{out}}^{-1}\,A\,D_{\text{in}}^{-1}\,A^\top x\).
-
-	- **Authority chain:** \(M_a = L_c^\top L_r\).  
-	Implemented as \(y = D_{\text{in}}^{-1}\,A^\top D_{\text{out}}^{-1}\,A\,x\).
-
-	**Usage**  
+	**Usage**
 	`salsa_centrality(edges; score=:hub, weighted=false, include_self_loops=false, tol=1e-9, max_iter=10_000, agg_func=..., init=nothing, normalize=:l1)`
 
-	**Arguments**  
-	- `edges::DataFrame`: `:src`, `:dst`, optional `:weight`.  
-	- `score::Symbol`: `:hub` (default) or `:authority`.  
-	- `weighted::Bool`: use weights if present; else binary.  
-	- `include_self_loops::Bool`: keep i→i (default `false`).  
-	- `tol`, `max_iter`: convergence controls.  
-	- `agg_func::Function`: aggregate parallel edges (`sum` for weighted; `maximum` for binary).  
-	- `init::Vector`: optional initial vector; defaults to uniform.  
-	- `normalize::Symbol`: `:l1` or `:l2` normalization per iteration.
+	**Arguments**
+	- `edges::DataFrame`: `:src`, `:dst`, optional `:weight`.
+	- `score::Symbol`: `:hub` (default) or `:authority`.
+	- `weighted::Bool`: Use weights if present; else binary (default `false`).
+	- `include_self_loops::Bool`: Keep links from a node to itself (default `false`).
+	- `tol`, `max_iter`: Not used. They are accepted so that existing calls still work.
+	- `agg_func::Function`: Aggregate parallel edges (`sum` for weighted; `maximum` for binary).
+	- `init::Vector`: Optional initial distribution over nodes; defaults to uniform.
+	- `normalize::Symbol`: `:l1` (default) or `:l2` normalization of the scores.
 
-	**Details**  
-	- Time per iteration \(O(m)\): two sparse multiplies and diagonal scaling.  
-	- Zero in/out-degree rows/cols are guarded by setting the corresponding degree to 1 to avoid division by zero.  
-	- Returns a probability-like vector if `normalize=:l1`.
+	**Details**
+	SALSA alternates between hubs and authorities like HITS, but normalizes each step, which turns the two updates into random walks:
+	- **Hub chain:** from a hub, step forward to one of its successors, then back to one of that node's predecessors. Its transition matrix is `D_out⁻¹ A D_in⁻¹ Aᵀ`.
+	- **Authority chain:** from an authority, step back to one of its predecessors, then forward to one of that node's successors. Its transition matrix is `D_in⁻¹ Aᵀ D_out⁻¹ A`.
 
-	**Value**  
+	The score of a node is its probability in the stationary distribution of its chain. Lempel and Moran show that this distribution has a closed form, so no iteration is needed (see also Boldi & Vigna, 2014):
+	1. Find the components of the chain. Two authorities are in one component when a chain of common predecessors connects them; two hubs when a chain of common successors does.
+	2. Within a component, an authority's score is its in-degree divided by the component's total in-degree. A hub's score is its out-degree divided by the component's total out-degree. With `weighted = true`, strengths take the place of degrees.
+	3. Each component's scores are multiplied by the share of the initial distribution that lies on its nodes. With the default uniform start, that is the component's size divided by `n`.
+
+	A node with no out-links has hub score 0, and a node with no in-links has authority score 0. With `normalize = :l1` the scores sum to 1.
+
+	Because of step 2, SALSA scores are closely related to degree. They differ from a plain degree share only through the components: a node's degree is compared with its own component, and components are weighted by their number of nodes, not by their links.
+
+	**Value**
 	`DataFrame` with columns `node` and `salsa_hub` (or `salsa_authority`).
 
-	**References**  
-	- Lempel, R., & Moran, S. (2001). *SALSA: The Stochastic Approach for Link-Structure Analysis.* ACM TOIS 19(2), 131–160.
+	**Examples**
+	```julia
+	#	a points to x, y, z; b points to x
+		edges = DataFrame(src = ["a", "a", "a", "b"], dst = ["x", "y", "z", "x"])
+
+	#	Hubs a and b share the successor x: scores 0.75 and 0.25
+		salsa_centrality(edges; score = :hub)
+
+	#	Authorities x, y, z share the predecessor a: scores 0.5, 0.25, 0.25
+		salsa_centrality(edges; score = :authority)
+	```
+
+	**See Also**
+	`pagerank_stitched`
+
+	**References**
+	Boldi, P., & Vigna, S. (2014). Axioms for centrality. *Internet Mathematics, 10*(3-4), 222-262.
+	Lempel, R., & Moran, S. (2001). SALSA: The stochastic approach for link-structure analysis. *ACM Transactions on Information Systems, 19*(2), 131-160.
 	""" salsa_centrality
 
 #	Modularity Helper Function: LogSumExp for numerical stability (Leiden)
@@ -5240,6 +5412,10 @@ THE SOFTWARE.
 			3) weighted & undirected: error if binary, symmetrize via 0.5*(A+A')
 			4) weighted & directed: error if binary, no symmetrization
 
+			Nodes are indexed by sorted id before the runs, and the membership is
+			mapped back to the caller's order afterwards, so the partition does not
+			depend on the order in which nodes or edges are listed.
+
 			Multi-start runs are parallelized via Threads.@threads when
 			parallel_runs=true. Each run gets its own Xoshiro RNG seeded with
 			seed + run - 1 (or run - 1 if seed is nothing), so reproducibility is
@@ -5306,6 +5482,14 @@ THE SOFTWARE.
 				println("DEBUG leiden: parallel_runs = ", parallel_runs)
 			end
 
+		#	Canonical Node Order (index nodes by sorted id)
+			node_ids   = idx_to_node isa DataFrame ? string.(idx_to_node.id) : string.(idx_to_node)
+			canon_perm = sortperm(node_ids)
+			reordered  = !issorted(canon_perm)
+			if reordered
+				A_eff = A_eff[canon_perm, canon_perm]
+			end
+
 		#	Pre-Allocate Per-Run Result Storage
 			results = Vector{NamedTuple{(:membership, :modularity, :n_communities),
 			                            Tuple{Vector{Int}, Float64, Int}}}(undef, n_runs)
@@ -5364,6 +5548,13 @@ THE SOFTWARE.
 					best_Q = results[run].modularity
 					best_m = results[run].membership
 				end
+			end
+
+		#	Restore Input Node Order
+			if reordered
+				restored = similar(best_m)
+				restored[canon_perm] = best_m
+				best_m = restored
 			end
 
 		#	Handle Isolates if Node Universe Provided
@@ -5429,6 +5620,8 @@ THE SOFTWARE.
 	Optimizes modularity based on graph type:
 	- **Undirected**: `Q = (1/2m) Σ[A_ij - γ(k_i · k_j)/(2m)] δ(c_i, c_j)`
 	- **Directed**: `Q = (1/m) Σ[A_ij - γ(k_i^out · k_j^in)/m] δ(c_i, c_j)`
+
+	Nodes are indexed by sorted id before the runs, and the membership is returned in the caller's node order. The partition therefore does not depend on the order in which nodes or edges are listed. It does still depend on the ids themselves: the same network under two id schemes can receive different partitions.
 
 	**Threading**
 	Multi-start runs are parallelized using `Threads.@threads`. To control the number of threads, launch Julia with `julia --threads N` (or `--threads auto`) or set the `JULIA_NUM_THREADS` environment variable. Each run receives its own `Xoshiro` RNG, so reproducibility is preserved across different thread counts as long as the same `seed` is used.
@@ -12715,6 +12908,9 @@ THE SOFTWARE.
 
         #	========== NETWORK TRANSFORMATION ==========
 
+		#	Canonical Row Order (kept as given for a membership vector)
+			edges, nodes = _canonical_network_order(edges, nodes; keep_order = provided_membership isa Vector)
+
         #	Create working copy and prepare weights
             clean_edges = deepcopy(edges) 
 
@@ -13138,21 +13334,8 @@ THE SOFTWARE.
                     vstr = global_stats.value[row_idx]
                     obsid = global_stats.Obs_ID[row_idx]
                     
-                    #	Use regex to extract numeric values robustly
-                        numbers = Float64[]
-                        for m in eachmatch(r"=\s*([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)", vstr)
-                            push!(numbers, parse(Float64, m.captures[1]))
-                        end
-                        
-                    #	Take first 6 values (excluding density which appears at end)
-                        numbers = numbers[1:min(6, length(numbers))]
-                        
-                    #	Ensure we have 6 values
-                        if length(numbers) < 6
-                            @warn "Expected 6 values for $mkey, got $(length(numbers))"
-                            resize!(numbers, 6)
-                            numbers[length(numbers)+1:6] .= NaN
-                        end
+					#	Parse Statistics by Name
+						numbers = _parse_link_stats(vstr, stat_names)
                         
                     #	Store in pre-allocated array
                         for (j, stat_name) in enumerate(stat_names)
@@ -13351,6 +13534,9 @@ THE SOFTWARE.
         """
 
         #	========== NETWORK TRANSFORMATION ==========
+
+		#	Canonical Row Order (kept as given for a membership vector)
+			edges, nodes = _canonical_network_order(edges, nodes; keep_order = provided_membership isa Vector)
 
         #	Create working copy and prepare weights
             clean_edges = deepcopy(edges) 
@@ -13764,21 +13950,8 @@ THE SOFTWARE.
                     vstr = global_stats.value[row_idx]
                     obsid = global_stats.Obs_ID[row_idx]
                     
-                #	Use regex to extract numeric values robustly
-                    numbers = Float64[]
-                    for m in eachmatch(r"=\s*([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)", vstr)
-                        push!(numbers, parse(Float64, m.captures[1]))
-                    end
-                    
-                #	Take first 6 values (excluding density)
-                    numbers = numbers[1:min(6, length(numbers))]
-                    
-                #	Ensure we have 6 values
-                    if length(numbers) < 6
-                        @warn "Expected 6 values for $mkey, got $(length(numbers))"
-                        resize!(numbers, 6)
-                        numbers[length(numbers)+1:6] .= NaN
-                    end
+				#	Parse Statistics by Name
+					numbers = _parse_link_stats(vstr, stat_names)
                     
                 #	Store in pre-allocated array
                     for (j, stat_name) in enumerate(stat_names)
@@ -14002,6 +14175,9 @@ THE SOFTWARE.
         """
 
         #	========== NETWORK TRANSFORMATION ==========
+
+		#	Canonical Row Order (kept as given for a membership vector)
+			edges, nodes = _canonical_network_order(edges, nodes; keep_order = provided_membership isa Vector)
 
         #	Create working copy and prepare for binarization
             clean_edges = deepcopy(edges) 
@@ -14420,21 +14596,8 @@ THE SOFTWARE.
                     vstr = global_stats.value[row_idx]
                     obsid = global_stats.Obs_ID[row_idx]
                     
-                #	Use regex to extract numeric values robustly
-                    numbers = Float64[]
-                    for m in eachmatch(r"=\s*([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)", vstr)
-                        push!(numbers, parse(Float64, m.captures[1]))
-                    end
-                    
-                #	Take first 6 values (excluding density)
-                    numbers = numbers[1:min(6, length(numbers))]
-                    
-                #	Ensure we have 6 values
-                    if length(numbers) < 6
-                        @warn "Expected 6 values for $mkey, got $(length(numbers))"
-                        resize!(numbers, 6)
-                        numbers[length(numbers)+1:6] .= NaN
-                    end
+				#	Parse Statistics by Name
+					numbers = _parse_link_stats(vstr, stat_names)
                     
                 #	Store in pre-allocated array
                     for (j, stat_name) in enumerate(stat_names)
@@ -14679,6 +14842,9 @@ THE SOFTWARE.
         """
 
         #	========== NETWORK TRANSFORMATION ==========
+
+		#	Canonical Row Order (kept as given for a membership vector)
+			edges, nodes = _canonical_network_order(edges, nodes; keep_order = provided_membership isa Vector)
 
         #	Create working copy
             clean_edges = deepcopy(edges) 
@@ -15140,21 +15306,8 @@ THE SOFTWARE.
                     vstr = global_stats.value[row_idx]
                     obsid = global_stats.Obs_ID[row_idx]
                     
-                #	Use regex to extract numeric values robustly
-                    numbers = Float64[]
-                    for m in eachmatch(r"=\s*([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)", vstr)
-                        push!(numbers, parse(Float64, m.captures[1]))
-                    end
-                    
-                #	Take first 6 values (excluding density)
-                    numbers = numbers[1:min(6, length(numbers))]
-                    
-                #	Ensure we have 6 values
-                    if length(numbers) < 6
-                        @warn "Expected 6 values for $mkey, got $(length(numbers))"
-                        resize!(numbers, 6)
-                        numbers[length(numbers)+1:6] .= NaN
-                    end
+				#	Parse Statistics by Name
+					numbers = _parse_link_stats(vstr, stat_names)
                     
                 #	Store in pre-allocated array
                     for (j, stat_name) in enumerate(stat_names)
@@ -15426,6 +15579,1052 @@ THE SOFTWARE.
             return feature_vector
     end
 
+##########################################
+#   TWO-MODE (BIPARTITE) NETWORK TOOLS   #
+##########################################
+
+#	Shared Two-Mode Messages
+	const MIXED_MODE_MESSAGE = "A two-mode network cannot be compared with a one-mode network: the two are described by different measures. " *
+							   "Project the two-mode network onto one of its modes with project_bipartite(edges, nodes; onto = ...) " *
+							   "(CLI: --project-onto <mode>), then compare the projection as an undirected one-mode network."
+
+#	Helper Function for bipartite_constructor: Resolve Node Modes and Orientation
+	function _resolve_bipartite_modes(edges::DataFrame,
+									  nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}};
+									  mode_column::Union{Symbol,AbstractString} = :mode,
+									  source_mode::Union{Nothing,AbstractString} = nothing)
+		"""
+		Args:
+			edges::DataFrame: edge list with :src and :dst
+			nodes::Union{Nothing,DataFrame,Vector}: optional node universe
+			mode_column::Union{Symbol,AbstractString}: column of nodes naming each node's mode (default = :mode)
+			source_mode::Union{Nothing,AbstractString}: mode to treat as the source (default = the mode sending most links)
+		Returns:
+			NamedTuple: (mode_of::Dict{String,String}, label_of::Dict{String,String},
+						 source_mode::String, target_mode::String, declared::Bool, one_way::Bool)
+		Notes:
+			Modes are read from mode_column when nodes carries it.
+			Otherwise senders form the "source" mode and receivers the "target" mode.
+			Inference fails when an id both sends and receives, or when a node has no links.
+			one_way is true when every link runs from one mode to the other.
+			Throws ArgumentError unless there are exactly two modes and no within-mode links.
+		"""
+
+		#	Validation
+			if !(hasproperty(edges, :src) && hasproperty(edges, :dst))
+				throw(ArgumentError("edges must contain :src and :dst columns"))
+			end
+			src_ids = string.(edges.src)
+			dst_ids = string.(edges.dst)
+			mode_symbol = Symbol(mode_column)
+
+		#	Read Node Labels
+			label_of = Dict{String,String}()
+			if nodes isa DataFrame && hasproperty(nodes, :id) && hasproperty(nodes, :label)
+				for (id, label) in zip(string.(nodes.id), string.(nodes.label))
+					label_of[id] = label
+				end
+			end
+
+		#	Assign Modes
+			mode_of = Dict{String,String}()
+			declared = nodes isa DataFrame && hasproperty(nodes, mode_symbol)
+			if declared
+				#	Read declared modes
+					if !hasproperty(nodes, :id)
+						throw(ArgumentError("nodes must contain an :id column"))
+					end
+					for (id, mode) in zip(string.(nodes.id), string.(nodes[!, mode_symbol]))
+						if haskey(mode_of, id) && mode_of[id] != mode
+							throw(ArgumentError("Node id '$id' is listed in two modes ('$(mode_of[id])' and '$mode'). Ids must be unique across the two modes."))
+						end
+						mode_of[id] = mode
+					end
+			else
+				#	Infer modes from link direction
+					shared = intersect(Set(src_ids), Set(dst_ids))
+					if !isempty(shared)
+						examples = join(Iterators.take(sort(collect(shared)), 3), ", ")
+						throw(ArgumentError("The two modes cannot be inferred from the links: $(length(shared)) ids both send and receive links (e.g., $examples). " *
+											"Either this is a one-mode network, or it has links in both directions and needs a node table with a '$mode_column' column."))
+					end
+					for id in src_ids
+						mode_of[id] = "source"
+					end
+					for id in dst_ids
+						mode_of[id] = "target"
+					end
+
+				#	Reject nodes whose mode is unknown
+					universe = nodes === nothing ? String[] : (nodes isa DataFrame ? string.(nodes.id) : string.(nodes))
+					unassigned = count(id -> !haskey(mode_of, id), universe)
+					if unassigned > 0
+						throw(ArgumentError("$unassigned nodes have no links, so their mode cannot be inferred. Supply a node table with a '$mode_column' column."))
+					end
+			end
+
+		#	Check Link Endpoints
+			unknown = count(id -> !haskey(mode_of, id), src_ids) + count(id -> !haskey(mode_of, id), dst_ids)
+			if unknown > 0
+				throw(ArgumentError("$unknown link endpoints are missing from the node table."))
+			end
+
+		#	Check Mode Count
+			mode_names = sort(unique(collect(values(mode_of))))
+			if length(mode_names) != 2
+				throw(ArgumentError("A two-mode network needs exactly two modes; found $(length(mode_names))" *
+									(isempty(mode_names) ? "." : " ($(join(mode_names, ", "))).") * " " * MIXED_MODE_MESSAGE))
+			end
+
+		#	Count Links by Direction
+			first_to_second = 0
+			second_to_first = 0
+			within_mode = 0
+			for (s, d) in zip(src_ids, dst_ids)
+				if mode_of[s] == mode_of[d]
+					within_mode += 1
+				elseif mode_of[s] == mode_names[1]
+					first_to_second += 1
+				else
+					second_to_first += 1
+				end
+			end
+			if within_mode > 0
+				throw(ArgumentError("$within_mode links join two nodes of the same mode, so this is not a two-mode network. " * MIXED_MODE_MESSAGE))
+			end
+
+		#	Orientation
+			if source_mode === nothing
+				#	The mode that sends most links is the source
+					chosen_source = first_to_second >= second_to_first ? mode_names[1] : mode_names[2]
+			else
+				#	Use the caller's choice
+					matches = findfirst(m -> lowercase(m) == lowercase(source_mode), mode_names)
+					if matches === nothing
+						throw(ArgumentError("source_mode '$source_mode' is not one of the modes ($(join(mode_names, ", ")))."))
+					end
+					chosen_source = mode_names[matches]
+			end
+			chosen_target = chosen_source == mode_names[1] ? mode_names[2] : mode_names[1]
+
+		#	Assembling Result
+			return (mode_of = mode_of, label_of = label_of, source_mode = chosen_source,
+					target_mode = chosen_target, declared = declared,
+					one_way = min(first_to_second, second_to_first) == 0)
+	end
+
+#	Helper Function for bipartite_constructor: Binary Pattern of a Sparse Matrix
+	function _binary_pattern(matrix::SparseMatrixCSC{Float64,Int})
+		"""
+		Args:
+			matrix::SparseMatrixCSC{Float64,Int}: weighted matrix
+		Returns:
+			SparseMatrixCSC{Float64,Int}: same pattern with every stored value set to 1.0
+		Notes:
+			Explicit zeros are dropped first.
+		"""
+
+		#	Copy and Binarize
+			pattern = dropzeros(matrix)
+			fill!(nonzeros(pattern), 1.0)
+
+		#	Assembling Result
+			return pattern
+	end
+
+#	Helper Function for bipartite_constructor: Out-In Degree Correlation Across Links
+	function _bipartite_degree_assortativity(forward::SparseMatrixCSC{Float64,Int},
+											 backward::SparseMatrixCSC{Float64,Int})
+		"""
+		Args:
+			forward::SparseMatrixCSC{Float64,Int}: source-by-target link weights
+			backward::SparseMatrixCSC{Float64,Int}: target-by-source link weights
+		Returns:
+			Float64: correlation between the sender's out-degree and the receiver's in-degree
+		Notes:
+			Degrees are link counts. Each link is weighted by its link weight.
+			Returns NaN when either degree sequence has zero variance or there are no links.
+		"""
+
+		#	Degrees by Role
+			source_out = vec(sum(_binary_pattern(forward), dims = 2))
+			target_in = vec(sum(_binary_pattern(forward), dims = 1))
+			target_out = vec(sum(_binary_pattern(backward), dims = 2))
+			source_in = vec(sum(_binary_pattern(backward), dims = 1))
+
+		#	Accumulate Weighted Moments
+			sum_w = 0.0
+			sum_x = 0.0
+			sum_y = 0.0
+			sum_xx = 0.0
+			sum_yy = 0.0
+			sum_xy = 0.0
+			for (links, out_degree, in_degree) in ((forward, source_out, target_in), (backward, target_out, source_in))
+				rows = rowvals(links)
+				weights = nonzeros(links)
+				for head in 1:size(links, 2)
+					for k in nzrange(links, head)
+						#	Isolating Link
+							w = abs(weights[k])
+							x = out_degree[rows[k]]
+							y = in_degree[head]
+
+						#	Updating Moments
+							sum_w += w
+							sum_x += w * x
+							sum_y += w * y
+							sum_xx += w * x * x
+							sum_yy += w * y * y
+							sum_xy += w * x * y
+					end
+				end
+			end
+
+		#	Early return
+			if sum_w == 0.0
+				return NaN
+			end
+
+		#	Correlation
+			mean_x = sum_x / sum_w
+			mean_y = sum_y / sum_w
+			var_x = sum_xx / sum_w - mean_x^2
+			var_y = sum_yy / sum_w - mean_y^2
+			if var_x <= 1e-12 || var_y <= 1e-12
+				return NaN
+			end
+
+		#	Assembling Result
+			return (sum_xy / sum_w - mean_x * mean_y) / sqrt(var_x * var_y)
+	end
+
+#	Helper Function for bipartite_constructor: Two-Step Statistics for One Mode
+	function _two_step_pass(own::SparseMatrixCSC{Float64,Int}, other::SparseMatrixCSC{Float64,Int})
+		"""
+		Args:
+			own::SparseMatrixCSC{Float64,Int}: one column per focal node, listing its neighbours
+			other::SparseMatrixCSC{Float64,Int}: one column per neighbour, listing focal-mode nodes
+		Returns:
+			NamedTuple: (reach::Vector{Int}, clustering::Vector{Float64}, four_cycles::Int)
+		Notes:
+			reach is the number of same-mode nodes two steps away.
+			clustering is Latapy's pairwise coefficient: the mean Jaccard overlap with those nodes.
+			four_cycles counts each four-cycle once.
+			Cost is the sum of squared degrees of the other mode.
+		"""
+
+		#	Initialize Work Vectors
+			n = size(own, 2)
+			own_rows = rowvals(own)
+			other_rows = rowvals(other)
+			shared = zeros(Int, n)
+			touched = Int[]
+			reach = zeros(Int, n)
+			clustering = zeros(Float64, n)
+			cycle_pairs = 0
+
+		#	Iterating Over Focal Nodes
+			for u in 1:n
+				#	Count shared neighbours with every node two steps away
+					empty!(touched)
+					for a in nzrange(own, u)
+						for b in nzrange(other, own_rows[a])
+							v = other_rows[b]
+							if v != u
+								shared[v] == 0 && push!(touched, v)
+								shared[v] += 1
+							end
+						end
+					end
+
+				#	Summarize overlaps and reset counts
+					degree_u = length(nzrange(own, u))
+					overlap_sum = 0.0
+					for v in touched
+						c = shared[v]
+						overlap_sum += c / (degree_u + length(nzrange(own, v)) - c)
+						cycle_pairs += (c * (c - 1)) ÷ 2
+						shared[v] = 0
+					end
+
+				#	Store node results
+					reach[u] = length(touched)
+					clustering[u] = isempty(touched) ? 0.0 : overlap_sum / length(touched)
+			end
+
+		#	Assembling Result
+			return (reach = reach, clustering = clustering, four_cycles = cycle_pairs ÷ 2)
+	end
+
+#	Helper Function for bipartite_constructor: PageRank on the Undirected Two-Mode Form
+	function _bipartite_pagerank(weights::SparseMatrixCSC{Float64,Int};
+								 alpha::Float64 = 0.85,
+								 tol::Float64 = 1e-12,
+								 maxiter::Int = 1000)
+		"""
+		Args:
+			weights::SparseMatrixCSC{Float64,Int}: source-by-target weights of the undirected form
+			alpha::Float64: damping factor in (0,1) (default = 0.85)
+			tol::Float64: L1 stopping tolerance (default = 1e-12)
+			maxiter::Int: maximum iterations (default = 1000)
+		Returns:
+			NamedTuple: (source::Vector{Float64}, target::Vector{Float64}, converged::Bool, iterations::Int)
+		Notes:
+			Standard PageRank with uniform teleport; scores sum to 1 over all nodes.
+			Mass on nodes without links is spread uniformly.
+			The start is uniform, so the result is deterministic.
+			The sup-norm iteration of pagerank_local_ora_matrix does not settle on a two-mode
+			network, which is periodic; this L1 iteration converges at rate alpha.
+		"""
+
+		#	Validation
+			@assert 0.0 < alpha < 1.0 "alpha must be in (0,1)"
+			n_source, n_target = size(weights)
+			n = n_source + n_target
+			if n == 0
+				return (source = Float64[], target = Float64[], converged = true, iterations = 0)
+			end
+
+		#	Strengths
+			by_target = sparse(transpose(weights))
+			source_strength = vec(sum(weights, dims = 2))
+			target_strength = vec(sum(weights, dims = 1))
+			source_linked = source_strength .> 0.0
+			target_linked = target_strength .> 0.0
+
+		#	PageRank Iteration
+			source_scores = fill(1.0 / n, n_source)
+			target_scores = fill(1.0 / n, n_target)
+			converged = false
+			iterations = maxiter
+			for it in 1:maxiter
+				#	Mass sent along links
+					source_out = ifelse.(source_linked, source_scores ./ max.(source_strength, eps(Float64)), 0.0)
+					target_out = ifelse.(target_linked, target_scores ./ max.(target_strength, eps(Float64)), 0.0)
+
+				#	Mass held by nodes without links
+					dangling = sum(source_scores[.!source_linked]; init = 0.0) + sum(target_scores[.!target_linked]; init = 0.0)
+					base = (alpha * dangling + (1.0 - alpha)) / n
+
+				#	Update scores
+					new_source = alpha .* (weights * target_out) .+ base
+					new_target = alpha .* (by_target * source_out) .+ base
+					change = sum(abs, new_source .- source_scores) + sum(abs, new_target .- target_scores)
+					source_scores = new_source
+					target_scores = new_target
+
+				#	Stop when settled
+					if change < tol
+						converged = true
+						iterations = it
+						break
+					end
+			end
+
+		#	Assembling Result
+			return (source = source_scores, target = target_scores, converged = converged, iterations = iterations)
+	end
+
+#	Helper Function for bipartite_constructor: Assign Values to One Role
+	function _role_column(values::AbstractVector{<:Real}, role::Symbol, n_source::Int, n_target::Int)
+		"""
+		Args:
+			values::AbstractVector{<:Real}: one value per node of the role
+			role::Symbol: :source or :target
+			n_source::Int: number of source-mode nodes
+			n_target::Int: number of target-mode nodes
+		Returns:
+			Vector{Union{Missing,Float64}}: values for the role's nodes, missing for the other mode
+		Notes:
+			Node tables list source-mode nodes first, then target-mode nodes.
+		"""
+
+		#	Validation
+			@assert role in (:source, :target) "role must be :source or :target"
+
+		#	Fill the Role's Rows
+			column = Vector{Union{Missing,Float64}}(missing, n_source + n_target)
+			offset = role == :source ? 0 : n_source
+			for (i, value) in enumerate(values)
+				column[offset + i] = Float64(value)
+			end
+
+		#	Assembling Result
+			return column
+	end
+
+#	Helper Function for bipartite_constructor: Look Up Scores by Node Id
+	function _scores_by_id(ids::Vector{String}, score_ids::AbstractVector, scores::AbstractVector{<:Real})
+		"""
+		Args:
+			ids::Vector{String}: node ids wanted, in order
+			score_ids::AbstractVector: node ids the scores refer to
+			scores::AbstractVector{<:Real}: one score per entry of score_ids
+		Returns:
+			Vector{Float64}: score of each id, 0.0 when the id has no score
+		Notes:
+			Nodes without links are absent from link-based measures and score 0.
+		"""
+
+		#	Build Lookup
+			lookup = Dict{String,Float64}()
+			for (id, score) in zip(score_ids, scores)
+				lookup[string(id)] = Float64(score)
+			end
+
+		#	Assembling Result
+			return [get(lookup, id, 0.0) for id in ids]
+	end
+
+#	Two-Mode Constructor: Network and Node Statistics for a Two-Mode Network
+	function bipartite_constructor(edges::DataFrame,
+								   nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}};
+								   weighted::Bool = true,
+								   mode_column::Union{Symbol,AbstractString} = :mode,
+								   source_mode::Union{Nothing,AbstractString} = nothing)
+		"""
+		Args:
+			edges::DataFrame: edge list with :src, :dst, optional :weight
+			nodes::Union{Nothing,DataFrame,Vector}: node universe; a DataFrame may carry the mode column
+			weighted::Bool: use link weights (default = true)
+			mode_column::Union{Symbol,AbstractString}: column of nodes naming each node's mode (default = :mode)
+			source_mode::Union{Nothing,AbstractString}: mode treated as the source (default = the mode sending most links)
+		Returns:
+			Tuple of three elements:
+				1. global_measures: DataFrame of network-level statistics
+				2. triads_summary: empty DataFrame (a two-mode network has no triads)
+				3. node_stats: DataFrame of node-level measures, one column per role and measure
+		Notes:
+			Link direction is kept. The source mode sends, the target mode receives.
+			Links may also run from target to source; those are the backward links.
+			Community measures are omitted: standard modularity has the wrong null model here.
+			Used by network_comparator when bipartite = true.
+		"""
+
+		#	========== NETWORK TRANSFORMATION ==========
+
+		#	Canonical Row Order
+			edges, nodes = _canonical_network_order(edges, nodes)
+
+		#	Resolve Modes and Orientation
+			modes = _resolve_bipartite_modes(edges, nodes; mode_column = mode_column, source_mode = source_mode)
+			source_ids = sort([id for (id, mode) in modes.mode_of if mode == modes.source_mode])
+			target_ids = sort([id for (id, mode) in modes.mode_of if mode == modes.target_mode])
+			n_source = length(source_ids)
+			n_target = length(target_ids)
+			n_nodes = n_source + n_target
+			source_index = Dict(id => i for (i, id) in enumerate(source_ids))
+			target_index = Dict(id => i for (i, id) in enumerate(target_ids))
+
+		#	Standardize and Aggregate Links
+			clean_edges = DataFrame(src = string.(edges.src), dst = string.(edges.dst))
+			if weighted && hasproperty(edges, :weight)
+				clean_edges.weight = Float64.(edges.weight)
+			else
+				clean_edges.weight = ones(Float64, nrow(clean_edges))
+			end
+			clean_edges = _aggregate_multi_edges(clean_edges; agg_func = weighted ? sum : maximum)
+
+		#	Build Link Matrices
+			forward_rows = Int[]
+			forward_cols = Int[]
+			forward_weights = Float64[]
+			backward_rows = Int[]
+			backward_cols = Int[]
+			backward_weights = Float64[]
+			for (s, d, w) in zip(clean_edges.src, clean_edges.dst, clean_edges.weight)
+				if haskey(source_index, s)
+					#	Source to target
+						push!(forward_rows, source_index[s])
+						push!(forward_cols, target_index[d])
+						push!(forward_weights, w)
+				else
+					#	Target to source
+						push!(backward_rows, target_index[s])
+						push!(backward_cols, source_index[d])
+						push!(backward_weights, w)
+				end
+			end
+			forward = dropzeros(sparse(forward_rows, forward_cols, forward_weights, n_source, n_target))
+			backward = dropzeros(sparse(backward_rows, backward_cols, backward_weights, n_target, n_source))
+
+		#	Undirected Forms (source by target)
+			combined = forward + sparse(transpose(backward))
+			skeleton = _binary_pattern(combined)
+			skeleton_by_source = sparse(transpose(skeleton))
+
+		#	Node Table
+			node_ids = vcat(source_ids, target_ids)
+			node_table = DataFrame(id = node_ids, label = [get(modes.label_of, id, id) for id in node_ids])
+
+		#	========== GLOBAL NETWORK MEASURES ==========
+
+		#	Component Statistics (weak components of the undirected form)
+			component_stats = component_statistics(clean_edges; nodes = node_table, graph_type = :undirected)
+			component_keys = [:num_wcc, :largest_wcc, :second_largest_wcc, :min_wcc_size,
+							  :num_isolates, :num_dyads, :num_triads, :num_groups]
+
+		#	Link Statistics
+			link_stats = link_statistics(clean_edges; nodes = node_table, graph_type = :directed, weighted = weighted)
+			link_stats_df = _summarize_link_stats(link_stats)[1]
+			all_links_values = link_stats_df.values[findfirst(==("all_links"), link_stats_df.link_group)]
+
+		#	Density and Reciprocity
+			n_forward = nnz(forward)
+			n_backward = nnz(backward)
+			n_pairs = nnz(skeleton)
+			possible_pairs = n_source * n_target
+			forward_density = possible_pairs > 0 ? n_forward / possible_pairs : NaN
+			backward_density = possible_pairs > 0 ? n_backward / possible_pairs : NaN
+			reciprocity_value = n_pairs > 0 ? (n_forward + n_backward - n_pairs) / n_pairs : NaN
+
+		#	Degree Assortativity (sender out-degree against receiver in-degree)
+			degree_assortativity = _bipartite_degree_assortativity(forward, backward)
+
+		#	Two-Step Statistics and Four-Cycle Clustering (Robins & Alexander, 2004)
+			source_two_step = _two_step_pass(skeleton_by_source, skeleton)
+			target_two_step = _two_step_pass(skeleton, skeleton_by_source)
+			source_degree = vec(sum(skeleton, dims = 2))
+			target_degree = vec(sum(skeleton, dims = 1))
+			three_paths = 0.0
+			skeleton_rows = rowvals(skeleton)
+			for t in 1:n_target
+				for k in nzrange(skeleton, t)
+					three_paths += (source_degree[skeleton_rows[k]] - 1.0) * (target_degree[t] - 1.0)
+				end
+			end
+			four_cycle_clustering = three_paths > 0.0 ? 4.0 * source_two_step.four_cycles / three_paths : NaN
+
+		#	Assemble Global Statistics
+			global_names = [
+				"num_nodes"; "num_source_nodes"; "num_target_nodes";
+				"num_edges"; "num_forward_edges"; "num_backward_edges";
+				"source_mode"; "target_mode";
+				string.(component_keys);
+				"all_links";
+				"forward_density"; "backward_density"; "reciprocity";
+				"degree assortativity"; "four_cycle_clustering"
+			]
+			global_values = string.([
+				n_nodes; n_source; n_target;
+				n_forward + n_backward; n_forward; n_backward;
+				modes.source_mode; modes.target_mode;
+				[component_stats[key] for key in component_keys];
+				all_links_values;
+				round(forward_density, digits = 6); round(backward_density, digits = 6); round(reciprocity_value, digits = 6);
+				round(degree_assortativity, digits = 6); round(four_cycle_clustering, digits = 6)
+			])
+			global_measures = DataFrame(measure = global_names, value = global_values)
+
+		#	========== NODE-LEVEL MEASURES ==========
+
+		#	Node Identity
+			node_stats = DataFrame(
+				node = node_ids,
+				label = node_table.label,
+				mode = vcat(fill(modes.source_mode, n_source), fill(modes.target_mode, n_target)),
+				role = vcat(fill("source", n_source), fill("target", n_target))
+			)
+
+		#	Degrees, Normalized by the Size of the Other Mode
+			forward_pattern = _binary_pattern(forward)
+			backward_pattern = _binary_pattern(backward)
+			node_stats.source_out_degree_normalized = _role_column(vec(sum(forward_pattern, dims = 2)) ./ max(n_target, 1), :source, n_source, n_target)
+			node_stats.target_in_degree_normalized = _role_column(vec(sum(forward_pattern, dims = 1)) ./ max(n_source, 1), :target, n_source, n_target)
+			node_stats.source_in_degree_normalized = _role_column(vec(sum(backward_pattern, dims = 1)) ./ max(n_target, 1), :source, n_source, n_target)
+			node_stats.target_out_degree_normalized = _role_column(vec(sum(backward_pattern, dims = 2)) ./ max(n_source, 1), :target, n_source, n_target)
+
+		#	Strengths, Normalized by the Size of the Other Mode
+			if weighted
+				node_stats.source_out_strength_normalized = _role_column(vec(sum(forward, dims = 2)) ./ max(n_target, 1), :source, n_source, n_target)
+				node_stats.target_in_strength_normalized = _role_column(vec(sum(forward, dims = 1)) ./ max(n_source, 1), :target, n_source, n_target)
+				node_stats.source_in_strength_normalized = _role_column(vec(sum(backward, dims = 1)) ./ max(n_target, 1), :source, n_source, n_target)
+				node_stats.target_out_strength_normalized = _role_column(vec(sum(backward, dims = 2)) ./ max(n_source, 1), :target, n_source, n_target)
+			end
+
+		#	Two-Step Reach, Normalized by the Other Nodes of the Same Mode
+			node_stats.source_two_step_reach_normalized = _role_column(source_two_step.reach ./ max(n_source - 1, 1), :source, n_source, n_target)
+			node_stats.target_two_step_reach_normalized = _role_column(target_two_step.reach ./ max(n_target - 1, 1), :target, n_source, n_target)
+
+		#	Pairwise Clustering (Latapy, Magnien & Del Vecchio, 2008)
+			node_stats.source_pairwise_clustering = _role_column(source_two_step.clustering, :source, n_source, n_target)
+			node_stats.target_pairwise_clustering = _role_column(target_two_step.clustering, :target, n_source, n_target)
+
+		#	K-Core Decomposition (undirected form)
+			pair_sources, pair_targets, pair_weights = findnz(combined)
+			undirected_edges = DataFrame(src = source_ids[pair_sources], dst = target_ids[pair_targets], weight = pair_weights)
+			k_cores = core_decomposition(undirected_edges; weighted = false, mode = "undirected")
+			node_stats.k_core = round.(Int, _scores_by_id(node_ids, k_cores.node, k_cores.core_number))
+
+		#	PageRank (undirected form)
+			page_rank = _bipartite_pagerank(weighted ? combined : skeleton)
+			if !page_rank.converged
+				@warn "Two-mode PageRank did not converge within its iteration limit."
+			end
+			node_stats.source_page_rank = _role_column(page_rank.source, :source, n_source, n_target)
+			node_stats.target_page_rank = _role_column(page_rank.target, :target, n_source, n_target)
+
+		#	SALSA Hub (source mode) and Authority (target mode)
+			if nrow(clean_edges) > 0
+				hubs = salsa_centrality(clean_edges; weighted = weighted, score = :hub)
+				authorities = salsa_centrality(clean_edges; weighted = weighted, score = :authority)
+				hub_scores = _scores_by_id(source_ids, hubs.node, hubs.salsa_hub)
+				authority_scores = _scores_by_id(target_ids, authorities.node, authorities.salsa_authority)
+			else
+				hub_scores = zeros(Float64, n_source)
+				authority_scores = zeros(Float64, n_target)
+			end
+			node_stats.source_salsa_hub = _role_column(hub_scores, :source, n_source, n_target)
+			node_stats.target_salsa_authority = _role_column(authority_scores, :target, n_source, n_target)
+
+		#	Assembling Result
+			triads_summary = DataFrame(triad = String[], count = Int[])
+			return global_measures, triads_summary, node_stats
+	end
+	@doc raw"""
+	**Description**
+	Compute the network-level and node-level statistics of a two-mode (bipartite) network, such as Agent x Hashtag or Agent x Tweet. Only measures that are defined for two modes are produced, and every node-level measure is kept separate for each mode.
+
+	**Usage**
+	`bipartite_constructor(edges, nodes; weighted=true, mode_column=:mode, source_mode=nothing)`
+
+	**Arguments**
+	- `edges::DataFrame`: Edge list with `:src` and `:dst` columns, optionally `:weight`.
+	- `nodes::Union{Nothing,DataFrame,Vector}`: Node universe. A `DataFrame` needs `:id` and `:label`, and should carry the mode column.
+	- `weighted::Bool`: Use link weights (default `true`). When `false`, links are reduced to presence.
+	- `mode_column::Union{Symbol,AbstractString}`: Column of `nodes` that names each node's mode (default `:mode`).
+	- `source_mode::Union{Nothing,AbstractString}`: Mode to treat as the source. By default the mode that sends most links.
+
+	**Details**
+	The two modes must be declared in `mode_column`. Without it, senders are taken as the "source" mode and receivers as the "target" mode, which works only when no node both sends and receives and no node is isolated. An `ArgumentError` is thrown when there are not exactly two modes, when a link joins two nodes of the same mode, or when an id is listed in both modes.
+
+	Link direction is kept. The source mode is measured by what it sends and the target mode by what it receives. Links that run from the target mode back to the source mode are allowed; they are counted as backward links and give each mode its second set of degrees.
+
+	Measures:
+	- Sizes: nodes, nodes of each mode, links, forward and backward links.
+	- Weak components of the undirected form.
+	- Link weight statistics.
+	- `forward_density` and `backward_density`: links divided by `n_source * n_target`.
+	- `reciprocity`: share of linked pairs that are linked in both directions.
+	- `degree assortativity`: correlation, across links, between the sender's out-degree and the receiver's in-degree.
+	- `four_cycle_clustering`: Robins and Alexander's coefficient, four times the number of four-cycles divided by the number of three-paths.
+	- Per node and per mode: degree and strength normalized by the size of the other mode, two-step reach normalized by the other nodes of the same mode, Latapy's pairwise clustering coefficient, k-core number, standard PageRank on the undirected form (uniform teleport over all nodes), SALSA hub score (source mode) and authority score (target mode).
+
+	Transitivity, local clustering, the triad census, strong components, and self-loop statistics are not defined for a two-mode network and are not produced. Community detection is omitted because standard modularity assumes links within a mode; a bipartite modularity (Barber, 2007) is future work.
+
+	The two-step statistics cost the sum of squared degrees, so a node linked to a very large share of the other mode makes them slow.
+
+	**Value**
+	A tuple of three `DataFrame`s:
+	- `global_measures`: columns `:measure` and `:value` (values stored as strings).
+	- `triads_summary`: empty, kept so the return matches the one-mode constructors.
+	- `node_stats`: one row per node with `:node`, `:label`, `:mode`, `:role`, `:k_core`, and one column per role and measure (for example `:source_out_degree_normalized`). A column holds `missing` for nodes of the other mode.
+
+	**Examples**
+	```julia
+	#	Three agents using two hashtags
+		edges = DataFrame(src = ["a1", "a2", "a2", "a3"], dst = ["h1", "h1", "h2", "h2"])
+		nodes = DataFrame(id = ["a1", "a2", "a3", "h1", "h2"],
+						  label = ["a1", "a2", "a3", "h1", "h2"],
+						  mode = ["Agent", "Agent", "Agent", "Hashtag", "Hashtag"])
+
+	#	Compute the statistics
+		global_stats, triads, node_stats = bipartite_constructor(edges, nodes; weighted = false)
+	```
+
+	**See Also**
+	`bipartite_feature_builder`, `project_bipartite`, `network_comparator`
+
+	**References**
+	Barber, M. J. (2007). Modularity and community detection in bipartite networks. *Physical Review E, 76*, 066102.
+	Latapy, M., Magnien, C., & Del Vecchio, N. (2008). Basic notions for the analysis of large two-mode networks. *Social Networks, 30*, 31-48.
+	Robins, G., & Alexander, M. (2004). Small worlds among interlocking directors. *Computational & Mathematical Organization Theory, 10*, 69-94.
+	""" bipartite_constructor
+
+#	Helper Function for bipartite_feature_builder: Read a Numeric Global Statistic
+	function _global_value(global_stats::DataFrame, measure::AbstractString)
+		"""
+		Args:
+			global_stats::DataFrame: table with :measure and :value (strings)
+			measure::AbstractString: name of the statistic
+		Returns:
+			Float64: the parsed value
+		Notes:
+			Throws ArgumentError when the statistic is absent.
+		"""
+
+		#	Locate the Statistic
+			row = findfirst(==(measure), string.(global_stats.measure))
+			if row === nothing
+				throw(ArgumentError("global_stats has no measure named '$measure'"))
+			end
+
+		#	Assembling Result
+			return parse(Float64, string(global_stats.value[row]))
+	end
+
+#	Helper Function for bipartite_feature_builder: Moment Features for One Node Measure
+	function _moment_features(values::AbstractVector, measure::AbstractString, feature_type::AbstractString)
+		"""
+		Args:
+			values::AbstractVector: node values; missing entries are skipped
+			measure::AbstractString: base name of the measure
+			feature_type::AbstractString: feature type label
+		Returns:
+			DataFrame: rows for the mean, median, std, skew, and kurtosis, with :type, :measure, :value
+		Notes:
+			An empty measure yields NaN moments.
+			network_comparator replaces these rows with Jensen-Shannon features.
+		"""
+
+		#	Drop Missing Values
+			observed = Float64.(collect(skipmissing(values)))
+
+		#	Compute Moments
+			if isempty(observed)
+				moments = fill(NaN, 5)
+			else
+				spread = length(observed) > 1 ? std(observed) : 0.0
+				moments = [mean(observed), median(observed), spread,
+						   skew_about_mean(observed), kurtosis_about_mean(observed)]
+			end
+
+		#	Assembling Result
+			return DataFrame(
+				type = fill(String(feature_type), 5),
+				measure = measure .* ["_mean", "_median", "_std", "_skew", "_kurtosis"],
+				value = round.(moments, digits = 6)
+			)
+	end
+
+#	Two-Mode Feature Builder for Network Comparator
+	function bipartite_feature_builder(global_stats::DataFrame, triad_census_counts::DataFrame,
+									   node_measures::DataFrame;
+									   include_backward::Union{Nothing,Bool} = nothing)
+		"""
+		Args:
+			global_stats::DataFrame: global measures from bipartite_constructor
+			triad_census_counts::DataFrame: unused; kept so the call matches the one-mode builders
+			node_measures::DataFrame: node-level measures from bipartite_constructor
+			include_backward::Union{Nothing,Bool}: include features of target-to-source links
+				(default = only when the network has such links)
+		Returns:
+			DataFrame: feature vector with columns [:measure, :value, :type]
+		Notes:
+			Node-level features are built per role ("source_", "target_"), never pooled.
+			network_comparator passes include_backward so both networks share one feature set.
+		"""
+
+		#	Validation
+			@assert hasproperty(global_stats, :measure) && hasproperty(global_stats, :value) "global_stats needs :measure and :value"
+			@assert hasproperty(node_measures, :role) "node_measures needs :role; use bipartite_constructor"
+
+		#	Backward Links
+			has_backward = _global_value(global_stats, "num_backward_edges") > 0
+			use_backward = include_backward === nothing ? has_backward : include_backward
+
+		#	========== COMPONENT MEASURES ==========
+
+		#	Sizes
+			n_nodes = _global_value(global_stats, "num_nodes")
+			n_source = _global_value(global_stats, "num_source_nodes")
+			num_wcc = _global_value(global_stats, "num_wcc")
+			size_names = ["num_nodes", "num_edges", "num_source_nodes", "num_target_nodes"]
+			size_features = DataFrame(
+				type = fill("Component Measure", length(size_names) + 1),
+				measure = [size_names; "source_node_share"],
+				value = [[_global_value(global_stats, name) for name in size_names]; round(n_source / max(n_nodes, 1.0), digits = 6)]
+			)
+
+		#	Component Size Proportions
+			wcc_names = ["largest_wcc", "second_largest_wcc", "min_wcc_size"]
+			wcc_features = DataFrame(
+				type = fill("Component Measure", length(wcc_names)),
+				measure = wcc_names .* "_proportion",
+				value = [round(_global_value(global_stats, name) / max(n_nodes, 1.0), digits = 6) for name in wcc_names]
+			)
+
+		#	Component Type Proportions
+			kind_names = ["num_isolates", "num_dyads", "num_triads", "num_groups"]
+			kind_features = DataFrame(
+				type = fill("Component Measure", length(kind_names)),
+				measure = kind_names .* "_proportion",
+				value = [round(_global_value(global_stats, name) / max(num_wcc, 1.0), digits = 6) for name in kind_names]
+			)
+
+		#	========== LINK STATISTICS ==========
+
+		#	Parse Statistics by Name
+			link_names = ["min", "max", "mean", "std", "sum"]
+			link_row = findfirst(==("all_links"), string.(global_stats.measure))
+			link_features = DataFrame(
+				type = fill("Link Measure", length(link_names)),
+				measure = "all_link_" .* link_names,
+				value = _parse_link_stats(string(global_stats.value[link_row]), link_names)
+			)
+
+		#	========== GLOBAL NETWORK MEASURES ==========
+
+		#	Select Measures
+			global_names = ["forward_density"]
+			if use_backward
+				append!(global_names, ["backward_density", "reciprocity"])
+			end
+			append!(global_names, ["degree assortativity", "four_cycle_clustering"])
+			global_features = DataFrame(
+				type = fill("Global Network Measure", length(global_names)),
+				measure = global_names,
+				value = [_global_value(global_stats, name) for name in global_names]
+			)
+
+		#	========== K-CORE DECOMPOSITION ==========
+
+		#	Core Membership Shares per Role
+			k_core_features = DataFrame(type = String[], measure = String[], value = Float64[])
+			for role in ("source", "target")
+				role_cores = node_measures.k_core[node_measures.role .== role]
+				for core in sort(unique(role_cores))
+					push!(k_core_features, ("K-Core Decomposition", "$(role)_k_core_$(core)",
+											round(count(==(core), role_cores) / length(role_cores), digits = 6)))
+				end
+			end
+
+		#	========== NODE-LEVEL AGGREGATES ==========
+
+		#	Define Measures and Their Types
+			node_measures_config = [
+				("source_out_degree_normalized", "Degree Measures", false),
+				("target_in_degree_normalized", "Degree Measures", false),
+				("source_out_strength_normalized", "Degree Measures", false),
+				("target_in_strength_normalized", "Degree Measures", false),
+				("source_in_degree_normalized", "Degree Measures", true),
+				("target_out_degree_normalized", "Degree Measures", true),
+				("source_in_strength_normalized", "Degree Measures", true),
+				("target_out_strength_normalized", "Degree Measures", true),
+				("source_two_step_reach_normalized", "Local Reach", false),
+				("target_two_step_reach_normalized", "Local Reach", false),
+				("source_pairwise_clustering", "Local Structure", false),
+				("target_pairwise_clustering", "Local Structure", false),
+				("source_page_rank", "Influence", false),
+				("target_page_rank", "Influence", false),
+				("source_salsa_hub", "Influence", false),
+				("target_salsa_authority", "Influence", false)
+			]
+
+		#	Compute Moments
+			node_features = DataFrame(type = String[], measure = String[], value = Float64[])
+			for (column, feature_type, is_backward) in node_measures_config
+				if hasproperty(node_measures, Symbol(column)) && (use_backward || !is_backward)
+					append!(node_features, _moment_features(node_measures[!, column], column, feature_type))
+				end
+			end
+
+		#	Assembling Result (column order matches the one-mode builders)
+			feature_vector = vcat(size_features, wcc_features, kind_features, link_features,
+								  global_features, k_core_features, node_features)
+			return select(feature_vector, :measure, :value, :type)
+	end
+	@doc raw"""
+	**Description**
+	Build the feature vector of a two-mode (bipartite) network from the statistics returned by `bipartite_constructor`.
+
+	**Usage**
+	`bipartite_feature_builder(global_stats, triad_census_counts, node_measures; include_backward=nothing)`
+
+	**Arguments**
+	- `global_stats::DataFrame`: Global measures from `bipartite_constructor`.
+	- `triad_census_counts::DataFrame`: Not used. It is accepted so the call matches the one-mode feature builders.
+	- `node_measures::DataFrame`: Node-level measures from `bipartite_constructor`.
+	- `include_backward::Union{Nothing,Bool}`: Include the features that describe links from the target mode to the source mode. By default they are included only when the network has such links.
+
+	**Details**
+	Features are grouped into the types used by the one-mode builders: Component Measure, Link Measure, Global Network Measure, K-Core Decomposition, Degree Measures, Local Reach, Local Structure, and Influence. There is no Triad Census and no Community Structure type.
+
+	Node-level features are named by role, with the prefix `source_` or `target_`, and are summarized by mean, median, standard deviation, skew, and kurtosis within that role. `network_comparator` replaces those summaries with Jensen-Shannon divergences between the two networks' distributions.
+
+	`backward_density`, `reciprocity`, and the second set of degrees describe links from the target mode to the source mode. A network whose links all run one way has none, so these features are left out unless `include_backward = true`.
+
+	**Value**
+	A `DataFrame` with columns `:measure`, `:value`, and `:type`.
+
+	**Examples**
+	```julia
+	#	Statistics, then features
+		global_stats, triads, node_stats = bipartite_constructor(edges, nodes; weighted = false)
+		features = bipartite_feature_builder(global_stats, triads, node_stats)
+	```
+
+	**See Also**
+	`bipartite_constructor`, `network_comparator`
+	""" bipartite_feature_builder
+
+#	One-Mode Projection of a Two-Mode Network
+	function project_bipartite(edges::DataFrame,
+							   nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}};
+							   onto::AbstractString,
+							   weighting::Symbol = :newman,
+							   mode_column::Union{Symbol,AbstractString} = :mode,
+							   max_pairs::Int = 10_000_000,
+							   hub_warning::Int = 1_000)
+		"""
+		Args:
+			edges::DataFrame: edge list with :src and :dst
+			nodes::Union{Nothing,DataFrame,Vector}: node universe; a DataFrame may carry the mode column
+			onto::AbstractString: mode to keep, by name or by role ("source" or "target")
+			weighting::Symbol: :newman | :count | :jaccard (default = :newman)
+			mode_column::Union{Symbol,AbstractString}: column of nodes naming each node's mode (default = :mode)
+			max_pairs::Int: refuse when the projection could create more links than this (default = 10_000_000)
+			hub_warning::Int: warn when one node of the dropped mode has more links than this (default = 1_000)
+		Returns:
+			NamedTuple: (edges::DataFrame, nodes::DataFrame, onto::String, dropped::String,
+						 weighting::Symbol, n_links::Int, n_isolates::Int)
+		Notes:
+			Two kept nodes are tied when they share a neighbour in the dropped mode.
+			Direction and link weights of the two-mode network are not used.
+			The projection is undirected; each tie is listed once.
+		"""
+
+		#	Validation
+			if !(weighting in (:newman, :count, :jaccard))
+				throw(ArgumentError("weighting must be :newman, :count, or :jaccard"))
+			end
+
+		#	Resolve Modes
+			edges, nodes = _canonical_network_order(edges, nodes)
+			modes = _resolve_bipartite_modes(edges, nodes; mode_column = mode_column)
+			wanted = lowercase(strip(onto))
+			if wanted == lowercase(modes.source_mode) || wanted == "source"
+				kept_mode = modes.source_mode
+				dropped_mode = modes.target_mode
+			elseif wanted == lowercase(modes.target_mode) || wanted == "target"
+				kept_mode = modes.target_mode
+				dropped_mode = modes.source_mode
+			else
+				throw(ArgumentError("onto = '$onto' is not a mode of this network. Use '$(modes.source_mode)' or '$(modes.target_mode)'."))
+			end
+
+		#	Index Nodes
+			kept_ids = sort([id for (id, mode) in modes.mode_of if mode == kept_mode])
+			dropped_ids = sort([id for (id, mode) in modes.mode_of if mode == dropped_mode])
+			kept_index = Dict(id => i for (i, id) in enumerate(kept_ids))
+			dropped_index = Dict(id => i for (i, id) in enumerate(dropped_ids))
+
+		#	Build Incidence Matrix (kept by dropped)
+			rows = Int[]
+			cols = Int[]
+			for (s, d) in zip(string.(edges.src), string.(edges.dst))
+				if haskey(kept_index, s)
+					push!(rows, kept_index[s])
+					push!(cols, dropped_index[d])
+				else
+					push!(rows, kept_index[d])
+					push!(cols, dropped_index[s])
+				end
+			end
+			incidence = _binary_pattern(sparse(rows, cols, ones(Float64, length(rows)), length(kept_ids), length(dropped_ids)))
+
+		#	Guard Against Very Large Projections
+			dropped_degree = vec(sum(incidence, dims = 1))
+			potential_pairs = sum(k -> k * (k - 1) / 2, dropped_degree; init = 0.0)
+			largest_hub = isempty(dropped_degree) ? 0 : Int(maximum(dropped_degree))
+			if potential_pairs > max_pairs
+				throw(ArgumentError("Projecting onto '$kept_mode' could create up to $(round(Int, potential_pairs)) ties (the largest '$dropped_mode' node has $largest_hub links), " *
+									"which is above max_pairs = $max_pairs. Raise max_pairs to proceed."))
+			end
+			if largest_hub > hub_warning
+				@warn "One '$dropped_mode' node has $largest_hub links and alone ties $(largest_hub * (largest_hub - 1) ÷ 2) pairs of '$kept_mode' nodes. The projection is dominated by such nodes."
+			end
+
+		#	Weight the Ties
+			if weighting == :newman
+				#	Each shared neighbour of degree k contributes 1 / (k - 1)
+					share = [k > 1 ? 1.0 / (k - 1) : 0.0 for k in dropped_degree]
+					projection = incidence * spdiagm(0 => share) * transpose(incidence)
+			else
+				#	Count shared neighbours
+					projection = incidence * transpose(incidence)
+			end
+			tie_rows, tie_cols, tie_weights = findnz(triu(sparse(projection), 1))
+			if weighting == :jaccard
+				#	Shared neighbours divided by the union of neighbours
+					kept_degree = vec(sum(incidence, dims = 2))
+					tie_weights = [w / (kept_degree[i] + kept_degree[j] - w) for (i, j, w) in zip(tie_rows, tie_cols, tie_weights)]
+			end
+			keep = tie_weights .> 0.0
+
+		#	Assemble the Projection
+			projected_edges = DataFrame(src = kept_ids[tie_rows[keep]], dst = kept_ids[tie_cols[keep]], weight = Float64.(tie_weights[keep]))
+			sort!(projected_edges, [:src, :dst])
+			projected_nodes = DataFrame(id = kept_ids, label = [get(modes.label_of, id, id) for id in kept_ids])
+
+		#	Warn When the Projection Is Empty or Nearly Empty
+			tied = length(union(projected_edges.src, projected_edges.dst))
+			n_isolates = length(kept_ids) - tied
+			if nrow(projected_edges) == 0
+				@warn "The projection onto '$kept_mode' has no ties: no two '$kept_mode' nodes share a '$dropped_mode' node. Projecting onto '$dropped_mode' may be the informative choice."
+			elseif tied < 0.01 * length(kept_ids)
+				@warn "The projection onto '$kept_mode' is nearly empty: $tied of $(length(kept_ids)) nodes have a tie."
+			end
+
+		#	Assembling Result
+			return (edges = projected_edges, nodes = projected_nodes, onto = kept_mode, dropped = dropped_mode,
+					weighting = weighting, n_links = nrow(projected_edges), n_isolates = n_isolates)
+	end
+	@doc raw"""
+	**Description**
+	Project a two-mode (bipartite) network onto one of its modes. Two nodes of the kept mode are tied when they share at least one neighbour in the other mode. Use it when a two-mode network has to be compared with a one-mode network.
+
+	**Usage**
+	`project_bipartite(edges, nodes; onto, weighting=:newman, mode_column=:mode, max_pairs=10_000_000, hub_warning=1_000)`
+
+	**Arguments**
+	- `edges::DataFrame`: Edge list with `:src` and `:dst` columns.
+	- `nodes::Union{Nothing,DataFrame,Vector}`: Node universe. A `DataFrame` needs `:id` and `:label`, and should carry the mode column.
+	- `onto::AbstractString`: The mode to keep, given by its name or by its role (`"source"` or `"target"`). Required.
+	- `weighting::Symbol`: How ties are weighted (default `:newman`).
+	  - `:newman`: each shared neighbour with `k` links contributes `1 / (k - 1)` (Newman, 2001). Discounts large hubs.
+	  - `:count`: the number of shared neighbours.
+	  - `:jaccard`: shared neighbours divided by the union of the two nodes' neighbours.
+	- `mode_column::Union{Symbol,AbstractString}`: Column of `nodes` that names each node's mode (default `:mode`).
+	- `max_pairs::Int`: Upper limit on the ties the projection could create (default `10_000_000`). An `ArgumentError` is thrown above it.
+	- `hub_warning::Int`: Warn when a single node of the dropped mode has more links than this (default `1_000`).
+
+	**Details**
+	A projection is an analytic choice, so it is never made automatically. Three consequences should be kept in mind when a projection is compared with an observed one-mode network:
+	1. Every node of the dropped mode becomes a clique among its neighbours, so a projection has far more clustering and density than an observed network of the same size.
+	2. A node of the dropped mode with `k` links creates `k(k-1)/2` ties. One hashtag used by 10,000 agents creates about 50 million.
+	3. Direction is given up. Ties stand for association, and the result is undirected. Link weights of the two-mode network are not used.
+
+	The choice of mode matters. In Agent x Tweet - Sender each tweet has one sender, so no two agents share a tweet and the projection onto agents is empty; the projection onto tweets ties tweets by the same sender. A warning is issued when the projection is empty or when fewer than 1% of the kept nodes have a tie.
+
+	With `:count` weighting all weights can equal 1. Compare such a projection with `weighted = false`.
+
+	**Value**
+	A `NamedTuple` with fields:
+	- `edges::DataFrame`: Ties with `:src`, `:dst`, `:weight`, each listed once.
+	- `nodes::DataFrame`: All nodes of the kept mode with `:id` and `:label`, including those without ties.
+	- `onto::String`, `dropped::String`: Names of the kept and dropped modes.
+	- `weighting::Symbol`: The weighting used.
+	- `n_links::Int`: Number of ties.
+	- `n_isolates::Int`: Kept nodes without a tie.
+
+	**Examples**
+	```julia
+	#	Agents tied by shared hashtags
+		projection = project_bipartite(edges, nodes; onto = "Agent")
+
+	#	Compare the projection with an observed agent network
+		result = network_comparator(projection.edges, projection.nodes, agent_edges, agent_nodes;
+									directed = false, weighted = true)
+	```
+
+	**See Also**
+	`bipartite_constructor`, `network_comparator`
+
+	**References**
+	Newman, M. E. J. (2001). Scientific collaboration networks. II. Shortest paths, weighted networks, and centrality. *Physical Review E, 64*, 016132.
+	""" project_bipartite
+
 ####################################
 #   NETWORK COMPARISON FUNCTIONS   #
 ####################################
@@ -15484,164 +16683,396 @@ THE SOFTWARE.
 			return nothing
 	end
 
-#	Helper Function for network_comparator: Compute JS (Jensen-Shannon) Divergence for Node-Level Measures
+#	Helper Function for _distribution_divergence: Typical Magnitude of Two Pooled Distributions
+	function _pooled_typical_value(x::Vector{Float64}, y::Vector{Float64})
+		"""
+		Args:
+			x::Vector{Float64}: node values of the first network
+			y::Vector{Float64}: node values of the second network
+		Returns:
+			Float64: median nonzero magnitude of the pooled values, or 0.0 when every value is zero
+		Notes:
+			The two networks are weighted equally, so the larger network does not set the scale.
+			Zeros are left out, because a measure is often zero for most nodes.
+		"""
+
+		#	Nonzero magnitudes
+			magnitudes_x = abs.(x[x .!= 0.0])
+			magnitudes_y = abs.(y[y .!= 0.0])
+
+		#	Early return
+			if isempty(magnitudes_x) && isempty(magnitudes_y)
+				return 0.0
+			end
+
+		#	Weight the two networks equally
+			magnitudes = vcat(magnitudes_x, magnitudes_y)
+			weights = vcat(fill(0.5 / length(x), length(magnitudes_x)),
+						   fill(0.5 / length(y), length(magnitudes_y)))
+
+		#	Weighted median
+			order = sortperm(magnitudes)
+			cumulative = cumsum(weights[order])
+			position = searchsortedfirst(cumulative, cumulative[end] / 2)
+
+		#	Assembling Result
+			return magnitudes[order[min(position, length(order))]]
+	end
+
+#	Helper Function for _distribution_divergence: Share of Nodes in Each Bin by Linear Binning
+	function _linear_bin_masses(values::Vector{Float64}, lower::Float64, width::Float64, n_bins::Int)
+		"""
+		Args:
+			values::Vector{Float64}: node values on the binning axis
+			lower::Float64: lower end of the binning range
+			width::Float64: bin width
+			n_bins::Int: number of bins
+		Returns:
+			Vector{Float64}: share of nodes in each bin (sums to 1)
+		Notes:
+			Each value is shared between the two nearest bin centres in proportion to its closeness.
+			A value at a bin centre goes wholly to that bin.
+			A value on a bin edge is split evenly, so a small change in a value moves little mass.
+			Values are binned in sorted order, so the result does not depend on node order.
+		"""
+
+		#	Share each value between its two nearest bins
+			masses = zeros(Float64, n_bins)
+			share = 1.0 / length(values)
+			for value in sort(values)
+				position = clamp((value - lower) / width - 0.5, 0.0, Float64(n_bins - 1))
+				index = floor(Int, position)
+				fraction = position - index
+				masses[index + 1] += (1.0 - fraction) * share
+				masses[min(index + 2, n_bins)] += fraction * share
+			end
+
+		#	Assembling Result
+			return masses
+	end
+
+#	Helper Function for _distribution_divergence: Jensen-Shannon Divergence of Two Binned Distributions
+	function _jensen_shannon_divergence(p::Vector{Float64}, q::Vector{Float64})
+		"""
+		Args:
+			p::Vector{Float64}: share of the first network's nodes in each bin
+			q::Vector{Float64}: share of the second network's nodes in each bin
+		Returns:
+			Float64: Jensen-Shannon divergence in natural-log units, between 0 and log(2)
+		Notes:
+			An empty bin contributes nothing (0 log 0 = 0).
+			Identical inputs give exactly 0.
+		"""
+
+		#	Accumulate both halves of the divergence
+			divergence = 0.0
+			for (p_i, q_i) in zip(p, q)
+				m_i = 0.5 * (p_i + q_i)
+				if p_i > 0.0
+					divergence += 0.5 * p_i * log(p_i / m_i)
+				end
+				if q_i > 0.0
+					divergence += 0.5 * q_i * log(q_i / m_i)
+				end
+			end
+
+		#	Assembling Result
+			return max(divergence, 0.0)
+	end
+
+#	Helper Function for _distribution_divergence: Scaled Wasserstein-1 Distance
+	function _scaled_wasserstein(x::Vector{Float64}, y::Vector{Float64})
+		"""
+		Args:
+			x::Vector{Float64}: node values of the first network
+			y::Vector{Float64}: node values of the second network
+		Returns:
+			Float64: Wasserstein-1 distance divided by (mean|x| + mean|y|), between 0 and 1
+		Notes:
+			The Wasserstein-1 distance is the area between the two cumulative distributions.
+			It is the average amount by which node values must move to turn one distribution into the other.
+			This is a diagnostic. It is not part of the similarity score.
+		"""
+
+		#	Early return
+			scale = mean(abs, x) + mean(abs, y)
+			if scale == 0.0
+				return 0.0
+			end
+
+		#	Area between the cumulative distributions
+			sorted_x = sort(x)
+			sorted_y = sort(y)
+			points = sort(vcat(sorted_x, sorted_y))
+			n_x = length(sorted_x)
+			n_y = length(sorted_y)
+			count_x = 0
+			count_y = 0
+			distance = 0.0
+			for k in 1:(length(points) - 1)
+				while count_x < n_x && sorted_x[count_x + 1] <= points[k]
+					count_x += 1
+				end
+				while count_y < n_y && sorted_y[count_y + 1] <= points[k]
+					count_y += 1
+				end
+				distance += abs(count_x / n_x - count_y / n_y) * (points[k + 1] - points[k])
+			end
+
+		#	Assembling Result
+			return distance / scale
+	end
+
+#	Helper Function for _js_divergence_computation: Divergence Between Two Node-Level Distributions
+	function _distribution_divergence(x::Vector{Float64}, y::Vector{Float64}; bin_width::Float64 = 0.125)
+		"""
+		Args:
+			x::Vector{Float64}: node values of the first network (finite, non-empty)
+			y::Vector{Float64}: node values of the second network (finite, non-empty)
+			bin_width::Float64: bin width on the geometric axis (default = 0.125)
+		Returns:
+			NamedTuple:
+				- js_divergence: Jensen-Shannon divergence of the binned distributions
+				- typical_value: pooled typical magnitude that scales the axis
+				- n_bins: number of bins used
+				- expected_noise: divergence expected from two samples of one distribution
+				- wasserstein: scaled Wasserstein-1 distance (diagnostic)
+		Notes:
+			Values are placed on the geometric axis u = asinh(value / typical_value).
+			The axis is linear near zero and logarithmic in the tails, and keeps zeros and negatives.
+			Scaling by the typical value places the bins where this measure's nodes are.
+			The range runs from the joint minimum to the joint maximum and always includes zero.
+			The bin count follows from the range, so a wider distribution gets more bins of the same width.
+			expected_noise = (occupied bins - 1) / (4 x harmonic mean of the two node counts).
+			It treats nodes as independent draws, so read it as a rough reference level.
+		"""
+
+		#	Diagnostics that do not depend on the bins
+			wasserstein = _scaled_wasserstein(x, y)
+			typical_value = _pooled_typical_value(x, y)
+
+		#	Early return
+			if typical_value == 0.0
+				return (js_divergence = 0.0, typical_value = 0.0, n_bins = 0, expected_noise = 0.0, wasserstein = wasserstein)
+			end
+
+		#	Geometric axis
+			u_x = asinh.(x ./ typical_value)
+			u_y = asinh.(y ./ typical_value)
+
+		#	Range anchored at zero
+			lower = min(minimum(u_x), minimum(u_y), 0.0)
+			upper = max(maximum(u_x), maximum(u_y), 0.0)
+
+		#	Bins of fixed width
+			n_bins = max(2, ceil(Int, (upper - lower) / bin_width - 1e-9))
+			width = (upper - lower) / n_bins
+
+		#	Binned distributions
+			p = _linear_bin_masses(u_x, lower, width, n_bins)
+			q = _linear_bin_masses(u_y, lower, width, n_bins)
+
+		#	Divergence and its reference noise level
+			js_divergence = _jensen_shannon_divergence(p, q)
+			occupied = count(>(0.0), p .+ q)
+			harmonic_n = 2.0 / (1.0 / length(x) + 1.0 / length(y))
+			expected_noise = (occupied - 1) / (4.0 * harmonic_n)
+
+		#	Assembling Result
+			return (js_divergence = js_divergence, typical_value = typical_value, n_bins = n_bins,
+					expected_noise = expected_noise, wasserstein = wasserstein)
+	end
+
+#	Helper Function for _global_metric_normalizer: Compare Node-Level Distributions of Two Networks
 	function _js_divergence_computation(node_measures_1::DataFrame,
 										node_measures_2::DataFrame,
 										base_measures::Vector{String};
-										nbins::Int = 20,
-										apply_asinh::Bool = false)
+										bin_width::Float64 = 0.125)
 		"""
 		Args:
 			node_measures_1::DataFrame: Node-level measures for network 1
 			node_measures_2::DataFrame: Node-level measures for network 2
 			base_measures::Vector{String}: Names of node-level columns
-			nbins::Int: Number of histogram bins (default 20)
-			apply_asinh::Bool: Apply asinh transformation before JS computation
+			bin_width::Float64: bin width on the geometric axis (default = 0.125)
 		Returns:
-			DataFrame with columns:
+			DataFrame with one row per measure and columns:
 				- measure: base measure name
-				- network_1_value: value for network 1 (±sqrt(JSD)/2)
-				- network_2_value: value for network 2 (∓sqrt(JSD)/2)
-				- js_divergence: raw JS divergence value
+				- network_1_value: feature value for network 1 (+sqrt(JSD)/2)
+				- network_2_value: feature value for network 2 (-sqrt(JSD)/2)
+				- js_divergence: Jensen-Shannon divergence
+				- expected_noise: divergence expected from sampling alone
+				- wasserstein: scaled Wasserstein-1 distance
+				- typical_value: pooled typical magnitude that scales the axis
+				- n_bins: number of bins used
+				- n_1, n_2: number of nodes with a defined value in each network
 		Notes:
-			- JSD is symmetric and bounded; we use natural logs
-			- asinh transformation reduces influence of extreme values
-			- Missing columns treated as JSD = 0.0
+			The two feature values differ by sqrt(JSD), which is a metric.
+			A measure absent from either network, or without defined values in one, gets divergence 0.
+			Missing and non-finite node values are left out.
+			See _distribution_divergence for the binning.
 		"""
-		
-		#	Inner helper: JS divergence between two numeric vectors
-			function _js_divergence(x::AbstractVector{<:Real},
-									y::AbstractVector{<:Real};
-									nbins::Int = nbins)::Float64
-				#	Drop missings
-					x_clean = collect(skipmissing(x))
-					y_clean = collect(skipmissing(y))
-				
-				#	If both are empty or constant/identical, divergence is zero
-					if isempty(x_clean) && isempty(y_clean)
-						return 0.0
-					elseif isempty(x_clean)
-						x_clean = copy(y_clean)
-					elseif isempty(y_clean)
-						y_clean = copy(x_clean)
-					end
-				
-					lo = min(minimum(x_clean), minimum(y_clean))
-					hi = max(maximum(x_clean), maximum(y_clean))
-				
-				#	Degenerate range → all mass on single bin → no divergence
-					if lo == hi
-						return 0.0
-					end
-				
-				#	Common bin edges
-					edges = range(lo, hi; length = nbins + 1)
-				
-					h1 = fit(Histogram, x_clean, edges)
-					h2 = fit(Histogram, y_clean, edges)
-				
-					p = h1.weights
-					q = h2.weights
-				
-				#	Normalize to probabilities
-					s1 = sum(p)
-					s2 = sum(q)
-					if s1 == 0.0 && s2 == 0.0
-						return 0.0
-					elseif s1 == 0.0
-						p .= 1.0
-						s1 = length(p)
-					elseif s2 == 0.0
-						q .= 1.0
-						s2 = length(q)
-					end
-				
-					p = p ./ s1
-					q = q ./ s2
-				
-				#	Avoid log(0): add tiny epsilon and renormalize
-					eps_val = eps(Float64)
-					p .= p .+ eps_val
-					q .= q .+ eps_val
-					p ./= sum(p)
-					q ./= sum(q)
-				
-					m = 0.5 .* (p .+ q)
-				
-				#	KL helper: natural logarithm
-					function _kl(a::Vector{Float64}, b::Vector{Float64})
-						return sum(a .* log.(a ./ b))
-					end
-				
-					jsd = 0.5 * _kl(p, m) + 0.5 * _kl(q, m)
-				
-				#	Return Jensen-Shannon divergence
-					return jsd
-			end
-		
-		#	Initialize results DataFrame
+
+		#	Initialize results
 			results = DataFrame(
 				measure = String[],
 				network_1_value = Float64[],
 				network_2_value = Float64[],
-				js_divergence = Float64[]
+				js_divergence = Float64[],
+				expected_noise = Float64[],
+				wasserstein = Float64[],
+				typical_value = Float64[],
+				n_bins = Int[],
+				n_1 = Int[],
+				n_2 = Int[]
 			)
-		
+
 		#	Process each base measure
 			for base in base_measures
-				#	Check if measure exists in both networks
-					if !(hasproperty(node_measures_1, Symbol(base)) && hasproperty(node_measures_2, Symbol(base)))
-						#	If missing in either, treat divergence as 0.0
-							push!(results, (measure = base,
-											network_1_value = 0.0,
-											network_2_value = 0.0,
-											js_divergence = 0.0))
-							continue
+				#	Defined values in each network
+					x = Float64[]
+					y = Float64[]
+					if hasproperty(node_measures_1, Symbol(base)) && hasproperty(node_measures_2, Symbol(base))
+						x = filter(isfinite, Float64.(collect(skipmissing(node_measures_1[!, Symbol(base)]))))
+						y = filter(isfinite, Float64.(collect(skipmissing(node_measures_2[!, Symbol(base)]))))
 					end
-				
-					col1 = node_measures_1[!, Symbol(base)]
-					col2 = node_measures_2[!, Symbol(base)]
-				
-				#	Drop missings and coerce to Float64
-					x = Float64.(collect(skipmissing(col1)))
-					y = Float64.(collect(skipmissing(col2)))
-				
-				#	Apply asinh transformation if requested
-					if apply_asinh
-						x = asinh.(x)
-						y = asinh.(y)
-					end
-				
-				#	Compute JS divergence
+
+				#	Nothing to compare
 					if isempty(x) || isempty(y)
-						jsd = 0.0
-					else
-						jsd = _js_divergence(x, y; nbins = nbins)
+						push!(results, (base, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, length(x), length(y)))
+						continue
 					end
-				
-				#	Map to symmetric pair
-					root_jsd = sqrt(jsd)
-					v1 =  0.5 * root_jsd
-					v2 = -0.5 * root_jsd
-				
-				#	Add to results
-					push!(results, (measure = base,
-									network_1_value = v1,
-									network_2_value = v2,
-									js_divergence = jsd))
+
+				#	Compare the two distributions
+					divergence = _distribution_divergence(x, y; bin_width = bin_width)
+
+				#	Map to a symmetric pair
+					root_jsd = sqrt(divergence.js_divergence)
+					push!(results, (base, 0.5 * root_jsd, -0.5 * root_jsd, divergence.js_divergence,
+									divergence.expected_noise, divergence.wasserstein, divergence.typical_value,
+									divergence.n_bins, length(x), length(y)))
 			end
-		
-		#	Return DataFrame
+
+		#	Assembling Result
 			return results
+	end
+
+#	Helper Function for _global_metric_normalizer: Transform Size Features
+	function _normalize_components!(features::DataFrame)
+		"""
+		Args:
+			features::DataFrame: feature vector with :measure, :value, :type
+		Returns:
+			DataFrame: the same table, modified in place
+		Notes:
+			Drops num_scc.
+			Applies asinh to num_nodes, num_edges, and the two-mode mode sizes.
+		"""
+
+		#	Drop num_scc
+			filter!(row -> !(row.type == "Component Measure" && row.measure == "num_scc"), features)
+
+		#	asinh of the size features
+			size_measures = ("num_nodes", "num_edges", "num_source_nodes", "num_target_nodes")
+			size_mask = (features.type .== "Component Measure") .& in.(features.measure, Ref(size_measures))
+			features.value[size_mask] .= asinh.(features.value[size_mask])
+
+		#	Assembling Result
+			return features
+	end
+
+#	Helper Function for _global_metric_normalizer: Drop Link Extremes
+	function _drop_link_extremes!(features::DataFrame)
+		"""
+		Args:
+			features::DataFrame: feature vector with :measure, :value, :type
+		Returns:
+			DataFrame: the same table, modified in place
+		Notes:
+			Minimum, maximum, and sum of link weights are dropped.
+			The within-pair scaling of the mean and standard deviation carries that information.
+		"""
+
+		#	Measures to drop
+			drop_set = Set([
+				"all_link_min", "all_link_max", "all_link_sum",
+				"non_self_min", "non_self_max", "non_self_sum",
+				"self_loops_min", "self_loops_max", "self_loops_sum",
+			])
+			filter!(row -> !(row.type == "Link Measure" && (row.measure in drop_set)), features)
+
+		#	Assembling Result
+			return features
+	end
+
+#	Helper Function for _global_metric_normalizer: Drop Node-Moment Summaries
+	function _drop_moment_rows!(features::DataFrame, moment_types::Vector{String})
+		"""
+		Args:
+			features::DataFrame: feature vector with :measure, :value, :type
+			moment_types::Vector{String}: feature types built from node-level measures
+		Returns:
+			DataFrame: the same table, modified in place
+		Notes:
+			Mean, median, standard deviation, skew, and kurtosis rows of those types are dropped.
+			The distribution comparison replaces them.
+		"""
+
+		#	Drop moment rows of the node-level types
+			moment_suffixes = ("_mean", "_median", "_std", "_skew", "_kurtosis")
+			filter!(row -> !(String(row.type) in moment_types &&
+							 any(endswith(String(row.measure), suffix) for suffix in moment_suffixes)), features)
+
+		#	Assembling Result
+			return features
+	end
+
+#	Helper Function for _global_metric_normalizer: Scale Link Measures Within the Pair
+	function _scale_link_measures!(features_1::DataFrame, features_2::DataFrame)
+		"""
+		Args:
+			features_1::DataFrame: feature vector of the first network
+			features_2::DataFrame: feature vector of the second network
+		Returns:
+			Nothing (modifies both in place)
+		Notes:
+			The mean and standard deviation of link weights are divided by the larger of the two magnitudes.
+			A side that is undefined (NaN) stays NaN.
+		"""
+
+		#	Scale each measure present in both networks
+			link_measures_to_scale = ["all_link_mean", "all_link_std", "non_self_mean",
+									  "non_self_std", "self_loops_mean", "self_loops_std"]
+			for measure in link_measures_to_scale
+				#	Locate the measure in each feature vector
+					index_1 = findfirst((features_1.measure .== measure) .& (features_1.type .== "Link Measure"))
+					index_2 = findfirst((features_2.measure .== measure) .& (features_2.type .== "Link Measure"))
+					if index_1 === nothing || index_2 === nothing
+						continue
+					end
+
+				#	Scale by the larger finite magnitude
+					value_1 = Float64(features_1.value[index_1])
+					value_2 = Float64(features_2.value[index_2])
+					scale = eps(Float64)
+					isfinite(value_1) && (scale = max(scale, abs(value_1)))
+					isfinite(value_2) && (scale = max(scale, abs(value_2)))
+					features_1.value[index_1] = value_1 / scale
+					features_2.value[index_2] = value_2 / scale
+			end
+
+		#	Assembling Result
+			return nothing
 	end
 
 #	Helper Function for network_comparator: Normalize Global Metrics
 	function _global_metric_normalizer(feature_vector_1::DataFrame,
 										feature_vector_2::DataFrame,
 										node_measures_1::DataFrame,
-										node_measures_2::DataFrame, 
-										n_1::Int64, n_2::Int64, 
-										directed::Bool)
+										node_measures_2::DataFrame,
+										n_1::Int64, n_2::Int64,
+										directed::Bool;
+										bipartite::Bool = false,
+										bin_width::Float64 = 0.125)
 		"""
 		Args:
 			feature_vector_1::DataFrame: Single-network feature vector
@@ -15651,232 +17082,81 @@ THE SOFTWARE.
 			n_1::Int64: Number of nodes in network 1
 			n_2::Int64: Number of nodes in network 2
 			directed::Bool: Whether networks are directed
+			bipartite::Bool: Whether networks are two-mode (default = false)
+			bin_width::Float64: bin width for the node-level distributions (default = 0.125)
 		Returns:
-			Tuple{DataFrame,DataFrame}: (feature_vector_1_norm, feature_vector_2_norm)
+			Tuple{DataFrame,DataFrame,DataFrame}: the two normalized feature vectors, and the
+				per-measure diagnostics of the node-level comparison
 		Notes:
-			- Computes both raw and asinh-normalized JS divergences
+			- Replaces the node-moment rows with one distribution feature per node measure (jsd_<measure>)
 			- Applies category weights to multi-indicator measures
-			- Component/Link measure transformations remain unchanged
+			- Adds the normalized two-step reach columns to the node tables
 		"""
-		
+
 		#	Create local copies so we don't mutate caller data
 			fv1 = deepcopy(feature_vector_1)
 			fv2 = deepcopy(feature_vector_2)
-		
-		#	Standardize column names by position if needed
-			if !(:measure in names(fv1)) || !(:value in names(fv1)) || !(:type in names(fv1))
-				rename!(fv1, [:measure, :value, :type])
-			end
-		
-			if !(:measure in names(fv2)) || !(:value in names(fv2)) || !(:type in names(fv2))
-				rename!(fv2, [:measure, :value, :type])
-			end
-		
+
+		#	Standardize column names by position
+			rename!(fv1, [:measure, :value, :type])
+			rename!(fv2, [:measure, :value, :type])
+
 		#	Ensure values are numeric
 			fv1.value = Float64.(fv1.value)
 			fv2.value = Float64.(fv2.value)
-		
-		# ---------- Component Measure transforms ----------
-		
-			function _normalize_components!(df::DataFrame)
-				#	Drop num_scc
-					filter!(row -> !(row.type == "Component Measure" && row.measure == "num_scc"), df)
-				
-				#	asinh(num_nodes)
-					mask_nodes = (df.type .== "Component Measure") .& (df.measure .== "num_nodes")
-					if any(mask_nodes)
-						df.value[mask_nodes] .= asinh.(df.value[mask_nodes])
-					end
-				
-				#	asinh(num_edges)
-					mask_edges = (df.type .== "Component Measure") .& (df.measure .== "num_edges")
-					if any(mask_edges)
-						df.value[mask_edges] .= asinh.(df.value[mask_edges])
-					end
-				
-				#	Return Transformed Measures
-					return df
-			end
-		
+
+		#	Component Measure transforms
 			_normalize_components!(fv1)
 			_normalize_components!(fv2)
-		
-		# ---------- Link Measure transforms ----------
-		
-		#	Dropping Extreme Measures that are Captured in Pairwise Normalizations
-			function _drop_link_extremes!(df::DataFrame)
-				drop_set = Set([
-					"all_link_min", "all_link_max", "all_link_sum",
-					"non_self_min", "non_self_max", "non_self_sum",
-					"self_loops_min", "self_loops_max", "self_loops_sum",
-				])
-				filter!(row -> !(row.type == "Link Measure" && (row.measure in drop_set)), df)
-				return df
-			end
-		
+
+		#	Link Measure transforms
 			_drop_link_extremes!(fv1)
 			_drop_link_extremes!(fv2)
-		
-		#	Within-pair scaling for selected Link Measures
-			link_measures_to_scale = [
-				"all_link_mean",
-				"all_link_std",
-				"non_self_mean",
-				"non_self_std",
-				"self_loops_mean",
-				"self_loops_std",
-			]
-		
-			for m in link_measures_to_scale
-				#	Locate row for this measure in each feature vector
-					idx1 = findfirst(i -> fv1.measure[i] == m && fv1.type[i] == "Link Measure",
-									eachindex(fv1.measure))
-					idx2 = findfirst(i -> fv2.measure[i] == m && fv2.type[i] == "Link Measure",
-									eachindex(fv2.measure))
-				
-				#	Skip if missing in either network
-					if idx1 === nothing || idx2 === nothing
-						continue
-					end
-				
-					v1 = Float64(fv1.value[idx1])
-					v2 = Float64(fv2.value[idx2])
-				
-					scale = max(abs(v1), abs(v2), eps(Float64))
-				
-					fv1.value[idx1] = v1 / scale
-					fv2.value[idx2] = v2 / scale
-			end
-		
-		# ---------- Create normalized reach-2 features ----------
-		
-			if !directed
-				den_1 = max(n_1 * (n_1 - 1), 1)
-				node_measures_1.undirected_reach_2_normalized = node_measures_1.undirected_reach_2 ./ den_1
-				
-				den_2 = max(n_2 * (n_2 - 1), 1)
-				node_measures_2.undirected_reach_2_normalized = node_measures_2.undirected_reach_2 ./ den_2
+			_scale_link_measures!(fv1, fv2)
+
+		#	Normalized two-step reach
+			if bipartite
+				#	Two-mode reach is normalized per mode by bipartite_constructor
 			else
 				#	Undirected reach: proportion of node pairs reachable
-					den_1 = max(n_1 * (n_1 - 1), 1)
-					node_measures_1.undirected_reach_2_normalized = node_measures_1.undirected_reach_2 ./ den_1
-				
-					den_2 = max(n_2 * (n_2 - 1), 1)
-					node_measures_2.undirected_reach_2_normalized = node_measures_2.undirected_reach_2 ./ den_2
-				
-				#	In-reach: 2k_in/(n-1)
-					den_1 = max(n_1 - 1, 1)
-					node_measures_1.in_reach_2_normalized = node_measures_1.in_reach_2 ./ den_1
-				
-					den_2 = max(n_2 - 1, 1)
-					node_measures_2.in_reach_2_normalized = node_measures_2.in_reach_2 ./ den_2
-				
-				#	Out-reach: 2k_out/(n-1)
-					den_1 = max(n_1 - 1, 1)
-					node_measures_1.out_reach_2_normalized = node_measures_1.out_reach_2 ./ den_1
-				
-					den_2 = max(n_2 - 1, 1)
-					node_measures_2.out_reach_2_normalized = node_measures_2.out_reach_2 ./ den_2
+					node_measures_1.undirected_reach_2_normalized = node_measures_1.undirected_reach_2 ./ max(n_1 * (n_1 - 1), 1)
+					node_measures_2.undirected_reach_2_normalized = node_measures_2.undirected_reach_2 ./ max(n_2 * (n_2 - 1), 1)
 			end
-		
-		# ---------- JS-based replacement for node-moment summaries ----------
-		
-		#	Target categories where we computed moments from node_measures
-			kl_types = Set([
-				"Degree Measures",
-				"Local Reach",
-				"Local Structure",
-				"Influence",
-			])
-		
-		#	Suffixes that indicate "moment" summaries
-			moment_suffixes = ("_mean", "_median", "_std", "_skew", "_kurtosis")
-		
-		#	Extract base measures from both networks
-			types_list = ["Degree Measures", "Local Reach", "Local Structure", "Influence"]
-			fv1_node_measures = fv1[in(types_list).(fv1.type),:]
-			fv1_node_means = fv1_node_measures.measure[occursin.("_mean", fv1_node_measures.measure)]
-            fv1_node_types = fv1_node_measures.type[occursin.("_mean", fv1_node_measures.measure)]
-			fv1_features = replace.(fv1_node_means, "_mean" => "")
-		
-			fv2_node_measures = fv2[in(types_list).(fv2.type),:]
-			fv2_node_means = fv2_node_measures.measure[occursin.("_mean", fv2_node_measures.measure)]
-			fv2_features = replace.(fv2_node_means, "_mean" => "")
-            fv2_node_types = fv2_node_measures.type[occursin.("_mean", fv2_node_measures.measure)]
-			base_measures = unique([fv1_features; fv2_features])
+			if directed && !bipartite
+				#	In-reach and out-reach
+					node_measures_1.in_reach_2_normalized = node_measures_1.in_reach_2 ./ max(n_1 - 1, 1)
+					node_measures_2.in_reach_2_normalized = node_measures_2.in_reach_2 ./ max(n_2 - 1, 1)
+					node_measures_1.out_reach_2_normalized = node_measures_1.out_reach_2 ./ max(n_1 - 1, 1)
+					node_measures_2.out_reach_2_normalized = node_measures_2.out_reach_2 ./ max(n_2 - 1, 1)
+			end
 
-		#	Compute both raw and asinh-normalized JS divergences
-			js_raw = _js_divergence_computation(node_measures_1, node_measures_2, base_measures; 
-												 apply_asinh = false)
-			js_asinh = _js_divergence_computation(node_measures_1, node_measures_2, base_measures; 
-												   apply_asinh = true)
-		
-		#	Create JS feature DataFrames for both networks
-			fv1_js_raw = DataFrame(
-				measure = "jsd_raw_" .* js_raw.measure,
-				value = js_raw.network_1_value,
-				type = fv1_node_types 
-			)
-		
-			fv1_js_asinh = DataFrame(
-				measure = "jsd_asinh_" .* js_asinh.measure,
-				value = js_asinh.network_1_value,
-				type = fv1_node_types 
-			)
-		
-			fv2_js_raw = DataFrame(
-				measure = "jsd_raw_" .* js_raw.measure,
-				value = js_raw.network_2_value,
-				type = fv2_node_types
-			)
-		
-			fv2_js_asinh = DataFrame(
-				measure = "jsd_asinh_" .* js_asinh.measure,
-				value = js_asinh.network_2_value,
-				type = fv2_node_types
-			)
-		
-		#	Remove original moment-based summaries for those bases in the target types
-			function _drop_moment_rows!(df::DataFrame)
-				#	Types we will replace with JS/Euclidean divergence features
-					moment_types = Set([
-						"Degree Measures",
-						"Local Reach",
-						"Local Structure",
-						"Influence",
-					])
-				
-					moment_suffixes = ("_mean", "_median", "_std", "_skew", "_kurtosis")
-				
-				#	Identifying & Filter Moment Rows
-					filter!(df) do row
-						t = String(row.type)
-						m = String(row.measure)
-				
-						is_moment_type  = t in moment_types
-						is_moment_field = any(endswith(m, suf) for suf in moment_suffixes)
-				
-						# keep row if it's NOT a moment field in a moment-type block
-						!(is_moment_type && is_moment_field)
-					end
-				
-				#	Return Filtered DataFrame
-					return df
-			end
-		
-			_drop_moment_rows!(fv1)
-			_drop_moment_rows!(fv2)
-		
-		#	Insert new JS-based features (both raw and asinh)
-			fv1 = vcat(fv1, fv1_js_raw, fv1_js_asinh)
-			fv2 = vcat(fv2, fv2_js_raw, fv2_js_asinh)
-		
+		#	Node measures summarized by moments, with their feature types
+			moment_types = ["Degree Measures", "Local Reach", "Local Structure", "Influence"]
+			mean_rows = vcat(fv1[in(moment_types).(fv1.type) .& endswith.(fv1.measure, "_mean"), [:measure, :type]],
+							 fv2[in(moment_types).(fv2.type) .& endswith.(fv2.measure, "_mean"), [:measure, :type]])
+			mean_rows = unique(mean_rows, :measure)
+			base_measures = String.(chopsuffix.(mean_rows.measure, "_mean"))
+			base_types = String.(mean_rows.type)
+
+		#	Compare the node-level distributions
+			divergences = _js_divergence_computation(node_measures_1, node_measures_2, base_measures; bin_width = bin_width)
+
+		#	Replace the moment rows with the distribution features
+			_drop_moment_rows!(fv1, moment_types)
+			_drop_moment_rows!(fv2, moment_types)
+			fv1 = vcat(fv1, DataFrame(measure = "jsd_" .* divergences.measure, value = divergences.network_1_value, type = base_types))
+			fv2 = vcat(fv2, DataFrame(measure = "jsd_" .* divergences.measure, value = divergences.network_2_value, type = base_types))
+
 		#	Apply category weights to multi-indicator measures
 			_apply_category_weights!(fv1)
 			_apply_category_weights!(fv2)
-		
-		#	Return Transformed Feature Vectors
-			return fv1, fv2
+
+		#	Diagnostics of the node-level comparison
+			diagnostics = select(divergences, Not([:network_1_value, :network_2_value]))
+			insertcols!(diagnostics, 2, :type => base_types)
+
+		#	Assembling Result
+			return fv1, fv2, diagnostics
 	end
 
 #	Helper: Compute Overall Euclidean Distance with Weights
@@ -15892,6 +17172,9 @@ THE SOFTWARE.
 		Notes:
 			- Distance is weighted Euclidean distance in feature space
 			- Similarity = 1/(1+distance), mapping [0,∞) → (0,1]
+			- A feature that is undefined (NaN or Inf) in either network is left out
+			  of the sum, so one undefined measure cannot turn the score into NaN.
+			  `_undefined_features` lists what was left out and on which side.
 		"""
 		
 		#	Validation
@@ -15909,9 +17192,10 @@ THE SOFTWARE.
 				w = ones(Float64, length(x))
 			end
 		
-		#	Compute weighted squared differences
-			diff = x .- y
-			sq_diff = w .* (diff .^ 2)
+		#	Compute weighted squared differences over the features defined in both networks
+			defined = isfinite.(x) .& isfinite.(y)
+			diff = x[defined] .- y[defined]
+			sq_diff = w[defined] .* (diff .^ 2)
 			total_sq = sum(sq_diff)
 		
 		#	Compute Euclidean distance
@@ -15971,8 +17255,9 @@ THE SOFTWARE.
 				w = ones(Float64, length(x))
 			end
 		
-		#	Compute weighted squared differences
-			sq_diff = w .* ((x .- y) .^ 2)
+		#	Compute weighted squared differences (undefined features contribute nothing)
+			defined = isfinite.(x) .& isfinite.(y)
+			sq_diff = ifelse.(defined, w .* ((x .- y) .^ 2), 0.0)
 		
 		#	Assemble per-feature table for grouping
 			tmp = DataFrame(
@@ -16004,33 +17289,42 @@ THE SOFTWARE.
 			return type_df
 	end
 
-#	Helper: Split Combined Features into Raw and Asinh Versions
-	function _split_js_features(combined_measures::DataFrame)
+#	Helper Function for network_comparator: List Undefined Features
+	function _undefined_features(combined_measures::DataFrame)
 		"""
-		Split combined measures into raw and asinh JS divergence versions.
-		
 		Args:
-			combined_measures::DataFrame: Combined features with both jsd_raw_ and jsd_asinh_ measures
+			combined_measures::DataFrame: features with :measure, :type, :network_1_values, :network_2_values
 		Returns:
-			Tuple{DataFrame,DataFrame}: (raw_measures, asinh_measures)
+			DataFrame: one row per feature that is NaN or Inf in at least one network, with
+				:measure, :type, :network_1_values, :network_2_values, :undefined_in
 		Notes:
-			Each output contains only its respective JS measures plus all non-JS measures
+			:undefined_in is "both", "network_1", or "network_2".
+			These features are excluded from the distance.
+			Undefined on both sides carries no information.
+			Undefined on one side is a difference the distance cannot express as a number.
 		"""
 		
-		#	Identify JS measures
-			is_raw_js = occursin.(r"^jsd_raw_", combined_measures.measure)
-			is_asinh_js = occursin.(r"^jsd_asinh_", combined_measures.measure)
-			is_non_js = .!(is_raw_js .| is_asinh_js)
+		#	Locate undefined values on each side
+			undefined_1 = .!isfinite.(Vector{Float64}(combined_measures.network_1_values))
+			undefined_2 = .!isfinite.(Vector{Float64}(combined_measures.network_2_values))
+			keep = undefined_1 .| undefined_2
 		
-		#	Create raw version (non-JS + raw JS)
-			raw_measures = combined_measures[is_non_js .| is_raw_js, :]
+		#	Label the side
+			side = [u1 && u2 ? "both" : (u1 ? "network_1" : "network_2")
+					for (u1, u2) in zip(undefined_1[keep], undefined_2[keep])]
 		
-		#	Create asinh version (non-JS + asinh JS)
-			asinh_measures = combined_measures[is_non_js .| is_asinh_js, :]
-		
-		#	Return both versions
-			return raw_measures, asinh_measures
+		#	Return the report table
+			return DataFrame(
+				measure = String.(combined_measures.measure[keep]),
+				type = String.(combined_measures.type[keep]),
+				network_1_values = Vector{Float64}(combined_measures.network_1_values[keep]),
+				network_2_values = Vector{Float64}(combined_measures.network_2_values[keep]),
+				undefined_in = side
+			)
 	end
+
+#	Version Recorded with Each Comparison
+	const LGS_VERSION = "0.2.0"
 
 #	Network Comparator: Compare Two Networks
 	function network_comparator(edges_1::DataFrame, nodes_1::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}},
@@ -16039,9 +17333,13 @@ THE SOFTWARE.
 								weighted::Bool = true, n_resolutions::Int = 15, n_runs_per_gamma::Int = 5,
 								n_iterations_per_run::Int = 10, seed::Union{Int,Nothing} = nothing, 
 								provided_membership_1::Union{Nothing,DataFrame,Vector{Int},Dict} = nothing,
-								provided_membership_2::Union{Nothing,DataFrame,Vector{Int},Dict} = nothing)
+								provided_membership_2::Union{Nothing,DataFrame,Vector{Int},Dict} = nothing,
+								bipartite::Union{Bool,Tuple{Bool,Bool}} = false,
+								mode_column::Union{Symbol,AbstractString} = :mode,
+								match_modes::Bool = true,
+								bin_width::Float64 = 0.125)
 		"""
-		Compare two networks using both raw and asinh-normalized node measure distributions.
+		Compare two networks and return one similarity score.
 		
 		Args:
 			edges_1, edges_2::DataFrame: Edge lists with :src, :dst, optional :weight
@@ -16055,6 +17353,10 @@ THE SOFTWARE.
 			n_iterations_per_run::Int: Iterations per Leiden run
 			seed: Random seed for reproducibility
 			provided_membership_1, provided_membership_2: Optional pre-computed communities
+			bipartite: true when both networks are two-mode; a tuple declares each network
+			mode_column: Column of the node tables naming each node's mode (two-mode only)
+			match_modes::Bool: Require the two networks' mode names to agree (two-mode only)
+			bin_width::Float64: Bin width for comparing node-level distributions (default = 0.125)
 		Returns:
 			NamedTuple with fields:
 				- global_stats_1: DataFrame of global statistics for network 1
@@ -16064,19 +17366,24 @@ THE SOFTWARE.
 				- triad_census_counts_2: DataFrame of triad census for network 2
 				- node_measures_2: DataFrame of node-level measures for network 2
 				- combined_features: DataFrame of aligned feature vectors with weights
-				- overall_distance_raw: Euclidean distance using raw JS divergences
-				- overall_similarity_raw: Similarity score for raw comparison
-				- overall_distance_asinh: Euclidean distance using asinh JS divergences
-				- overall_similarity_asinh: Similarity score for asinh comparison
-				- type_contributions_raw: Per-type distance breakdown for raw
-				- type_contributions_asinh: Per-type distance breakdown for asinh
+				- overall_distance: Weighted Euclidean distance between the feature vectors
+				- overall_similarity: Similarity score, 1 / (1 + overall_distance)
+				- type_contributions: Per-type breakdown of the distance
+				- node_measure_diagnostics: Per node measure, the divergence, its expected
+				  noise level, and the scaled Wasserstein-1 distance (not part of the score)
+				- undefined_features: Features undefined (NaN) in one or both networks,
+				  which are excluded from the distance, with the side that lacks them
+				- comparison_info: Feature set, binning, bin width, version, and the modes of each network
 		Notes:
 			- Returns individual network analyses alongside comparison results
 			- Applies category weights to multi-indicator measures
-			- Computes both raw and asinh-normalized comparisons simultaneously
-			- Raw comparison preserves tail differences in degree distributions
-			- Asinh comparison reduces influence of extreme values
+			- Node-level distributions are compared on a geometric axis with bins of fixed width
 		"""
+
+		#	Validation
+			if !(isfinite(bin_width) && bin_width > 0.0)
+				throw(ArgumentError("bin_width must be a positive number; got $bin_width."))
+			end
 		
 		#	Create working copies
 			clean_edges_1 = deepcopy(edges_1) 
@@ -16086,8 +17393,75 @@ THE SOFTWARE.
 		
 		#	========== CONSTRUCT FEATURE VECTORS ==========
 		
+		#	Refuse a two-mode network against a one-mode network
+			bipartite_1, bipartite_2 = bipartite isa Tuple ? bipartite : (bipartite, bipartite)
+			if bipartite_1 != bipartite_2
+				throw(ArgumentError(MIXED_MODE_MESSAGE))
+			end
+
+		#	Record which feature set is used
+			feature_set = bipartite_1 ? "two-mode " * (weighted ? "weighted" : "binary") :
+						  "one-mode " * (directed ? "directed " : "undirected ") * (weighted ? "weighted" : "binary")
+			comparison_info = DataFrame(item = ["feature_set", "node_measure_binning", "bin_width", "lgs_version"],
+										value = [feature_set, "geometric axis, fixed bin width, linear binning", string(bin_width), LGS_VERSION])
+
 		#	Select appropriate constructor and builder based on configuration
-			if !directed && !weighted
+			if bipartite_1
+				#	Two-mode networks
+					if provided_membership_1 !== nothing || provided_membership_2 !== nothing || resolution_sweep
+						@warn "Community measures are not part of the two-mode feature set; memberships and the resolution sweep are ignored."
+					end
+
+				#	Resolve the modes of both networks
+					modes_1 = _resolve_bipartite_modes(clean_edges_1, clean_nodes_1; mode_column = mode_column)
+					modes_2 = _resolve_bipartite_modes(clean_edges_2, clean_nodes_2; mode_column = mode_column)
+					source_mode_1 = modes_1.source_mode
+					source_mode_2 = modes_2.source_mode
+					names_1 = lowercase.([modes_1.source_mode, modes_1.target_mode])
+					names_2 = lowercase.([modes_2.source_mode, modes_2.target_mode])
+
+				#	Refuse networks whose modes differ
+					if match_modes && Set(names_1) != Set(names_2)
+						throw(ArgumentError("The two networks have different modes: '$(modes_1.source_mode)' x '$(modes_1.target_mode)' against '$(modes_2.source_mode)' x '$(modes_2.target_mode)'. " *
+											"Each mode is compared with its counterpart, so the mode names must agree. Pass match_modes = false to compare source with source and target with target regardless of names."))
+					end
+
+				#	Settle one orientation for both networks
+					if match_modes && names_1[1] != names_2[1]
+						if modes_1.one_way && modes_2.one_way
+							#	Two one-way networks that run in opposite directions
+								throw(ArgumentError("The two networks run in opposite directions: '$(modes_1.source_mode)' sends in the first and '$(modes_2.source_mode)' sends in the second. " *
+													"Orientation is part of what a two-mode network means, so they are not compared."))
+						elseif modes_2.one_way
+							#	The one-way network fixes the orientation
+								source_mode_1 = modes_1.target_mode
+						else
+							#	Otherwise the first network fixes it
+								source_mode_2 = modes_2.target_mode
+						end
+					end
+
+				#	Compute statistics
+					global_stats_1, triad_census_counts_1, node_measures_1 = bipartite_constructor(
+						clean_edges_1, clean_nodes_1; weighted = weighted, mode_column = mode_column, source_mode = source_mode_1)
+					global_stats_2, triad_census_counts_2, node_measures_2 = bipartite_constructor(
+						clean_edges_2, clean_nodes_2; weighted = weighted, mode_column = mode_column, source_mode = source_mode_2)
+
+				#	Build feature vectors on one shared feature set
+					backward_1 = parse(Int64, global_stats_1.value[findfirst(==("num_backward_edges"), global_stats_1.measure)])
+					backward_2 = parse(Int64, global_stats_2.value[findfirst(==("num_backward_edges"), global_stats_2.measure)])
+					include_backward = backward_1 + backward_2 > 0
+					feature_vector_1 = bipartite_feature_builder(global_stats_1, triad_census_counts_1, node_measures_1; include_backward = include_backward)
+					feature_vector_2 = bipartite_feature_builder(global_stats_2, triad_census_counts_2, node_measures_2; include_backward = include_backward)
+
+				#	Record the modes
+					mode_items = ["source_mode", "target_mode"]
+					append!(comparison_info, DataFrame(
+						item = [mode_items .* "_1"; mode_items .* "_2"],
+						value = [[global_stats_1.value[findfirst(==(item), global_stats_1.measure)] for item in mode_items];
+								 [global_stats_2.value[findfirst(==(item), global_stats_2.measure)] for item in mode_items]]))
+
+			elseif !directed && !weighted
 				#	Undirected binary networks
 					global_stats_1, triad_census_counts_1, node_measures_1 = undirected_binary_constructor(
 						clean_edges_1, clean_nodes_1;
@@ -16222,10 +17596,10 @@ THE SOFTWARE.
 			n_1 = parse(Int64, global_stats_1.value[1])
 			n_2 = parse(Int64, global_stats_2.value[1])
 		
-		#	Normalize Feature Vectors (includes both raw and asinh JS features)
-			feature_vector_1, feature_vector_2 = _global_metric_normalizer(feature_vector_1, feature_vector_2, 
-																		   node_measures_1, node_measures_2,
-																		   n_1, n_2, directed)
+		#	Normalize Feature Vectors and compare the node-level distributions
+			feature_vector_1, feature_vector_2, node_measure_diagnostics = _global_metric_normalizer(
+				feature_vector_1, feature_vector_2, node_measures_1, node_measures_2, n_1, n_2, directed;
+				bipartite = bipartite_1, bin_width = bin_width)
 		
 		#	========== ALIGN AND COMBINE FEATURE VECTORS ==========
 		
@@ -16392,18 +17766,13 @@ THE SOFTWARE.
             normalized_weight_types = [other_type_weights_df; special_types_weight_df]
             leftjoin!(combined_measures, normalized_weight_types, on = :measure)
 
-		#	========== COMPUTE SIMILARITY METRICS FOR BOTH VERSIONS ==========
+		#	========== COMPUTE SIMILARITY METRICS ==========
 		
-		#	Split into raw and asinh versions
-			raw_measures, asinh_measures = _split_js_features(combined_measures)
-		
-		#	Compute overall Euclidean distances and similarities
-			dist_raw = _compute_overall_distance(raw_measures; use_weights = true)
-			dist_asinh = _compute_overall_distance(asinh_measures; use_weights = true)
+		#	Compute overall Euclidean distance and similarity
+			overall = _compute_overall_distance(combined_measures; use_weights = true)
 		
 		#	Compute type-level contributions
-			type_contrib_raw = _compute_type_contributions(raw_measures, dist_raw.squared_distance; use_weights = true)
-			type_contrib_asinh = _compute_type_contributions(asinh_measures, dist_asinh.squared_distance; use_weights = true)
+			type_contributions = _compute_type_contributions(combined_measures, overall.squared_distance; use_weights = true)
 		
 		#	Return comprehensive results
 			return (global_stats_1 = global_stats_1, 
@@ -16413,19 +17782,19 @@ THE SOFTWARE.
 					triad_census_counts_2 = triad_census_counts_2,
 					node_measures_2 = node_measures_2,
 					combined_features = combined_measures,
-					overall_distance_raw = dist_raw.distance,
-					overall_similarity_raw = dist_raw.similarity,
-					overall_distance_asinh = dist_asinh.distance,
-					overall_similarity_asinh = dist_asinh.similarity,
-					type_contributions_raw = type_contrib_raw,
-					type_contributions_asinh = type_contrib_asinh)
+					overall_distance = overall.distance,
+					overall_similarity = overall.similarity,
+					type_contributions = type_contributions,
+					node_measure_diagnostics = node_measure_diagnostics,
+					undefined_features = _undefined_features(combined_measures),
+					comparison_info = comparison_info)
 	end
 	@doc raw"""
 	**Description**
-	Compare two networks using both raw and asinh-normalized node measure distributions, with weighted multi-indicator categories for balanced structural comparison. Returns both individual network analyses and comparison metrics.
+	Compare two networks and return one similarity score between 0 and 1, where 1 means no measurable difference. The individual network analyses, the aligned features, and the tables that explain the score are returned with it.
 
 	**Usage**
-	`network_comparator(edges_1, nodes_1, edges_2, nodes_2; resolution_sweep=false, resolution=1.0, directed=true, weighted=true, n_resolutions=15, n_runs_per_gamma=5, n_iterations_per_run=10, seed=nothing, provided_membership_1=nothing, provided_membership_2=nothing)`
+	`network_comparator(edges_1, nodes_1, edges_2, nodes_2; resolution_sweep=false, resolution=1.0, directed=true, weighted=true, n_resolutions=15, n_runs_per_gamma=5, n_iterations_per_run=10, seed=nothing, provided_membership_1=nothing, provided_membership_2=nothing, bipartite=false, mode_column=:mode, match_modes=true, bin_width=0.125)`
 
 	**Arguments**
 	- `edges_1, edges_2::DataFrame`: Edge lists with `:src` and `:dst` columns (string IDs), optional `:weight` column
@@ -16439,23 +17808,40 @@ THE SOFTWARE.
 	- `n_iterations_per_run::Int`: Iterations per Leiden run (default 10)
 	- `seed::Union{Int,Nothing}`: Random seed for reproducibility (default nothing)
 	- `provided_membership_1, provided_membership_2`: Pre-computed community assignments as DataFrame, Vector, or Dict
+	- `bipartite::Union{Bool,Tuple{Bool,Bool}}`: `true` when both networks are two-mode (default false). A tuple declares each network separately.
+	- `mode_column::Union{Symbol,AbstractString}`: Column of the node tables that names each node's mode (default `:mode`). Two-mode only.
+	- `match_modes::Bool`: Require the two networks' mode names to agree (default true). Two-mode only.
+	- `bin_width::Float64`: Bin width used to compare node-level distributions (default 0.125). See Details.
 
 	**Details**
-	The function provides two comparison perspectives:
-	1. **Raw comparison**: Preserves tail differences in degree distributions and other node measures
-	2. **Asinh comparison**: Applies inverse hyperbolic sine transformation to reduce influence of extreme values
-	3. **Category weighting**: Multi-indicator structural measures  
-       (Triad Census) are normalized *within each network* using `_apply_category_weights!`,  
-       ensuring that the **total weight of all features in each category equals 1**  
-       in each network. Single-indicator measures retain weight 1.
-	Feature computation includes:
-	- Global metrics (density, components, etc.) with appropriate transformations
-	- Node-level distributions compared via Jensen-Shannon divergence
-	- Category-weighted distances for balanced structural comparison
+	Each network is reduced to a feature vector. The score is `1 / (1 + d)`, where `d` is the weighted Euclidean distance between the two vectors.
+
+	*Global features.* Density, components, reciprocity, and the other network-level measures enter as they are, with three adjustments. Node and link counts are put through `asinh`. The mean and standard deviation of link weights are divided by the larger of the two networks' values. The triad census is weighted so that the whole census counts as one feature.
+
+	*Node-level distributions.* Each node measure (degree, reach, clustering, PageRank, and so on) contributes one feature: the distance between the two networks' distributions of that measure. Every measure is compared in the same way:
+	1. *Scale.* The typical value `s` is the median nonzero magnitude of the two distributions pooled, with the two networks weighted equally.
+	2. *Geometric axis.* Each node value `x` is placed at `u = asinh(x / s)`. The axis is linear near zero and logarithmic in the tails, so a heavy tail does not empty the bins that hold most nodes. Zeros and negative values keep their place.
+	3. *Bins.* The range runs from the joint minimum to the joint maximum and always includes zero. It is divided into bins of width `bin_width`, so a wider distribution gets more bins and not wider ones. At least two bins are used.
+	4. *Linear binning.* Each node is shared between the two nearest bin centres in proportion to its closeness. A small change in a value then moves a small amount of mass, where a hard bin edge would move the whole node.
+	5. *Divergence.* The feature is the square root of the Jensen-Shannon divergence (natural logarithm) between the two binned distributions. It lies between 0 and 0.83 and is a metric.
+
+	A smaller `bin_width` resolves finer differences and raises the noise from small networks by the same proportion. Scores computed with different bin widths are not comparable. `comparison_info` records the width that was used.
+
+	*Diagnostics.* `node_measure_diagnostics` reports, for each node measure, the divergence, the divergence expected from sampling alone, and the scaled Wasserstein-1 distance. They explain a score and are not part of it. The Wasserstein-1 distance is the average amount by which node values must move to turn one distribution into the other. It is divided here by the sum of the two mean magnitudes, which places it between 0 and 1.
+
+	**Two-mode networks**
+	Set `bipartite = true` to compare two two-mode (bipartite) networks, such as two Agent x Hashtag networks. They are measured with `bipartite_constructor` and `bipartite_feature_builder`: a feature set without triads, transitivity, strong components, or communities, in which every node-level distribution is compared mode against mode. `directed`, `resolution`, and the memberships are not used.
+
+	Three comparisons are refused with an `ArgumentError`:
+	1. A two-mode network against a one-mode network (`bipartite = (true, false)`). Project the two-mode network with `project_bipartite` and compare the projection as an undirected one-mode network.
+	2. Two-mode networks whose mode names differ, unless `match_modes = false`.
+	3. Two-mode networks that both run one way but in opposite directions, such as Agent x Tweet against Tweet x Agent.
+
+	A two-mode score rests on a different feature set from a one-mode score, so the two kinds of score are not comparable with each other. `comparison_info` records which feature set was used.
 
 	**Value**
 	Returns a NamedTuple with fields:
-	
+
 	*Individual Network Analyses:*
 	- `global_stats_1::DataFrame`: Global statistics for network 1
 	- `triad_census_counts_1::DataFrame`: Triad census counts for network 1
@@ -16463,31 +17849,54 @@ THE SOFTWARE.
 	- `global_stats_2::DataFrame`: Global statistics for network 2
 	- `triad_census_counts_2::DataFrame`: Triad census counts for network 2
 	- `node_measures_2::DataFrame`: Node-level measures for network 2
-	
+
 	*Comparison Results:*
-	- `combined_features::DataFrame`: Aligned feature vectors with columns [:measure, :network_1_values, :network_2_values, :type, 
-                                                                            :weight_1, weight_2, :weight]
-	- `overall_distance_raw::Float64`: Weighted Euclidean distance using raw JS divergences
-	- `overall_similarity_raw::Float64`: Raw similarity score ∈ (0,1]
-	- `overall_distance_asinh::Float64`: Weighted Euclidean distance using asinh JS divergences
-	- `overall_similarity_asinh::Float64`: Asinh similarity score ∈ (0,1]
-	- `type_contributions_raw::DataFrame`: Per-type distance breakdown for the raw comparison.
+	- `combined_features::DataFrame`: Aligned feature vectors with columns [:measure, :network_1_values, :network_2_values, :type, :weight_1, :weight_2, :weight]. A node-level distribution appears as `jsd_<measure>`, with the values +sqrt(JSD)/2 and -sqrt(JSD)/2.
+	- `overall_distance::Float64`: Weighted Euclidean distance between the feature vectors
+	- `overall_similarity::Float64`: Similarity score ∈ (0,1]
+	- `type_contributions::DataFrame`: Per-type breakdown of the distance.
 		-  For each `type`, `distance_sq` is the weighted sum of squared differences
 		   across all features of that type.
 		- `normalized_contribution` is the fraction of the *total squared distance*
-		   explained by that type (these values sum to 1 across all types). A type can
-		   have a **moderate per-type similarity** (e.g., `type_similarity ≈ 0.58`) and
-		   still have a **large `normalized_contribution`** (e.g., 0.18) if it accounts
-		   for a big share of the overall distance.
+		   explained by that type (these values sum to 1 across all types).
 		- `type_similarity` is a per-type similarity, computed as `1 / (1 + distance)`
-		   using only that type’s features (i.e., “how similar would the networks look
-		   if we only considered this block?”).
-	- `type_contributions_asinh::DataFrame`: Same structure and interpretation as
-	  `type_contributions_raw`, but based on the asinh-normalized feature space.
+		   using only that type's features.
+	- `node_measure_diagnostics::DataFrame`: One row per node measure, with columns
+	  [:measure, :type, :js_divergence, :expected_noise, :wasserstein, :typical_value,
+	  :n_bins, :n_1, :n_2]. `expected_noise` is the divergence expected when both
+	  networks' values are drawn from one distribution: (occupied bins - 1) / (4 x the
+	  harmonic mean of the two node counts). It treats nodes as independent draws, so
+	  it is a rough reference level. A `js_divergence` near it is not evidence of a
+	  difference. `wasserstein` is the scaled Wasserstein-1 distance.
+
+	- `undefined_features::DataFrame`: Features that are undefined (NaN) in one or both
+	  networks, with columns [:measure, :type, :network_1_values, :network_2_values,
+	  :undefined_in], where `undefined_in` is "both", "network_1", or "network_2".
+	  Degree assortativity, for example, is undefined when an endpoint degree
+	  sequence has zero variance, and the mean weight of self-loops is undefined in
+	  a network without self-loops. These features are left out of the distance,
+	  so the score stays finite. A feature undefined on one side only is a
+	  difference between the networks that the score does not contain; read this
+	  table alongside it.
+
+	- `comparison_info::DataFrame`: Columns [:item, :value]. Rows `feature_set`
+	  ("one-mode directed weighted", "two-mode binary", and so on),
+	  `node_measure_binning`, `bin_width`, and `lgs_version`. For two-mode
+	  networks, further rows give the source and target mode of each network.
 
 	Note: The overall similarity is computed from the full weighted Euclidean distance
 	over all features and is **not** a simple average of the per-type `type_similarity`
 	values.
+
+	Note: The comparison does not depend on the order in which nodes or edges are
+	listed, and a network compared with itself scores exactly 1. Both inputs are put
+	into canonical order (nodes by id; edges by source, target, weight) before any
+	measure is computed. The one exception is a membership supplied as a plain
+	vector, which is aligned to the input node order, so that order is kept.
+
+	Note: Versions before 0.2.0 returned two scores, `overall_similarity_raw` and
+	`overall_similarity_asinh`, from equal-width histograms with 20 bins. Scores from
+	those versions are not comparable with this one.
 
 	**Examples**
 	```julia
@@ -16495,27 +17904,33 @@ THE SOFTWARE.
 		edges1 = DataFrame(src=["A","B","C"], dst=["B","C","A"])
 		edges2 = DataFrame(src=["X","Y","Z"], dst=["Y","Z","X"])
 		result = network_comparator(edges1, nothing, edges2, nothing; directed=true, weighted=false)
-		
+
 		# Access individual network analyses
 		println("Network 1 stats: ", result.global_stats_1)
 		println("Network 2 node measures: ", result.node_measures_2)
-		
-		# Access comparison metrics
-		println("Raw similarity: ", result.overall_similarity_raw)
-		println("Asinh similarity: ", result.overall_similarity_asinh)
 
-		# Compare weighted networks with resolution sweep
+		# Access the score and what drives it
+		println("Similarity: ", result.overall_similarity)
+		println(result.type_contributions)
+		println(result.node_measure_diagnostics)
+
+		# Compare weighted networks with resolution sweep and finer bins
 		edges1 = DataFrame(src=["A","B"], dst=["B","C"], weight=[1.5, 2.0])
 		edges2 = DataFrame(src=["X","Y"], dst=["Y","Z"], weight=[1.0, 3.0])
-		result = network_comparator(edges1, nothing, edges2, nothing; 
-									directed=false, weighted=true, resolution_sweep=true)
-		
-		# Examine type contributions
-		println(result.type_contributions_raw)
-		println(result.type_contributions_asinh)
+		result = network_comparator(edges1, nothing, edges2, nothing;
+									directed=false, weighted=true, resolution_sweep=true, bin_width=0.0625)
 	```
 	**See Also**
-	`undirected_binary_constructor`, `undirected_weighted_constructor`, `directed_binary_constructor`, `directed_weighted_constructor`
+	`undirected_binary_constructor`, `undirected_weighted_constructor`, `directed_binary_constructor`, `directed_weighted_constructor`, `bipartite_constructor`, `project_bipartite`
+
+	**References**
+	Burbidge, J. B., Magee, L., & Robb, A. L. (1988). Alternative transformations to handle extreme values of the dependent variable. *Journal of the American Statistical Association, 83*(401), 123-127.
+
+	Endres, D. M., & Schindelin, J. E. (2003). A new metric for probability distributions. *IEEE Transactions on Information Theory, 49*(7), 1858-1860.
+
+	Lin, J. (1991). Divergence measures based on the Shannon entropy. *IEEE Transactions on Information Theory, 37*(1), 145-151.
+
+	Wand, M. P. (1994). Fast computation of multivariate kernel estimators. *Journal of Computational and Graphical Statistics, 3*(4), 433-445.
 	""" network_comparator
 
 #   Exporting Objects
@@ -16557,6 +17972,9 @@ THE SOFTWARE.
 		   directed_binary_feature_builder,
 		   directed_weighted_constructor,
 		   directed_weighted_feature_builder,
+		   bipartite_constructor,
+		   bipartite_feature_builder,
+		   project_bipartite,
 		   network_comparator
 
 # 	Bring in the CLI submodule

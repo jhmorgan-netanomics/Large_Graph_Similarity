@@ -306,6 +306,134 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 			return result
 	end
 
+#	Helper Function for _process_ora_input: Node Table of a Two-Mode ORA Network
+	function _two_mode_ora_nodes(metanet::NamedTuple, network::NamedTuple, edges::DataFrame,
+								 source_nodes::DataFrame; verbose::Bool = true)
+		"""
+		Args:
+			metanet::NamedTuple: output of load_ora_xml
+			network::NamedTuple: the selected network
+			edges::DataFrame: the network's edge list
+			source_nodes::DataFrame: source nodeset with :id and :label
+			verbose::Bool: Print diagnostic messages
+		Returns:
+			Tuple{DataFrame,DataFrame}: (edges, nodes), where nodes has :id, :label, :mode
+		Notes:
+			The mode of a node is the name of its nodeset.
+			When the two nodesets share ids, every id is prefixed with its nodeset name.
+		"""
+
+		#	Validation
+			target_type = network.targetNodeset
+			if !(target_type in keys(metanet.nodesets))
+				throw(ArgumentError("Target nodeset '$target_type' not found in ORA file"))
+			end
+
+		#	Extract Target Nodes
+			target_nodes = metanet.nodesets[target_type][:, 1:2]
+			rename!(target_nodes, ["id", "label"])
+			if sum(isempty.(target_nodes.label)) == nrow(target_nodes)
+				target_nodes.label = target_nodes.id
+			end
+
+		#	Label Modes
+			sources = DataFrame(id = string.(source_nodes.id), label = string.(source_nodes.label))
+			targets = DataFrame(id = string.(target_nodes.id), label = string.(target_nodes.label))
+			sources.mode = fill(String(network.sourceNodeset), nrow(sources))
+			targets.mode = fill(String(target_type), nrow(targets))
+			out_edges = copy(edges)
+
+		#	Separate Ids Shared by the Two Nodesets
+			if !isempty(intersect(Set(sources.id), Set(targets.id)))
+				sources.id = string(network.sourceNodeset, ":") .* sources.id
+				targets.id = string(target_type, ":") .* targets.id
+				out_edges.src = string(network.sourceNodeset, ":") .* string.(out_edges.src)
+				out_edges.dst = string(target_type, ":") .* string.(out_edges.dst)
+				if verbose
+					println("The two nodesets share ids; ids were prefixed with their nodeset name")
+				end
+			end
+
+		#	Report
+			if verbose
+				println("Two-mode network: $(network.sourceNodeset) x $target_type")
+			end
+
+		#	Assembling Result
+			return out_edges, vcat(sources, targets)
+	end
+
+#	Helper Function for CLI: Attach Node Modes from a Node List Column
+	function _attach_node_modes(nodes::DataFrame, filepath::String, mode_column::String)
+		"""
+		Args:
+			nodes::DataFrame: node list from _load_node_list (:id, :label)
+			filepath::String: the node list file
+			mode_column::String: name of the column holding each node's mode
+		Returns:
+			DataFrame: nodes with an added :mode column
+		Notes:
+			Rows of the file and of nodes are in the same order.
+			Throws ArgumentError when the column is absent.
+		"""
+
+		#	Read the File
+			first_line = readline(filepath)
+			delimiter = occursin("\t", first_line) ? '\t' : ','
+			df = CSV.read(filepath, DataFrame; delim = delimiter)
+
+		#	Validation
+			column = findfirst(name -> lowercase(strip(name)) == lowercase(strip(mode_column)), names(df))
+			if column === nothing
+				throw(ArgumentError("Mode column '$mode_column' not found in $filepath. Columns: $(join(names(df), ", "))"))
+			end
+			if nrow(df) != nrow(nodes)
+				throw(ArgumentError("Node list $filepath could not be aligned with its mode column"))
+			end
+
+		#	Assembling Result
+			result = copy(nodes)
+			result.mode = strip.(string.(df[!, column]))
+			return result
+	end
+
+#	Helper Function for CLI: Settle Whether a Network Is Two-Mode and Project It if Asked
+	function _prepare_network_kind(edges::DataFrame, nodes::DataFrame, bipartite::Bool,
+								   project_onto::Union{Nothing,String}, weighting::String;
+								   name::String = "network", verbose::Bool = true)
+		"""
+		Args:
+			edges::DataFrame: edge list
+			nodes::DataFrame: node list, with :mode when declared
+			bipartite::Bool: whether the network is two-mode
+			project_onto::Union{Nothing,String}: mode to project a two-mode network onto, if any
+			weighting::String: projection weighting ("newman", "count", "jaccard")
+			name::String: network name for messages
+			verbose::Bool: Print diagnostic messages
+		Returns:
+			NamedTuple: (edges, nodes, bipartite::Bool, projection::Union{Nothing,NamedTuple})
+		Notes:
+			A one-mode network is returned unchanged.
+			A two-mode network is projected only when project_onto is given.
+		"""
+
+		#	Early return
+			if !bipartite || project_onto === nothing
+				return (edges = edges, nodes = nodes, bipartite = bipartite, projection = nothing)
+			end
+
+		#	Project
+			projection = Large_Graph_Similarity.project_bipartite(edges, nodes; onto = project_onto,
+																  weighting = Symbol(lowercase(weighting)))
+			if verbose
+				println("Projected $name onto '$(projection.onto)' ($(projection.weighting) weighting): " *
+						"$(projection.n_links) ties among $(nrow(projection.nodes)) nodes, $(projection.n_isolates) without a tie")
+			end
+
+		#	Assembling Result
+			return (edges = projection.edges, nodes = projection.nodes, bipartite = false, projection = projection)
+	end
+
 #	Helper Function for CLI: Load Partition
 	function _load_partition(filepath::String; node_list = nothing, verbose::Bool = true)
 		"""
@@ -543,13 +671,15 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 			ora_leiden::Union{Nothing,String}: ORA community attribute name
 			verbose::Bool: Print diagnostic messages
 		Returns:
-			NamedTuple: (edges, nodes, partition)
+			NamedTuple: (edges, nodes, partition, bipartite)
 		Notes:
 			Uses load_ora_xml to read an ORA XML file.
 			Lists available networks if requested network is not found.
 			Extracts the source nodeset from the selected network metadata.
 			Handles ORA partition attributes with missing values.
 			Partition schema: DataFrame(node = nodes.id, community = ::Vector{Int})
+			A network whose source and target nodesets differ is two-mode: nodes then
+			holds both nodesets with a :mode column, and bipartite is true.
 		"""
 
 		#	Load ORA XML
@@ -590,6 +720,12 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 
 			if sum(isempty.(nodes.label)) == nrow(nodes)
 				nodes.label = nodes.id
+			end
+
+		#	Add the target nodeset when the network is two-mode
+			bipartite = network.sourceNodeset != network.targetNodeset
+			if bipartite
+				edges, nodes = _two_mode_ora_nodes(metanet, network, edges, nodes; verbose = verbose)
 			end
 
 		#	Extract partition if specified
@@ -705,7 +841,7 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 			end
 
 		#	Return components
-			return (edges = edges, nodes = nodes, partition = partition)
+			return (edges = edges, nodes = nodes, partition = partition, bipartite = bipartite)
 	end
 
 #	Helper Function for CLI: Write Analysis Results
@@ -767,6 +903,7 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 									   output_dir::String;
 									   name_1::String = "network_1",
 									   name_2::String = "network_2",
+									   extra_info::Union{Nothing,DataFrame} = nothing,
 									   verbose::Bool = true)
 		"""
 		Args:
@@ -774,13 +911,16 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 			output_dir::String: Output directory path
 			name_1::String: Name prefix for first network (default = "network_1")
 			name_2::String: Name prefix for second network (default = "network_2")
+			extra_info::Union{Nothing,DataFrame}: further [:item, :value] rows for the comparison info table
 			verbose::Bool: Print diagnostic messages
 		Returns:
 			Nothing
 		Notes:
 			Creates comparison tables and similarity scores with filenames
 			that encode both network names, e.g.:
-				name_1_name_2_comparison_raw.csv
+				name_1_name_2_comparison.csv
+			One table of each kind is written: the aligned features, the similarity
+			score, the type contributions, and the node measure diagnostics.
 		"""
 		
 		#	Create output directory if needed
@@ -789,37 +929,17 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 		#	Build pair prefix for filenames
 			pair_prefix = "$(name_1)_$(name_2)"
 		
-		#	Split features for raw and asinh comparisons
-			is_raw_js = occursin.(r"^jsd_raw_", comparison_result.combined_features.measure)
-			is_asinh_js = occursin.(r"^jsd_asinh_", comparison_result.combined_features.measure)
-			is_non_js = .!(is_raw_js .| is_asinh_js)
-		
-		#	Create raw comparison table
-			raw_features = comparison_result.combined_features[is_non_js .| is_raw_js, :]
-			raw_path = joinpath(output_dir, "$(pair_prefix)_comparison_raw.csv")
-			CSV.write(raw_path, raw_features)
+		#	Write the aligned features
+			features_path = joinpath(output_dir, "$(pair_prefix)_comparison.csv")
+			CSV.write(features_path, comparison_result.combined_features)
 			if verbose
-				println("Wrote raw comparison to: $raw_path")
+				println("Wrote comparison to: $features_path")
 			end
 		
-		#	Create asinh comparison table
-			asinh_features = comparison_result.combined_features[is_non_js .| is_asinh_js, :]
-			asinh_path = joinpath(output_dir, "$(pair_prefix)_comparison_asinh.csv")
-			CSV.write(asinh_path, asinh_features)
-			if verbose
-				println("Wrote asinh comparison to: $asinh_path")
-			end
-		
-		#	Create similarity scores table
+		#	Write the similarity score
 			scores = DataFrame(
-				metric = ["overall_distance_raw",
-						  "overall_similarity_raw",
-						  "overall_distance_asinh",
-						  "overall_similarity_asinh"],
-				value = [comparison_result.overall_distance_raw,
-						 comparison_result.overall_similarity_raw,
-						 comparison_result.overall_distance_asinh,
-						 comparison_result.overall_similarity_asinh]
+				metric = ["overall_distance", "overall_similarity"],
+				value = [comparison_result.overall_distance, comparison_result.overall_similarity]
 			)
 			scores_path = joinpath(output_dir, "$(pair_prefix)_similarity_scores.csv")
 			CSV.write(scores_path, scores)
@@ -828,14 +948,40 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 			end
 		
 		#	Write type contributions
-			contrib_raw_path = joinpath(output_dir, "$(pair_prefix)_type_contributions_raw.csv")
-			CSV.write(contrib_raw_path, comparison_result.type_contributions_raw)
-			
-			contrib_asinh_path = joinpath(output_dir, "$(pair_prefix)_type_contributions_asinh.csv")
-			CSV.write(contrib_asinh_path, comparison_result.type_contributions_asinh)
-			
+			contributions_path = joinpath(output_dir, "$(pair_prefix)_type_contributions.csv")
+			CSV.write(contributions_path, comparison_result.type_contributions)
 			if verbose
-				println("Wrote type contributions to: $contrib_raw_path and $contrib_asinh_path")
+				println("Wrote type contributions to: $contributions_path")
+			end
+		
+		#	Write the node measure diagnostics (not part of the score)
+			diagnostics_path = joinpath(output_dir, "$(pair_prefix)_node_measure_diagnostics.csv")
+			CSV.write(diagnostics_path, comparison_result.node_measure_diagnostics)
+			if verbose
+				println("Wrote node measure diagnostics to: $diagnostics_path")
+			end
+		
+		#	Write which feature set was used, with modes and projections
+			if hasproperty(comparison_result, :comparison_info)
+				info = extra_info === nothing ? comparison_result.comparison_info : vcat(comparison_result.comparison_info, extra_info)
+				info_path = joinpath(output_dir, "$(pair_prefix)_comparison_info.csv")
+				CSV.write(info_path, info)
+				if verbose
+					println("Wrote comparison info to: $info_path")
+				end
+			end
+		
+		#	Write the features that are undefined in one or both networks (excluded from the score)
+			if hasproperty(comparison_result, :undefined_features)
+				undefined_path = joinpath(output_dir, "$(pair_prefix)_undefined_features.csv")
+				CSV.write(undefined_path, comparison_result.undefined_features)
+				if verbose
+					n_one_sided = count(!=("both"), comparison_result.undefined_features.undefined_in)
+					println("Wrote undefined features to: $undefined_path")
+					if n_one_sided > 0
+						println("Note: $n_one_sided feature(s) are defined in only one network and are not part of the similarity score.")
+					end
+				end
 			end
 		
 		#	Return nothing
@@ -877,6 +1023,9 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 			"link_statistics" => "Edge weight statistics",
 			"reciprocity" => "Calculate network reciprocity",
 			"assortativity_degree" => "Degree assortativity coefficient",
+			"bipartite_constructor" => "Compute statistics of a two-mode (bipartite) network",
+			"bipartite_feature_builder" => "Build the feature vector of a two-mode network",
+			"project_bipartite" => "Project a two-mode network onto one of its modes",
 			"network_comparator" => "Compare two networks comprehensively"
 		]
 		
@@ -928,6 +1077,9 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 				"link_statistics" => Large_Graph_Similarity.link_statistics,
 				"reciprocity" => Large_Graph_Similarity.reciprocity,
 				"assortativity_degree" => Large_Graph_Similarity.assortativity_degree,
+				"bipartite_constructor" => Large_Graph_Similarity.bipartite_constructor,
+				"bipartite_feature_builder" => Large_Graph_Similarity.bipartite_feature_builder,
+				"project_bipartite" => Large_Graph_Similarity.project_bipartite,
 				"network_comparator" => Large_Graph_Similarity.network_comparator
 			)
 		
@@ -1073,6 +1225,34 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 					arg_type = Bool
 					default = true
 					
+				"--bipartite"
+					help = "Treat edge-list networks as two-mode (bipartite). ORA networks are recognised from their nodesets"
+					arg_type = Bool
+					default = false
+					
+				"--mode-column"
+					help = "Node-list column naming each node's mode (two-mode networks)"
+					arg_type = String
+					
+				"--match-modes"
+					help = "Require the two networks' mode names to agree (two-mode networks)"
+					arg_type = Bool
+					default = true
+					
+				"--bin-width"
+				help = "Bin width for comparing node-level distributions (comparison mode). Scores from different widths are not comparable"
+				arg_type = Float64
+				default = 0.125
+				
+			"--project-onto"
+					help = "Project two-mode networks onto this mode (its name, or 'source' / 'target') and analyse the projection as an undirected one-mode network"
+					arg_type = String
+					
+				"--projection-weighting"
+					help = "Tie weights of a projection: newman, count, or jaccard"
+					arg_type = String
+					default = "newman"
+					
 				"--resolution"
 					help = "Resolution parameter for community detection"
 					arg_type = Float64
@@ -1138,6 +1318,7 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 			edges_1     = nothing
 			nodes_1     = nothing
 			partition_1 = nothing
+			bipartite_1 = parsed_args["bipartite"]
 			
 			if parsed_args["ora-xml-1"] !== nothing
 				#	Load from ORA
@@ -1155,6 +1336,7 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 					edges_1     = ora_data.edges
 					nodes_1     = ora_data.nodes
 					partition_1 = ora_data.partition
+					bipartite_1 = ora_data.bipartite
 				
 			elseif parsed_args["edgelist-1"] !== nothing
 				#	Load from CSV/TSV edge list
@@ -1163,6 +1345,9 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 				#	Node list: use provided nodelist if present; else construct from edges
 					if parsed_args["nodelist-1"] !== nothing
 						nodes_1 = _load_node_list(parsed_args["nodelist-1"]; verbose = verbose)
+						if bipartite_1 && parsed_args["mode-column"] !== nothing
+							nodes_1 = _attach_node_modes(nodes_1, parsed_args["nodelist-1"], parsed_args["mode-column"])
+						end
 					else
 						#	Construct canonical node list from edge endpoints
 							all_ids = union(edges_1.src, edges_1.dst)
@@ -1198,6 +1383,7 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 			edges_2     = nothing
 			nodes_2     = nothing
 			partition_2 = nothing
+			bipartite_2 = parsed_args["bipartite"]
 			
 			if mode == "comparison"
 				if parsed_args["ora-xml-2"] !== nothing
@@ -1216,6 +1402,7 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 						edges_2     = ora_data.edges
 						nodes_2     = ora_data.nodes
 						partition_2 = ora_data.partition
+						bipartite_2 = ora_data.bipartite
 					
 				elseif parsed_args["edgelist-2"] !== nothing
 					#	Load from CSV/TSV edge list
@@ -1224,6 +1411,9 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 					#	Node list: use provided nodelist if present; else construct from edges
 						if parsed_args["nodelist-2"] !== nothing
 							nodes_2 = _load_node_list(parsed_args["nodelist-2"]; verbose = verbose)
+							if bipartite_2 && parsed_args["mode-column"] !== nothing
+								nodes_2 = _attach_node_modes(nodes_2, parsed_args["nodelist-2"], parsed_args["mode-column"])
+							end
 						else
 							#	Construct canonical node list from edge endpoints
 								all_ids_2 = union(edges_2.src, edges_2.dst)
@@ -1250,6 +1440,38 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 				end
 			end
 		
+		#	Settle the kind of each network (two-mode, one-mode, or projection)
+			run_directed = parsed_args["directed"]
+			run_weighted = parsed_args["weighted"]
+			projection_info = DataFrame(item = String[], value = String[])
+
+			kind_1 = _prepare_network_kind(edges_1, nodes_1, bipartite_1, parsed_args["project-onto"],
+										   parsed_args["projection-weighting"]; name = parsed_args["name-1"], verbose = verbose)
+			edges_1, nodes_1, bipartite_1 = kind_1.edges, kind_1.nodes, kind_1.bipartite
+			kinds = Any[kind_1]
+			if mode == "comparison"
+				kind_2 = _prepare_network_kind(edges_2, nodes_2, bipartite_2, parsed_args["project-onto"],
+											   parsed_args["projection-weighting"]; name = parsed_args["name-2"], verbose = verbose)
+				edges_2, nodes_2, bipartite_2 = kind_2.edges, kind_2.nodes, kind_2.bipartite
+				push!(kinds, kind_2)
+			end
+
+		#	A projection is undirected, and binary when all its ties weigh 1
+			for (k, kind) in enumerate(kinds)
+				if kind.projection !== nothing
+					run_directed = false
+					if all(==(1.0), kind.projection.edges.weight)
+						run_weighted = false
+					end
+					append!(projection_info, DataFrame(
+						item = ["projection_$(k)_onto", "projection_$(k)_dropped", "projection_$(k)_weighting"],
+						value = [kind.projection.onto, kind.projection.dropped, string(kind.projection.weighting)]))
+				end
+			end
+			if nrow(projection_info) > 0 && verbose
+				println("Projections are analysed as undirected $(run_weighted ? "weighted" : "binary") one-mode networks")
+			end
+
 		#	Execute analysis or comparison
 			if mode == "analysis"
 				#	Announcing Analysis Mode
@@ -1258,14 +1480,22 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 					end
 				
 				#	Generating Data based on Network Type
-					if !parsed_args["directed"] && !parsed_args["weighted"]
+					if bipartite_1
+						#	Two-mode
+							global_stats, triad_census_counts, node_measures = bipartite_constructor(
+								edges_1, nodes_1; weighted = run_weighted)
+
+							feature_vector = bipartite_feature_builder(
+								global_stats, triad_census_counts, node_measures
+							)
+					elseif !run_directed && !run_weighted
 						#	Undirected / unweighted
 							global_stats, triad_census_counts, node_measures = undirected_binary_constructor(
 								edges_1, nodes_1;
 								resolution_sweep     = parsed_args["resolution-sweep"],
 								resolution           = parsed_args["resolution"],
-								directed             = parsed_args["directed"],
-								weighted             = parsed_args["weighted"],
+								directed             = run_directed,
+								weighted             = run_weighted,
 								n_resolutions        = parsed_args["n-resolutions"],
 								n_runs_per_gamma     = parsed_args["n-runs"],
 								n_iterations_per_run = parsed_args["n-iterations"],
@@ -1276,14 +1506,14 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 							feature_vector = symmetric_binary_feature_builder(
 								global_stats, triad_census_counts, node_measures
 							)
-					elseif !parsed_args["directed"] && parsed_args["weighted"]
+					elseif !run_directed && run_weighted
 						#	Undirected / weighted
 							global_stats, triad_census_counts, node_measures = undirected_weighted_constructor(
 								edges_1, nodes_1;
 								resolution_sweep     = parsed_args["resolution-sweep"],
 								resolution           = parsed_args["resolution"],
-								directed             = parsed_args["directed"],
-								weighted             = parsed_args["weighted"],
+								directed             = run_directed,
+								weighted             = run_weighted,
 								n_resolutions        = parsed_args["n-resolutions"],
 								n_runs_per_gamma     = parsed_args["n-runs"],
 								n_iterations_per_run = parsed_args["n-iterations"],
@@ -1294,14 +1524,14 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 							feature_vector = symmetric_weighted_feature_builder(
 								global_stats, triad_census_counts, node_measures
 							)
-					elseif parsed_args["directed"] && !parsed_args["weighted"]
+					elseif run_directed && !run_weighted
 						#	Directed / unweighted
 							global_stats, triad_census_counts, node_measures = directed_binary_constructor(
 								edges_1, nodes_1;
 								resolution_sweep     = parsed_args["resolution-sweep"],
 								resolution           = parsed_args["resolution"],
-								directed             = parsed_args["directed"],
-								weighted             = parsed_args["weighted"],
+								directed             = run_directed,
+								weighted             = run_weighted,
 								n_resolutions        = parsed_args["n-resolutions"],
 								n_runs_per_gamma     = parsed_args["n-runs"],
 								n_iterations_per_run = parsed_args["n-iterations"],
@@ -1318,8 +1548,8 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 								edges_1, nodes_1;
 								resolution_sweep     = parsed_args["resolution-sweep"],
 								resolution           = parsed_args["resolution"],
-								directed             = parsed_args["directed"],
-								weighted             = parsed_args["weighted"],
+								directed             = run_directed,
+								weighted             = run_weighted,
 								n_resolutions        = parsed_args["n-resolutions"],
 								n_runs_per_gamma     = parsed_args["n-runs"],
 								n_iterations_per_run = parsed_args["n-iterations"],
@@ -1349,14 +1579,17 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 						edges_1, nodes_1, edges_2, nodes_2;
 						resolution_sweep      = parsed_args["resolution-sweep"],
 						resolution            = parsed_args["resolution"],
-						directed              = parsed_args["directed"],
-						weighted              = parsed_args["weighted"],
+						directed              = run_directed,
+						weighted              = run_weighted,
 						n_resolutions         = parsed_args["n-resolutions"],
 						n_runs_per_gamma      = parsed_args["n-runs"],
 						n_iterations_per_run  = parsed_args["n-iterations"],
 						seed                  = parsed_args["seed"],
 						provided_membership_1 = partition_1,
-						provided_membership_2 = partition_2
+						provided_membership_2 = partition_2,
+						bipartite             = (bipartite_1, bipartite_2),
+						match_modes           = parsed_args["match-modes"],
+					bin_width             = parsed_args["bin-width"]
 					)
 
 				#	Ensure output directory exists for per-network tables
@@ -1399,6 +1632,7 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 						result, output_dir;
 						name_1 = parsed_args["name-1"],
 						name_2 = parsed_args["name-2"],
+						extra_info = nrow(projection_info) > 0 ? projection_info : nothing,
 						verbose = verbose
 					)
 			end
