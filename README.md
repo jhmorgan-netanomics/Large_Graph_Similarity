@@ -54,6 +54,8 @@ Scores computed with different bin widths are not comparable. Versions before 0.
 
 For weighted networks the triad census is taken over a grid of weight thresholds chosen for each network. Each triad type contributes three features: the area under its density curve (`<triad>_AUMC_density`), its peak density (`<triad>_peak_density`), and the position of its peak within the grid (`<triad>_peak_position`), from 0 at the lowest threshold to 1 at the highest, on the log scale. A position does not depend on the unit of the link weights. It is undefined for the empty triad (003) and for a type that never occurs, and is compared only where the type occurs in both networks. The census table keeps the peak threshold itself (`peak_tau`) for interpretation.
 
+In a sparse network most triad types are densest at the lowest threshold, so their position is 0 in both networks and the feature adds nothing to the distance. That is intended: the position counts where a type peaks in the interior of the grid, and is silent otherwise.
+
 In small networks (fewer than about 500 nodes), sampling alone produces a divergence close to that of a real difference. Compare `js_divergence` with `expected_noise` in `node_measure_diagnostics` before reading much into a single measure.
 
 ## Two-mode (bipartite) networks
@@ -95,7 +97,6 @@ To compare a two-mode network with a one-mode network, project it first: `projec
 
 - **Bipartite modularity (Barber, 2007).** Community detection is left out of the two-mode feature set, because standard modularity expects links within a mode, which a two-mode network cannot have. Adding Barber's null model to `leiden_community_detection` and `champ_community_detection` would restore the community features (partition sizes, modularity, in-group ratios, modularity vitality) for two-mode networks.
 - **Id-independent node ordering.** The Leiden partition no longer depends on row order, but it still depends on the ids: the same network under two id schemes can receive different partitions.
-- **Centre of the weighted triad density curves.** In sparse networks nearly every triad type is densest at the lowest threshold, so its peak position is 0 and says little. The density-weighted mean log threshold of each type, relative to the network's typical link weight, would say how strong the ties forming each type are. See finding 10 in `LGS_Pending_Fixes_28Oct2026.md`.
 
 ## References
 
