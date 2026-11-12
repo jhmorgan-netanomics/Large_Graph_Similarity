@@ -24,3 +24,10 @@ tmp/
 tmp/*
 jl_*.o
 jl_*.ji
+
+# Build and run logs (a build log can print environment variables, including API keys)
+*.log
+*.log.txt
+*_log.txt
+build_log*
+logs/

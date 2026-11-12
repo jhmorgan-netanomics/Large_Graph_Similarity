@@ -705,4 +705,53 @@ const LGS = Large_Graph_Similarity
 					@test info.value[findfirst(==("bin_width"), info.item)] == "0.25"
 				end
 		end
+
+	#	Weighted Triad Census: Peak Position within the Threshold Grid
+		@testset "Triad census peak position" begin
+			#	The position runs from 0 at the lowest threshold to 1 at the highest, on the log scale
+				@test LGS._relative_peak_position(1.0, 1.0, 100.0, 0.2, "102") == 0.0
+				@test LGS._relative_peak_position(100.0, 1.0, 100.0, 0.2, "102") == 1.0
+				@test LGS._relative_peak_position(10.0, 1.0, 100.0, 0.2, "102") ≈ 0.5
+
+			#	It does not depend on the unit of the weights
+				@test LGS._relative_peak_position(10.0, 1.0, 100.0, 0.2, "102") ≈ LGS._relative_peak_position(5000.0, 500.0, 50000.0, 0.2, "102")
+
+			#	Undefined for the empty triad, a type that never occurs, and a single-threshold grid
+				@test isnan(LGS._relative_peak_position(100.0, 1.0, 100.0, 0.9, "003"))
+				@test isnan(LGS._relative_peak_position(1.0, 1.0, 100.0, 0.0, "030C"))
+				@test isnan(LGS._relative_peak_position(1.0, 1.0, 1.0, 0.2, "102"))
+
+			#	Balikatan against a copy with every link weight multiplied by 1000
+				rescaled_arcs = copy(balikatan_arcs)
+				rescaled_arcs[!, 3] = 1000.0 .* Float64.(rescaled_arcs[!, 3])
+				rescaled = network_comparator(balikatan_arcs, balikatan_nodes, rescaled_arcs, balikatan_nodes;
+											  directed = true, weighted = true, resolution = 1.0)
+
+			#	The census table keeps the peak threshold and adds the position
+				census = rescaled.triad_census_counts_1
+				@test hasproperty(census, :peak_tau) && hasproperty(census, :peak_position)
+				@test isnan(census.peak_position[findfirst(==("003"), census.triad)])
+				@test all(isnan.(census.peak_position[census.peak_density .== 0.0]))
+				defined = census.peak_position[.!isnan.(census.peak_position)]
+				@test !isempty(defined) && all(0.0 .<= defined .<= 1.0)
+
+			#	The score uses the position, not the threshold, and has no position for the empty triad
+				features = rescaled.combined_features
+				@test !any(endswith.(features.measure, "_peak_tau"))
+				@test count(endswith.(features.measure, "_peak_position")) == 15
+				@test !("003_peak_position" in features.measure)
+
+			#	Every triad feature is on a bounded scale
+				triad_rows = features[features.type .== "Triad Census", :]
+				@test all(isfinite.(triad_rows.network_1_values))
+				@test all(endswith.(triad_rows.measure, "_AUMC_density") .| (0.0 .<= triad_rows.network_1_values .<= 1.0))
+
+			#	Rescaling every link weight leaves the triad features unchanged
+				rescaled_triads = rescaled.combined_features[rescaled.combined_features.type .== "Triad Census", :]
+				position_rows = endswith.(rescaled_triads.measure, "_peak_position")
+				@test rescaled_triads.network_1_values[position_rows] ≈ rescaled_triads.network_2_values[position_rows]
+
+			#	A position that is undefined adds nothing and is not reported as undefined
+				@test !any(endswith.(rescaled.undefined_features.measure, "_peak_position"))
+		end
 end

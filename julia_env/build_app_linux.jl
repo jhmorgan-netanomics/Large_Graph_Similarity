@@ -10,7 +10,6 @@
     Pkg.resolve()
     Pkg.instantiate()
 
-    ENV["JULIA_DEBUG"] = "PackageCompiler"
     ENV["JULIA_PKG_PRECOMPILE_AUTO"] = "0"
 
 #   Loading Compiler

@@ -4390,7 +4390,9 @@ THE SOFTWARE.
 	end
 	@doc raw"""
 	**Description**
-	SALSA hub or authority centrality for directed networks (Lempel & Moran, 2001). A node is a good hub when it points to nodes that many hubs point to, and a good authority when it is pointed to by nodes that point to many authorities. The scores are the stationary distributions of two random walks on the network.
+	SALSA hub or authority centrality for directed networks (Lempel & Moran, 2001). A node is a good hub when it points to nodes that many 
+    hubs point to, and a good authority when it is pointed to by nodes that point to many authorities. 
+    The scores are the stationary distributions of two random walks on the network.
 
 	**Usage**
 	`salsa_centrality(edges; score=:hub, weighted=false, include_self_loops=false, tol=1e-9, max_iter=10_000, agg_func=..., init=nothing, normalize=:l1)`
@@ -4407,17 +4409,24 @@ THE SOFTWARE.
 
 	**Details**
 	SALSA alternates between hubs and authorities like HITS, but normalizes each step, which turns the two updates into random walks:
-	- **Hub chain:** from a hub, step forward to one of its successors, then back to one of that node's predecessors. Its transition matrix is `D_out⁻¹ A D_in⁻¹ Aᵀ`.
-	- **Authority chain:** from an authority, step back to one of its predecessors, then forward to one of that node's successors. Its transition matrix is `D_in⁻¹ Aᵀ D_out⁻¹ A`.
+	- **Hub chain:** from a hub, step forward to one of its successors, then back to one of that node's predecessors. 
+      Its transition matrix is `D_out⁻¹ A D_in⁻¹ Aᵀ`.
+	- **Authority chain:** from an authority, step back to one of its predecessors, then forward to one of that node's successors. 
+      Its transition matrix is `D_in⁻¹ Aᵀ D_out⁻¹ A`.
 
-	The score of a node is its probability in the stationary distribution of its chain. Lempel and Moran show that this distribution has a closed form, so no iteration is needed (see also Boldi & Vigna, 2014):
-	1. Find the components of the chain. Two authorities are in one component when a chain of common predecessors connects them; two hubs when a chain of common successors does.
-	2. Within a component, an authority's score is its in-degree divided by the component's total in-degree. A hub's score is its out-degree divided by the component's total out-degree. With `weighted = true`, strengths take the place of degrees.
+	The score of a node is its probability in the stationary distribution of its chain. 
+    Lempel and Moran show that this distribution has a closed form, so no iteration is needed (see also Boldi & Vigna, 2014):
+	1. Find the components of the chain. Two authorities are in one component when a chain of common predecessors connects them; 
+       two hubs when a chain of common successors does.
+	2. Within a component, an authority's score is its in-degree divided by the component's total in-degree. 
+       A hub's score is its out-degree divided by the component's total out-degree. With `weighted = true`, strengths take the place of degrees.
 	3. Each component's scores are multiplied by the share of the initial distribution that lies on its nodes. With the default uniform start, that is the component's size divided by `n`.
 
 	A node with no out-links has hub score 0, and a node with no in-links has authority score 0. With `normalize = :l1` the scores sum to 1.
 
-	Because of step 2, SALSA scores are closely related to degree. They differ from a plain degree share only through the components: a node's degree is compared with its own component, and components are weighted by their number of nodes, not by their links.
+	Because of step 2, SALSA scores are closely related to degree. 
+    They differ from a plain degree share only through the components: a node's degree is compared with its own component, and 
+    components are weighted by their number of nodes, not by their links.
 
 	**Value**
 	`DataFrame` with columns `node` and `salsa_hub` (or `salsa_authority`).
@@ -9676,6 +9685,37 @@ THE SOFTWARE.
 			return Float64.(counts) ./ total_triads
 	end
 
+#	Helper Function for _triad_census_layered: Position of a Triad Type's Peak within the Threshold Grid
+	function _relative_peak_position(peak_tau::Float64, tau_min::Float64, tau_max::Float64, peak_density::Float64, triad::AbstractString)
+		"""
+		Args:
+			peak_tau::Float64: threshold at which the triad type is densest
+			tau_min::Float64: lowest threshold of the grid
+			tau_max::Float64: highest threshold of the grid
+			peak_density::Float64: density of the triad type at its peak
+			triad::AbstractString: triad type label
+		Returns:
+			Float64: position of the peak on the log scale of the grid, from 0 (lowest
+				threshold) to 1 (highest), or NaN when the position is undefined
+		Notes:
+			The position is undefined (NaN) in three cases:
+				- the empty triad (003), whose density can only rise as links are removed,
+				  so its peak is the top of the grid by construction;
+				- a triad type that never occurs (peak density 0);
+				- a grid with a single threshold.
+			A position does not depend on the unit of the link weights or on where the
+			network's grid starts and ends, so it can be compared between networks.
+		"""
+
+		#	Early return
+			if triad == "003" || !(peak_density > 0.0) || !(tau_min > 0.0) || !(tau_max > tau_min)
+				return NaN
+			end
+
+		#	Assembling Result
+			return clamp((log(peak_tau) - log(tau_min)) / (log(tau_max) - log(tau_min)), 0.0, 1.0)
+	end
+
 #	Triad Census Helper Function: AUMC over log10(τ) via Trapezoid Rule
 	function _aumc_logtau(tau::Vector{Float64}, y::Vector{Float64})
 		"""
@@ -11031,16 +11071,17 @@ THE SOFTWARE.
 		#	Tidy per-τ DataFrame
 			per_tau = DataFrame(per_tau_rows)
 
-		#	Summaries: AUMC over log10(τ), peak τ and peak density per triad
+		#	Summaries: AUMC over log10(τ), peak τ, peak density, and peak position per triad
 			summary_rows = Vector{NamedTuple}(undef, 0)
 			for tri in labels16
 				sub = per_tau[per_tau.triad .== tri, :]
 				if nrow(sub) == 0
-					push!(summary_rows, (triad=tri, AUMC_density=0.0, peak_tau=NaN, peak_density=0.0))
+					push!(summary_rows, (triad=tri, AUMC_density=0.0, peak_tau=NaN, peak_density=0.0, peak_position=NaN))
 				else
 					auc = _aumc_logtau(sub.tau, sub.density)
 					mx  = argmax(sub.density)
-					push!(summary_rows, (triad=tri, AUMC_density=auc, peak_tau=sub.tau[mx], peak_density=sub.density[mx]))
+					position = _relative_peak_position(Float64(sub.tau[mx]), Float64(first(tgrid)), Float64(last(tgrid)), Float64(sub.density[mx]), tri)
+					push!(summary_rows, (triad=tri, AUMC_density=auc, peak_tau=sub.tau[mx], peak_density=sub.density[mx], peak_position=position))
 				end
 			end
 			summary = DataFrame(summary_rows)
@@ -11275,7 +11316,14 @@ THE SOFTWARE.
 	  `:density` (count divided by $\binom{n}{3}$). One row per
 	  $(\tau, \text{triad})$ pair.
 	- `summary::DataFrame`: per-triad summary with `:triad`, `:AUMC_density`,
-	  `:peak_tau`, `:peak_density`.
+	  `:peak_tau`, `:peak_density`, `:peak_position`. `peak_tau` is the
+	  threshold at which the class is densest, in the units of the link weights.
+	  `peak_position` is the same peak as a position on the log scale of the
+	  threshold grid, from 0 (lowest threshold) to 1 (highest), so that it can
+	  be compared between networks whose weights and grids differ. It is
+	  undefined (`NaN`) for the empty triad (003), whose peak is the top of the
+	  grid by construction, for a class that never occurs, and for a grid with
+	  a single threshold.
 	- `meta::NamedTuple`: $n$, $L$, $\tau_{\min}$, $\tau_{\max}$, `graph_type`,
 	  `reciprocity_collapse`, `threaded`, `n_threads_used`.
 
@@ -13858,7 +13906,7 @@ THE SOFTWARE.
         
         Args:
             global_stats::DataFrame: Global network measures from undirected_weighted_constructor
-            triad_census_counts::DataFrame: Weighted triad census with columns [:triad, :AUMC_density, :peak_tau, :peak_density]
+            triad_census_counts::DataFrame: Weighted triad census with columns [:triad, :AUMC_density, :peak_tau, :peak_density, :peak_position]
             node_measures::DataFrame: Node-level statistics including community assignments
         Returns:
             DataFrame: Feature vector with columns [:type, :measure, :value]
@@ -13873,6 +13921,7 @@ THE SOFTWARE.
         #	Input validation
             @assert hasproperty(global_stats, :measure) && hasproperty(global_stats, :value) "global_stats needs :measure and :value"
             @assert hasproperty(triad_census_counts, :triad) && hasproperty(triad_census_counts, :peak_density) "triad_census needs :triad and :peak_density"
+            @assert hasproperty(triad_census_counts, :peak_position) "triad_census needs :peak_position"
             @assert hasproperty(node_measures, :node) "node_measures needs :node column"
 
         #	Deep copy inputs to prevent mutation
@@ -14008,15 +14057,16 @@ THE SOFTWARE.
             rename!(AUMC_density, ["measure", "value"])
             AUMC_density.measure = AUMC_density.measure .* "_AUMC_density"
 
-            peak_tau = triad_census_counts[:, [1, 3]]
-            rename!(peak_tau, ["measure", "value"])
-            peak_tau.measure = peak_tau.measure .* "_peak_tau"
+        #	Peak position within the threshold grid (the empty triad has none)
+            peak_position = triad_census_counts[triad_census_counts.triad .!= "003", [:triad, :peak_position]]
+            rename!(peak_position, ["measure", "value"])
+            peak_position.measure = peak_position.measure .* "_peak_position"
 
             peak_density = triad_census_counts[:, [1, 4]]
             rename!(peak_density, ["measure", "value"])
             peak_density.measure = peak_density.measure .* "_peak_density"
 
-            triad_features = vcat(AUMC_density, peak_tau, peak_density)
+            triad_features = vcat(AUMC_density, peak_position, peak_density)
             triad_features.type .= "Triad Census"
 
         #	========== K-CORE & S-CORE DECOMPOSITION ==========
@@ -15213,7 +15263,7 @@ THE SOFTWARE.
         
         Args:
             global_stats::DataFrame: Global network measures from directed_weighted_constructor
-            triad_census_counts::DataFrame: Weighted directed triad census with columns [:triad, :AUMC_density, :peak_tau, :peak_density]
+            triad_census_counts::DataFrame: Weighted directed triad census with columns [:triad, :AUMC_density, :peak_tau, :peak_density, :peak_position]
             node_measures::DataFrame: Node-level statistics including community assignments
         Returns:
             DataFrame: Feature vector with columns [:type, :measure, :value]
@@ -15229,6 +15279,7 @@ THE SOFTWARE.
         #	Input validation
             @assert hasproperty(global_stats, :measure) && hasproperty(global_stats, :value) "global_stats needs :measure and :value"
             @assert hasproperty(triad_census_counts, :triad) && hasproperty(triad_census_counts, :peak_density) "triad_census needs :triad and :peak_density"
+            @assert hasproperty(triad_census_counts, :peak_position) "triad_census needs :peak_position"
             @assert hasproperty(node_measures, :node) "node_measures needs :node column"
 
         #	Deep copy inputs to prevent mutation
@@ -15364,15 +15415,16 @@ THE SOFTWARE.
             rename!(AUMC_density, ["measure", "value"])
             AUMC_density.measure = AUMC_density.measure .* "_AUMC_density"
 
-            peak_tau = triad_census_counts[:, [1, 3]]
-            rename!(peak_tau, ["measure", "value"])
-            peak_tau.measure = peak_tau.measure .* "_peak_tau"
+        #	Peak position within the threshold grid (the empty triad has none)
+            peak_position = triad_census_counts[triad_census_counts.triad .!= "003", [:triad, :peak_position]]
+            rename!(peak_position, ["measure", "value"])
+            peak_position.measure = peak_position.measure .* "_peak_position"
 
             peak_density = triad_census_counts[:, [1, 4]]
             rename!(peak_density, ["measure", "value"])
             peak_density.measure = peak_density.measure .* "_peak_density"
 
-            triad_features = vcat(AUMC_density, peak_tau, peak_density)
+            triad_features = vcat(AUMC_density, peak_position, peak_density)
             triad_features.type .= "Triad Census"
 
         #	========== K-CORE & S-CORE DECOMPOSITION ==========
@@ -16183,7 +16235,8 @@ THE SOFTWARE.
 	end
 	@doc raw"""
 	**Description**
-	Compute the network-level and node-level statistics of a two-mode (bipartite) network, such as Agent x Hashtag or Agent x Tweet. Only measures that are defined for two modes are produced, and every node-level measure is kept separate for each mode.
+	Compute the network-level and node-level statistics of a two-mode (bipartite) network, such as Agent x Hashtag or Agent x Tweet. 
+    Only measures that are defined for two modes are produced, and every node-level measure is kept separate for each mode.
 
 	**Usage**
 	`bipartite_constructor(edges, nodes; weighted=true, mode_column=:mode, source_mode=nothing)`
@@ -16196,9 +16249,15 @@ THE SOFTWARE.
 	- `source_mode::Union{Nothing,AbstractString}`: Mode to treat as the source. By default the mode that sends most links.
 
 	**Details**
-	The two modes must be declared in `mode_column`. Without it, senders are taken as the "source" mode and receivers as the "target" mode, which works only when no node both sends and receives and no node is isolated. An `ArgumentError` is thrown when there are not exactly two modes, when a link joins two nodes of the same mode, or when an id is listed in both modes.
+	The two modes must be declared in `mode_column`. 
+    Without it, senders are taken as the "source" mode and receivers as the "target" mode, which works only when no node both sends and receives 
+    and no node is isolated. 
+    An `ArgumentError` is thrown when there are not exactly two modes, when a link joins two nodes of the same mode, 
+    or when an id is listed in both modes.
 
-	Link direction is kept. The source mode is measured by what it sends and the target mode by what it receives. Links that run from the target mode back to the source mode are allowed; they are counted as backward links and give each mode its second set of degrees.
+	Link direction is kept. The source mode is measured by what it sends and the target mode by what it receives. 
+    Links that run from the target mode back to the source mode are allowed; 
+    they are counted as backward links and give each mode its second set of degrees.
 
 	Measures:
 	- Sizes: nodes, nodes of each mode, links, forward and backward links.
@@ -16435,12 +16494,15 @@ THE SOFTWARE.
 	- `global_stats::DataFrame`: Global measures from `bipartite_constructor`.
 	- `triad_census_counts::DataFrame`: Not used. It is accepted so the call matches the one-mode feature builders.
 	- `node_measures::DataFrame`: Node-level measures from `bipartite_constructor`.
-	- `include_backward::Union{Nothing,Bool}`: Include the features that describe links from the target mode to the source mode. By default they are included only when the network has such links.
+	- `include_backward::Union{Nothing,Bool}`: Include the features that describe links from the target mode to the source mode. 
+       By default they are included only when the network has such links.
 
 	**Details**
-	Features are grouped into the types used by the one-mode builders: Component Measure, Link Measure, Global Network Measure, K-Core Decomposition, Degree Measures, Local Reach, Local Structure, and Influence. There is no Triad Census and no Community Structure type.
+	Features are grouped into the types used by the one-mode builders: Component Measure, Link Measure, Global Network Measure, K-Core Decomposition, 
+    Degree Measures, Local Reach, Local Structure, and Influence. There is no Triad Census and no Community Structure type.
 
-	Node-level features are named by role, with the prefix `source_` or `target_`, and are summarized by mean, median, standard deviation, skew, and kurtosis within that role. `network_comparator` replaces those summaries with Jensen-Shannon divergences between the two networks' distributions.
+	Node-level features are named by role, with the prefix `source_` or `target_`, and are summarized by mean, median, standard deviation, skew, 
+    and kurtosis within that role. `network_comparator` replaces those summaries with Jensen-Shannon divergences between the two networks' distributions.
 
 	`backward_density`, `reciprocity`, and the second set of degrees describe links from the target mode to the source mode. A network whose links all run one way has none, so these features are left out unless `include_backward = true`.
 
@@ -16572,7 +16634,9 @@ THE SOFTWARE.
 	end
 	@doc raw"""
 	**Description**
-	Project a two-mode (bipartite) network onto one of its modes. Two nodes of the kept mode are tied when they share at least one neighbour in the other mode. Use it when a two-mode network has to be compared with a one-mode network.
+	Project a two-mode (bipartite) network onto one of its modes. 
+    Two nodes of the kept mode are tied when they share at least one neighbour in the other mode. 
+    Use it when a two-mode network has to be compared with a one-mode network.
 
 	**Usage**
 	`project_bipartite(edges, nodes; onto, weighting=:newman, mode_column=:mode, max_pairs=10_000_000, hub_warning=1_000)`
@@ -17064,6 +17128,40 @@ THE SOFTWARE.
 			return nothing
 	end
 
+#	Helper Function for _global_metric_normalizer: Compare Peak Positions Only Where Both Are Defined
+	function _align_peak_positions!(features_1::DataFrame, features_2::DataFrame)
+		"""
+		Args:
+			features_1::DataFrame: feature vector of the first network
+			features_2::DataFrame: feature vector of the second network
+		Returns:
+			Nothing (modifies both in place)
+		Notes:
+			A triad type's peak position is undefined when the type does not occur.
+			When it is undefined in either network there is no position to compare, so
+			both sides are set to 0 and the feature adds nothing to the distance.
+			Whether the type occurs is carried by its density features.
+		"""
+
+		#	Peak position features of the first network
+			for index_1 in findall((features_1.type .== "Triad Census") .& endswith.(features_1.measure, "_peak_position"))
+				#	Locate the same feature in the second network
+					index_2 = findfirst((features_2.type .== "Triad Census") .& (features_2.measure .== features_1.measure[index_1]))
+					if index_2 === nothing
+						continue
+					end
+
+				#	Nothing to compare unless both are defined
+					if !(isfinite(features_1.value[index_1]) && isfinite(features_2.value[index_2]))
+						features_1.value[index_1] = 0.0
+						features_2.value[index_2] = 0.0
+					end
+			end
+
+		#	Assembling Result
+			return nothing
+	end
+
 #	Helper Function for network_comparator: Normalize Global Metrics
 	function _global_metric_normalizer(feature_vector_1::DataFrame,
 										feature_vector_2::DataFrame,
@@ -17113,6 +17211,9 @@ THE SOFTWARE.
 			_drop_link_extremes!(fv1)
 			_drop_link_extremes!(fv2)
 			_scale_link_measures!(fv1, fv2)
+
+		#	Triad Census transforms
+			_align_peak_positions!(fv1, fv2)
 
 		#	Normalized two-step reach
 			if bipartite
@@ -17791,7 +17892,8 @@ THE SOFTWARE.
 	end
 	@doc raw"""
 	**Description**
-	Compare two networks and return one similarity score between 0 and 1, where 1 means no measurable difference. The individual network analyses, the aligned features, and the tables that explain the score are returned with it.
+	Compare two networks and return one similarity score between 0 and 1, where 1 means no measurable difference. 
+    The individual network analyses, the aligned features, and the tables that explain the score are returned with it.
 
 	**Usage**
 	`network_comparator(edges_1, nodes_1, edges_2, nodes_2; resolution_sweep=false, resolution=1.0, directed=true, weighted=true, n_resolutions=15, n_runs_per_gamma=5, n_iterations_per_run=10, seed=nothing, provided_membership_1=nothing, provided_membership_2=nothing, bipartite=false, mode_column=:mode, match_modes=true, bin_width=0.125)`
@@ -17816,28 +17918,41 @@ THE SOFTWARE.
 	**Details**
 	Each network is reduced to a feature vector. The score is `1 / (1 + d)`, where `d` is the weighted Euclidean distance between the two vectors.
 
-	*Global features.* Density, components, reciprocity, and the other network-level measures enter as they are, with three adjustments. Node and link counts are put through `asinh`. The mean and standard deviation of link weights are divided by the larger of the two networks' values. The triad census is weighted so that the whole census counts as one feature.
+	*Global features.* Density, components, reciprocity, and the other network-level measures enter as they are, with three adjustments. 
+    Node and link counts are put through `asinh`. The mean and standard deviation of link weights are divided by the larger of the two networks' values. The triad census is weighted so that the whole census counts as one feature. 
+    For weighted networks the census is taken over a grid of weight thresholds, and each triad type contributes the area under its density curve, 
+    its peak density, and the position of its peak within the grid (0 at the lowest threshold, 1 at the highest). 
+    The peak position is compared only where the type occurs in both networks.
 
-	*Node-level distributions.* Each node measure (degree, reach, clustering, PageRank, and so on) contributes one feature: the distance between the two networks' distributions of that measure. Every measure is compared in the same way:
+	*Node-level distributions.* Each node measure (degree, reach, clustering, PageRank, and so on) contributes one feature: 
+     the distance between the two networks' distributions of that measure. Every measure is compared in the same way:
 	1. *Scale.* The typical value `s` is the median nonzero magnitude of the two distributions pooled, with the two networks weighted equally.
 	2. *Geometric axis.* Each node value `x` is placed at `u = asinh(x / s)`. The axis is linear near zero and logarithmic in the tails, so a heavy tail does not empty the bins that hold most nodes. Zeros and negative values keep their place.
 	3. *Bins.* The range runs from the joint minimum to the joint maximum and always includes zero. It is divided into bins of width `bin_width`, so a wider distribution gets more bins and not wider ones. At least two bins are used.
 	4. *Linear binning.* Each node is shared between the two nearest bin centres in proportion to its closeness. A small change in a value then moves a small amount of mass, where a hard bin edge would move the whole node.
 	5. *Divergence.* The feature is the square root of the Jensen-Shannon divergence (natural logarithm) between the two binned distributions. It lies between 0 and 0.83 and is a metric.
 
-	A smaller `bin_width` resolves finer differences and raises the noise from small networks by the same proportion. Scores computed with different bin widths are not comparable. `comparison_info` records the width that was used.
+	A smaller `bin_width` resolves finer differences and raises the noise from small networks by the same proportion. 
+    Scores computed with different bin widths are not comparable. `comparison_info` records the width that was used.
 
-	*Diagnostics.* `node_measure_diagnostics` reports, for each node measure, the divergence, the divergence expected from sampling alone, and the scaled Wasserstein-1 distance. They explain a score and are not part of it. The Wasserstein-1 distance is the average amount by which node values must move to turn one distribution into the other. It is divided here by the sum of the two mean magnitudes, which places it between 0 and 1.
+	*Diagnostics.* `node_measure_diagnostics` reports, for each node measure, the divergence, the divergence expected from sampling alone, 
+     and the scaled Wasserstein-1 distance. They explain a score and are not part of it. 
+     The Wasserstein-1 distance is the average amount by which node values must move to turn one distribution into the other. 
+     It is divided here by the sum of the two mean magnitudes, which places it between 0 and 1.
 
 	**Two-mode networks**
-	Set `bipartite = true` to compare two two-mode (bipartite) networks, such as two Agent x Hashtag networks. They are measured with `bipartite_constructor` and `bipartite_feature_builder`: a feature set without triads, transitivity, strong components, or communities, in which every node-level distribution is compared mode against mode. `directed`, `resolution`, and the memberships are not used.
+	Set `bipartite = true` to compare two two-mode (bipartite) networks, such as two Agent x Hashtag networks. 
+    They are measured with `bipartite_constructor` and `bipartite_feature_builder`: a feature set without triads, transitivity, strong components, 
+    or communities, in which every node-level distribution is compared mode against mode. `directed`, `resolution`, and the memberships are not used.
 
 	Three comparisons are refused with an `ArgumentError`:
-	1. A two-mode network against a one-mode network (`bipartite = (true, false)`). Project the two-mode network with `project_bipartite` and compare the projection as an undirected one-mode network.
+	1. A two-mode network against a one-mode network (`bipartite = (true, false)`). Project the two-mode network with `project_bipartite` and 
+       compare the projection as an undirected one-mode network.
 	2. Two-mode networks whose mode names differ, unless `match_modes = false`.
 	3. Two-mode networks that both run one way but in opposite directions, such as Agent x Tweet against Tweet x Agent.
 
-	A two-mode score rests on a different feature set from a one-mode score, so the two kinds of score are not comparable with each other. `comparison_info` records which feature set was used.
+	A two-mode score rests on a different feature set from a one-mode score, so the two kinds of score are not comparable with each other. 
+    `comparison_info` records which feature set was used.
 
 	**Value**
 	Returns a NamedTuple with fields:
@@ -17921,7 +18036,8 @@ THE SOFTWARE.
 									directed=false, weighted=true, resolution_sweep=true, bin_width=0.0625)
 	```
 	**See Also**
-	`undirected_binary_constructor`, `undirected_weighted_constructor`, `directed_binary_constructor`, `directed_weighted_constructor`, `bipartite_constructor`, `project_bipartite`
+	`undirected_binary_constructor`, `undirected_weighted_constructor`, `directed_binary_constructor`, `directed_weighted_constructor`, 
+    `bipartite_constructor`, `project_bipartite`
 
 	**References**
 	Burbidge, J. B., Magee, L., & Robb, A. L. (1988). Alternative transformations to handle extreme values of the dependent variable. *Journal of the American Statistical Association, 83*(401), 123-127.

@@ -1,0 +1,34 @@
+measure,benchmark,statistic,value_original,value_revised,passed,same
+weighted in-degree,ORA,largest difference,0.0,0.0,True,True
+weighted out-degree,ORA,largest difference,0.0,0.0,True,True
+weighted total degree,ORA,largest difference,0.0,0.0,True,True
+normalized total degree,ORA,largest deviation from a constant ratio,6.450958744963486e-08,6.450958744963486e-08,True,True
+normalized in-degree,ORA,Spearman rank correlation,0.987398443375192,0.987398443375192,True,True
+normalized out-degree,ORA,Spearman rank correlation,0.9763048256218824,0.9763048256218824,True,True
+local clustering (ego density),ORA,largest difference,0.0005,0.0005,True,True
+weighted clustering: cg_cycle,igraph (R),largest difference,0.0,0.0,True,True
+weighted clustering: cg_middleman,igraph (R),largest difference,0.0,0.0,True,True
+weighted clustering: cg_in,igraph (R),largest difference,0.0,0.0,True,True
+weighted clustering: cg_out,igraph (R),largest difference,0.0,0.0,True,True
+weighted clustering: cg_total,igraph (R),largest difference,0.0,0.0,True,True
+weighted clustering: barrat_local,igraph (R),nodes that differ,30.0,30.0,True,True
+weighted clustering: barrat_local,igraph (R),Spearman rank correlation,0.9999778026856928,0.9999778026856928,True,True
+weighted clustering: five-node example,igraph (R),largest difference,0.0,0.0,True,True
+PageRank (ORA style),ORA,Spearman rank correlation,0.9998232575888594,0.9998232872021506,True,False
+PageRank (ORA style),ORA,largest difference,0.0018366583797696,0.0018366555593694,True,False
+SALSA hub (binary),R: stationary distribution of the hub chain,summed absolute difference,0.696531118829865,3.634376680898901e-12,True,False
+"Leiden communities (weighted, resolution 1)",ORA,adjusted Rand index,0.864342224562477,0.8784518686743252,True,False
+modularity vitality (given partition),Python,largest difference,3.3306690738754696e-16,3.3306690738754696e-16,True,True
+modularity vitality: hub,ORA,Spearman rank correlation,0.9847771555444612,0.9920455115251412,True,False
+modularity vitality: bridge,ORA,Spearman rank correlation,0.9779900209299064,0.9943579169818884,True,False
+k-core (total),igraph (R),summed absolute difference,33.0,33.0,True,True
+k-core (out),igraph (R),summed absolute difference,43.0,43.0,True,True
+k-core (in),igraph (R),summed absolute difference,245.0,245.0,True,True
+k-core (undirected),ORA,summed absolute difference,0.0,0.0,True,True
+s-core (total),scoredec (R),summed absolute difference,0.0,0.0,True,True
+s-core (out),scoredec (R),summed absolute difference,0.0,0.0,True,True
+s-core (in),scoredec (R),summed absolute difference,0.0,0.0,True,True
+two-step reach (in),igraph (R),summed absolute difference,0.0,0.0,True,True
+two-step reach (out),igraph (R),summed absolute difference,0.0,0.0,True,True
+two-step reach (all),igraph (R),summed absolute difference,0.0,0.0,True,True
+triad census (reciprocity collapsed),Pajek,summed absolute difference,0.0,0.0,True,True
