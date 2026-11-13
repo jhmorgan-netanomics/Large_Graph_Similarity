@@ -1788,7 +1788,14 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 					if bipartite_1
 						#	Two-mode
 							global_stats, triad_census_counts, node_measures = bipartite_constructor(
-								edges_1, nodes_1; weighted = run_weighted)
+								edges_1, nodes_1; weighted = run_weighted,
+								resolution_sweep     = parsed_args["resolution-sweep"],
+								resolution           = parsed_args["resolution"],
+								n_resolutions        = parsed_args["n-resolutions"],
+								n_runs_per_gamma     = parsed_args["n-runs"],
+								n_iterations_per_run = parsed_args["n-iterations"],
+								seed                 = parsed_args["seed"],
+								provided_membership  = partition_1 isa Vector ? nothing : partition_1)
 
 							feature_vector = bipartite_feature_builder(
 								global_stats, triad_census_counts, node_measures

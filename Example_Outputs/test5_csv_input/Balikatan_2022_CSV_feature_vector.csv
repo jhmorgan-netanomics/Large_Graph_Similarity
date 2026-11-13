@@ -38,15 +38,15 @@ reciprocity,0.010413,Global Network Measure
 density,0.001713,Global Network Measure
 resolution,1.0,Global Network Measure
 modularity,0.586771,Global Network Measure
-003,0.988838,Triad Census
+003,0.98885,Triad Census
 012,0.01026,Triad Census
 102,0.000111,Triad Census
 021D,0.000703,Triad Census
 021U,1.2e-5,Triad Census
-021C,5.1e-5,Triad Census
+021C,4.1e-5,Triad Census
 111D,0.0,Triad Census
 111U,1.0e-5,Triad Census
-030T,1.2e-5,Triad Census
+030T,1.0e-5,Triad Census
 030C,0.0,Triad Census
 201,0.0,Triad Census
 120D,0.0,Triad Census
@@ -142,18 +142,18 @@ density_clustering_coefficient_kurtosis,-1.253873,Local Structure
 page_rank_mean,0.000803,Influence
 page_rank_median,0.000744,Influence
 page_rank_std,0.000273,Influence
-page_rank_skew,10.218371,Influence
-page_rank_kurtosis,136.845208,Influence
+page_rank_skew,10.218388,Influence
+page_rank_kurtosis,136.845553,Influence
 salsa_hub_mean,0.000803,Influence
 salsa_hub_median,0.0,Influence
-salsa_hub_std,0.002295,Influence
-salsa_hub_skew,2.508426,Influence
-salsa_hub_kurtosis,4.299106,Influence
+salsa_hub_std,0.003967,Influence
+salsa_hub_skew,11.277492,Influence
+salsa_hub_kurtosis,192.79508,Influence
 salsa_authority_mean,0.000803,Influence
-salsa_authority_median,0.000853,Influence
-salsa_authority_std,0.000201,Influence
-salsa_authority_skew,-3.761804,Influence
-salsa_authority_kurtosis,12.17072,Influence
+salsa_authority_median,0.000613,Influence
+salsa_authority_std,0.000831,Influence
+salsa_authority_skew,3.231689,Influence
+salsa_authority_kurtosis,14.74367,Influence
 modularity_vitality_hub_mean,2.7e-5,Influence
 modularity_vitality_hub_median,0.0,Influence
 modularity_vitality_hub_std,0.000546,Influence

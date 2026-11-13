@@ -16052,14 +16052,243 @@ THE SOFTWARE.
 			return [get(lookup, id, 0.0) for id in ids]
 	end
 
+#	Helper Function for Bipartite Constructor: Communities of a Two-Mode Network (Barber's Modularity)
+	function _bipartite_communities(oriented_edges::DataFrame, node_ids::Vector{String}, weighted::Bool;
+									resolution_sweep::Bool = false, resolution::Float64 = 1.0, n_resolutions::Int = 15,
+									n_runs_per_gamma::Int = 5, n_iterations_per_run::Int = 10,
+									seed::Union{Int,Nothing} = nothing,
+									provided_membership::Union{Nothing,DataFrame,Vector{Int},Dict} = nothing)
+		"""
+		Args:
+			oriented_edges::DataFrame: one row per linked pair, :src in the source mode and :dst in the target mode, with :weight
+			node_ids::Vector{String}: every node, source mode first
+			weighted::Bool: whether link weights are used
+			resolution_sweep, resolution, n_resolutions, n_runs_per_gamma, n_iterations_per_run, seed: as in the one-mode constructors
+			provided_membership: communities given by the caller (DataFrame with node and community, or Dict of id => community)
+		Returns:
+			NamedTuple:
+				- community::Vector{Int}: community of each node of node_ids, numbered 1..C
+				- resolution_used::Float64: resolution of the partition
+		Notes:
+			Barber (2007) expects a link between a source node and a target node in proportion to the product of
+			their degrees, and none between two nodes of one mode. Directed modularity computes exactly that when
+			every link runs from the source mode to the target mode: a source node has no in-degree, so no link is
+			expected between two source nodes, and likewise for two target nodes. The existing directed Leiden and
+			CHAMP are therefore run on the oriented links, with no change to their null model.
+			A node without links is a community of its own.
+			A network whose weights are all 1 is passed as binary, as the community functions require.
+		"""
+
+		#	Validation
+			if provided_membership isa Vector
+				throw(ArgumentError("For a two-mode network give the membership as a DataFrame (node, community) or a Dict of id => community."))
+			end
+
+		#	Without links every node is its own community
+			n = length(node_ids)
+			if nrow(oriented_edges) == 0
+				return (community = collect(1:n), resolution_used = resolution)
+			end
+
+		#	Weights are used only when they vary
+			use_weights = weighted && !all(==(1.0), oriented_edges.weight)
+			resolution_used = resolution
+			label_of = Dict{String,Int}()
+
+		#	Communities of the linked nodes
+			if provided_membership === nothing
+				solution = resolution_sweep ?
+					champ_community_detection(oriented_edges; resolution = nothing, resolution_range = (0.5, 1.8), n_resolutions = n_resolutions,
+											  weighted = use_weights, directed = true, n_runs_per_gamma = n_runs_per_gamma,
+											  n_iterations_per_run = n_iterations_per_run, seed = seed, show_progress = false) :
+					leiden_community_detection(oriented_edges; resolution = resolution, n_iterations = n_iterations_per_run,
+											   n_runs = n_runs_per_gamma, weighted = use_weights, directed = true, seed = seed, show_progress = false)
+				resolution_sweep && (resolution_used = solution.resolution_used)
+				names_found = solution.node_names isa DataFrame ? String.(solution.node_names.id) : String.(solution.node_names)
+				for (id, label) in zip(names_found, solution.membership)
+					label_of[id] = label
+				end
+			elseif provided_membership isa DataFrame
+				given = copy(provided_membership)
+				rename!(given, lowercase.(string.(propertynames(given))))
+				(hasproperty(given, :node) && hasproperty(given, :community)) || throw(ArgumentError("The membership table needs the columns node and community."))
+				for (id, label) in zip(string.(given.node), given.community)
+					label_of[id] = Int(label)
+				end
+			else
+				for (id, label) in provided_membership
+					label_of[string(id)] = Int(label)
+				end
+			end
+
+		#	Number the communities 1..C in order of first appearance; a node without one is its own community
+			community = zeros(Int, n)
+			renumbered = Dict{Int,Int}()
+			linked = Set(vcat(oriented_edges.src, oriented_edges.dst))
+			for (i, id) in enumerate(node_ids)
+				if haskey(label_of, id) && (id in linked || provided_membership !== nothing)
+					community[i] = get!(renumbered, label_of[id], length(renumbered) + 1)
+				end
+			end
+			next_label = length(renumbered)
+			for i in 1:n
+				if community[i] == 0
+					next_label += 1
+					community[i] = next_label
+				end
+			end
+
+		#	Assembling Result
+			return (community = community, resolution_used = resolution_used)
+	end
+
+#	Helper Function for Bipartite Constructor: Barber's Modularity and the Modularity Vitality of Every Node
+	function _barber_modularity_vitality(pairs::SparseMatrixCSC, source_community::Vector{Int}, target_community::Vector{Int},
+										 resolution::Float64)
+		"""
+		Args:
+			pairs::SparseMatrixCSC: source by target matrix of links (presence or weight)
+			source_community::Vector{Int}: community of each source node, numbered 1..C
+			target_community::Vector{Int}: community of each target node
+			resolution::Float64: resolution parameter
+		Returns:
+			NamedTuple:
+				- modularity::Float64: Barber's modularity of the partition (NaN without links)
+				- source::Vector{Float64}, target::Vector{Float64}: vitality of each node, the modularity
+					of the network less its modularity with that node removed and the partition kept
+		Notes:
+			Q = (1 / m) * sum over communities of (L_c - resolution * S_c * T_c / m), where m is the total
+			weight, L_c the weight inside community c, S_c the weight sent by its source nodes, and T_c the
+			weight received by its target nodes.
+			Removing a node changes m, the L of its community, its own side's total there, and the other
+			side's total in every community it is linked to; each is updated from the node's own links, so the
+			whole computation costs one pass over the links.
+			A node that carries every link leaves no network behind; its removal gives modularity 0.
+			Positive vitality marks a hub of its community, negative a bridge between communities.
+		"""
+
+		#	Community totals
+			n_source, n_target = size(pairs)
+			n_communities = max(maximum(source_community; init = 0), maximum(target_community; init = 0))
+			total = sum(pairs)
+			if total <= 0.0
+				return (modularity = NaN, source = zeros(Float64, n_source), target = zeros(Float64, n_target))
+			end
+			inside = 0.0
+			sent = zeros(Float64, n_communities)
+			received = zeros(Float64, n_communities)
+			source_strength = zeros(Float64, n_source)
+			target_strength = zeros(Float64, n_target)
+			source_inside = zeros(Float64, n_source)
+			target_inside = zeros(Float64, n_target)
+			source_cross = zeros(Float64, n_source)
+			target_cross = zeros(Float64, n_target)
+			rows = rowvals(pairs)
+			weights = nonzeros(pairs)
+			for t in 1:n_target
+				for k in nzrange(pairs, t)
+					s = rows[k]
+					w = weights[k]
+					source_strength[s] += w
+					target_strength[t] += w
+					sent[source_community[s]] += w
+					received[target_community[t]] += w
+					if source_community[s] == target_community[t]
+						inside += w
+						source_inside[s] += w
+						target_inside[t] += w
+					end
+				end
+			end
+			expected = sum(sent .* received)
+			modularity = (inside - resolution * expected / total) / total
+
+		#	For each node, the weight of its links times the other side's total in its partners' communities
+			for t in 1:n_target
+				for k in nzrange(pairs, t)
+					s = rows[k]
+					w = weights[k]
+					source_cross[s] += w * sent[target_community[t]]
+					target_cross[t] += w * received[source_community[s]]
+				end
+			end
+
+		#	Modularity with each node removed
+			source_vitality = zeros(Float64, n_source)
+			for s in 1:n_source
+				remaining = total - source_strength[s]
+				if source_strength[s] > 0.0
+					removed_expected = expected - source_strength[s] * received[source_community[s]] - source_cross[s] +
+									   source_strength[s] * source_inside[s]
+					removed = remaining > 0.0 ? (inside - source_inside[s] - resolution * removed_expected / remaining) / remaining : 0.0
+					source_vitality[s] = modularity - removed
+				end
+			end
+			target_vitality = zeros(Float64, n_target)
+			for t in 1:n_target
+				remaining = total - target_strength[t]
+				if target_strength[t] > 0.0
+					removed_expected = expected - target_strength[t] * sent[target_community[t]] - target_cross[t] +
+									   target_strength[t] * target_inside[t]
+					removed = remaining > 0.0 ? (inside - target_inside[t] - resolution * removed_expected / remaining) / remaining : 0.0
+					target_vitality[t] = modularity - removed
+				end
+			end
+
+		#	Assembling Result
+			return (modularity = modularity, source = source_vitality, target = target_vitality)
+	end
+
+#	Helper Function for Bipartite Constructor: Share of Each Node's Links That Stay in Its Community
+	function _bipartite_in_group_share(pairs::SparseMatrixCSC, source_community::Vector{Int}, target_community::Vector{Int})
+		"""
+		Args:
+			pairs::SparseMatrixCSC: source by target matrix of links (presence or weight)
+			source_community::Vector{Int}: community of each source node
+			target_community::Vector{Int}: community of each target node
+		Returns:
+			NamedTuple: (source::Vector{Float64}, target::Vector{Float64}), the share for each node; 0 for a node without links
+		"""
+
+		#	Totals within the community and overall
+			n_source, n_target = size(pairs)
+			source_inside = zeros(Float64, n_source)
+			source_total = zeros(Float64, n_source)
+			target_inside = zeros(Float64, n_target)
+			target_total = zeros(Float64, n_target)
+			rows = rowvals(pairs)
+			values = nonzeros(pairs)
+			for t in 1:n_target
+				for k in nzrange(pairs, t)
+					s = rows[k]
+					source_total[s] += values[k]
+					target_total[t] += values[k]
+					if source_community[s] == target_community[t]
+						source_inside[s] += values[k]
+						target_inside[t] += values[k]
+					end
+				end
+			end
+
+		#	Assembling Result
+			return (source = [total > 0.0 ? inside / total : 0.0 for (inside, total) in zip(source_inside, source_total)],
+					target = [total > 0.0 ? inside / total : 0.0 for (inside, total) in zip(target_inside, target_total)])
+	end
+
 #	Two-Mode Constructor: Network and Node Statistics for a Two-Mode Network
 	function bipartite_constructor(edges::DataFrame,
 								   nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}};
 								   weighted::Bool = true,
 								   mode_column::Union{Symbol,AbstractString} = :mode,
-								   source_mode::Union{Nothing,AbstractString} = nothing)
+								   source_mode::Union{Nothing,AbstractString} = nothing,
+								   resolution_sweep::Bool = false, resolution::Float64 = 1.0, n_resolutions::Int = 15,
+								   n_runs_per_gamma::Int = 5, n_iterations_per_run::Int = 10,
+								   seed::Union{Int,Nothing} = nothing,
+								   provided_membership::Union{Nothing,DataFrame,Vector{Int},Dict} = nothing)
 		"""
 		Args:
+			resolution_sweep, resolution, n_resolutions, n_runs_per_gamma, n_iterations_per_run, seed, provided_membership:
+				community detection settings, as in the one-mode constructors
 			edges::DataFrame: edge list with :src, :dst, optional :weight
 			nodes::Union{Nothing,DataFrame,Vector}: node universe; a DataFrame may carry the mode column
 			weighted::Bool: use link weights (default = true)
@@ -16073,7 +16302,7 @@ THE SOFTWARE.
 		Notes:
 			Link direction is kept. The source mode sends, the target mode receives.
 			Links may also run from target to source; those are the backward links.
-			Community measures are omitted: standard modularity has the wrong null model here.
+			Communities are found with Barber's (2007) two-mode modularity; see _bipartite_communities.
 			Used by network_comparator when bipartite = true.
 		"""
 
@@ -16253,6 +16482,41 @@ THE SOFTWARE.
 			node_stats.source_salsa_hub = _role_column(hub_scores, :source, n_source, n_target)
 			node_stats.target_salsa_authority = _role_column(authority_scores, :target, n_source, n_target)
 
+		#	========== COMMUNITY MEASURES (BARBER'S TWO-MODE MODULARITY) ==========
+
+		#	Communities, on the links oriented from the source mode to the target mode
+			community_pairs = weighted ? combined : skeleton
+			oriented_sources, oriented_targets, oriented_weights = findnz(community_pairs)
+			oriented_edges = DataFrame(src = source_ids[oriented_sources], dst = target_ids[oriented_targets], weight = Float64.(oriented_weights))
+			communities = _bipartite_communities(oriented_edges, node_ids, weighted;
+												 resolution_sweep = resolution_sweep, resolution = resolution, n_resolutions = n_resolutions,
+												 n_runs_per_gamma = n_runs_per_gamma, n_iterations_per_run = n_iterations_per_run,
+												 seed = seed, provided_membership = provided_membership)
+			node_stats.community = communities.community
+			source_community = communities.community[1:n_source]
+			target_community = communities.community[(n_source + 1):end]
+
+		#	Barber's modularity of the partition, and each node's modularity vitality
+			barber = _barber_modularity_vitality(community_pairs, source_community, target_community, communities.resolution_used)
+			append!(global_measures, DataFrame(measure = ["resolution", "modularity"],
+											   value = string.(round.([communities.resolution_used, barber.modularity], digits = 6))))
+
+		#	Share of each node's links that stay in its community
+			in_group = _bipartite_in_group_share(skeleton, source_community, target_community)
+			node_stats.source_in_group_ratio = _role_column(in_group.source, :source, n_source, n_target)
+			node_stats.target_in_group_ratio = _role_column(in_group.target, :target, n_source, n_target)
+			if weighted
+				in_group_strength = _bipartite_in_group_share(combined, source_community, target_community)
+				node_stats.source_in_group_strength_fraction = _role_column(in_group_strength.source, :source, n_source, n_target)
+				node_stats.target_in_group_strength_fraction = _role_column(in_group_strength.target, :target, n_source, n_target)
+			end
+
+		#	Modularity vitality: hub and bridge
+			node_stats.source_modularity_vitality_hub = _role_column(max.(barber.source, 0.0), :source, n_source, n_target)
+			node_stats.target_modularity_vitality_hub = _role_column(max.(barber.target, 0.0), :target, n_source, n_target)
+			node_stats.source_modularity_vitality_bridge = _role_column(max.(-barber.source, 0.0), :source, n_source, n_target)
+			node_stats.target_modularity_vitality_bridge = _role_column(max.(-barber.target, 0.0), :target, n_source, n_target)
+
 		#	Assembling Result
 			triads_summary = DataFrame(triad = String[], count = Int[])
 			return global_measures, triads_summary, node_stats
@@ -16293,7 +16557,12 @@ THE SOFTWARE.
 	- `four_cycle_clustering`: Robins and Alexander's coefficient, four times the number of four-cycles divided by the number of three-paths.
 	- Per node and per mode: degree and strength normalized by the size of the other mode, two-step reach normalized by the other nodes of the same mode, Latapy's pairwise clustering coefficient, k-core number, standard PageRank on the undirected form (uniform teleport over all nodes), SALSA hub score (source mode) and authority score (target mode).
 
-	Transitivity, local clustering, the triad census, strong components, and self-loop statistics are not defined for a two-mode network and are not produced. Community detection is omitted because standard modularity assumes links within a mode; a bipartite modularity (Barber, 2007) is future work.
+	Transitivity, local clustering, the triad census, strong components, and self-loop statistics are not defined for a two-mode network and are not produced. 
+    Communities are found with Barber's (2007) two-mode modularity, which expects a link between a source node and a target node in proportion 
+    to the product of their degrees and none within a mode. It equals directed modularity on the links oriented from the source mode to the 
+    target mode, so the Leiden and CHAMP routines of the one-mode constructors are used (`resolution_sweep`, `resolution`, `n_resolutions`, 
+    `n_runs_per_gamma`, `n_iterations_per_run`, `seed`, `provided_membership`). The constructor reports the modularity, each node's community, 
+    the share of its links that stay in its community, and its modularity vitality (hub and bridge) under the same null model.
 
 	The two-step statistics cost the sum of squared degrees, so a node linked to a very large share of the other mode makes them slow.
 
@@ -16454,6 +16723,9 @@ THE SOFTWARE.
 				append!(global_names, ["backward_density", "reciprocity"])
 			end
 			append!(global_names, ["degree assortativity", "four_cycle_clustering"])
+			for name in ("resolution", "modularity")
+				name in string.(global_stats.measure) && push!(global_names, name)
+			end
 			global_features = DataFrame(
 				type = fill("Global Network Measure", length(global_names)),
 				measure = global_names,
@@ -16491,8 +16763,27 @@ THE SOFTWARE.
 				("source_page_rank", "Influence", false),
 				("target_page_rank", "Influence", false),
 				("source_salsa_hub", "Influence", false),
-				("target_salsa_authority", "Influence", false)
+				("target_salsa_authority", "Influence", false),
+				("source_in_group_ratio", "Degree Measures", false),
+				("target_in_group_ratio", "Degree Measures", false),
+				("source_in_group_strength_fraction", "Degree Measures", false),
+				("target_in_group_strength_fraction", "Degree Measures", false),
+				("source_modularity_vitality_hub", "Influence", false),
+				("target_modularity_vitality_hub", "Influence", false),
+				("source_modularity_vitality_bridge", "Influence", false),
+				("target_modularity_vitality_bridge", "Influence", false)
 			]
+
+		#	========== COMMUNITY STRUCTURE ==========
+
+		#	Share of all nodes in each community, largest first
+			community_features = DataFrame(type = String[], measure = String[], value = Float64[])
+			if hasproperty(node_measures, :community)
+				sizes = sort(collect(values(countmap(node_measures.community))); rev = true)
+				for (rank, size) in enumerate(sizes)
+					push!(community_features, ("Community Structure", "Community_$(rank)", round(size / max(n_nodes, 1.0), digits = 6)))
+				end
+			end
 
 		#	Compute Moments
 			node_features = DataFrame(type = String[], measure = String[], value = Float64[])
@@ -16504,7 +16795,7 @@ THE SOFTWARE.
 
 		#	Assembling Result (column order matches the one-mode builders)
 			feature_vector = vcat(size_features, wcc_features, kind_features, link_features,
-								  global_features, k_core_features, node_features)
+								  global_features, k_core_features, community_features, node_features)
 			return select(feature_vector, :measure, :value, :type)
 	end
 	@doc raw"""
@@ -16523,7 +16814,7 @@ THE SOFTWARE.
 
 	**Details**
 	Features are grouped into the types used by the one-mode builders: Component Measure, Link Measure, Global Network Measure, K-Core Decomposition, 
-    Degree Measures, Local Reach, Local Structure, and Influence. There is no Triad Census and no Community Structure type.
+    Degree Measures, Local Reach, Local Structure, Influence, and Community Structure (from Barber's two-mode modularity). There is no Triad Census.
 
 	Node-level features are named by role, with the prefix `source_` or `target_`, and are summarized by mean, median, standard deviation, skew, 
     and kurtosis within that role. `network_comparator` replaces those summaries with Jensen-Shannon divergences between the two networks' distributions.
@@ -18069,7 +18360,7 @@ THE SOFTWARE.
 	end
 
 #	Version Recorded with Each Comparison
-	const LGS_VERSION = "0.4.2"
+	const LGS_VERSION = "0.5.0"
 
 #	Sampling Noise of a Node Measure Divergence (see _sampling_noise)
 	const NOISE_PRIOR_FACTOR = 2.0 / 3.0
@@ -18576,9 +18867,13 @@ THE SOFTWARE.
 
 				#	Compute statistics
 					global_stats_1, triad_census_counts_1, node_measures_1 = bipartite_constructor(
-						clean_edges_1, clean_nodes_1; weighted = weighted, mode_column = mode_column, source_mode = source_mode_1)
+						clean_edges_1, clean_nodes_1; weighted = weighted, mode_column = mode_column, source_mode = source_mode_1,
+						resolution_sweep = resolution_sweep, resolution = resolution, n_resolutions = n_resolutions,
+						n_runs_per_gamma = n_runs_per_gamma, n_iterations_per_run = n_iterations_per_run, seed = seed, provided_membership = provided_membership_1)
 					global_stats_2, triad_census_counts_2, node_measures_2 = bipartite_constructor(
-						clean_edges_2, clean_nodes_2; weighted = weighted, mode_column = mode_column, source_mode = source_mode_2)
+						clean_edges_2, clean_nodes_2; weighted = weighted, mode_column = mode_column, source_mode = source_mode_2,
+						resolution_sweep = resolution_sweep, resolution = resolution, n_resolutions = n_resolutions,
+						n_runs_per_gamma = n_runs_per_gamma, n_iterations_per_run = n_iterations_per_run, seed = seed, provided_membership = provided_membership_2)
 
 				#	Build feature vectors on one shared feature set
 					backward_1 = parse(Int64, global_stats_1.value[findfirst(==("num_backward_edges"), global_stats_1.measure)])
@@ -18746,8 +19041,9 @@ THE SOFTWARE.
 
 	**Two-mode networks**
 	Set `bipartite = true` to compare two two-mode (bipartite) networks, such as two Agent x Hashtag networks. 
-    They are measured with `bipartite_constructor` and `bipartite_feature_builder`: a feature set without triads, transitivity, strong components, 
-    or communities, in which every node-level distribution is compared mode against mode. `directed`, `resolution`, and the memberships are not used.
+    They are measured with `bipartite_constructor` and `bipartite_feature_builder`: a feature set without triads, transitivity, or strong components, 
+    in which every node-level distribution is compared mode against mode. Communities are found with Barber's two-mode modularity, 
+    using the same community settings, seed, and memberships (given by node id) as for one-mode networks. `directed` is not used.
 
 	Three comparisons are refused with an `ArgumentError`:
 	1. A two-mode network against a one-mode network (`bipartite = (true, false)`). Project the two-mode network with `project_bipartite` and 
@@ -19040,7 +19336,9 @@ THE SOFTWARE.
 					source_mode = modes.source_mode
 					target_mode = modes.target_mode
 					global_stats, triad_census_counts, node_measures = bipartite_constructor(
-						clean_edges, clean_nodes; weighted = network_type.weighted, mode_column = mode_column, source_mode = source_mode)
+						clean_edges, clean_nodes; weighted = network_type.weighted, mode_column = mode_column, source_mode = source_mode,
+						resolution_sweep = resolution_sweep, resolution = resolution, n_resolutions = n_resolutions,
+						n_runs_per_gamma = n_runs_per_gamma, n_iterations_per_run = n_iterations_per_run, seed = seed, provided_membership = provided_membership)
 			else
 				#	One-mode
 					global_stats, triad_census_counts, node_measures = _construct_one_mode(
@@ -19369,7 +19667,13 @@ THE SOFTWARE.
 
 				#	Compute statistics
 					global_stats_2, triad_census_counts_2, node_measures_2 = bipartite_constructor(
-						clean_edges, clean_nodes; weighted = reference.weighted, mode_column = mode_column, source_mode = source_mode)
+						clean_edges, clean_nodes; weighted = reference.weighted, mode_column = mode_column, source_mode = source_mode,
+						resolution_sweep = _reference_setting(reference, "resolution_sweep") == "true",
+						resolution = parse(Float64, _reference_setting(reference, "resolution")),
+						n_resolutions = parse(Int, _reference_setting(reference, "n_resolutions")),
+						n_runs_per_gamma = parse(Int, _reference_setting(reference, "n_runs_per_gamma")),
+						n_iterations_per_run = parse(Int, _reference_setting(reference, "n_iterations_per_run")),
+						seed = seed, provided_membership = provided_membership)
 
 				#	Build feature vectors on one shared feature set
 					backward_1 = parse(Int64, reference.global_stats.value[findfirst(==("num_backward_edges"), reference.global_stats.measure)])

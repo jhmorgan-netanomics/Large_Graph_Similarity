@@ -124,6 +124,12 @@ To make this possible `network_comparator` was divided into three steps that bot
 
 *Considered and not built:* a degree-informed correction per measure, per-measure constants, and a simulated reference inside LGS.
 
+**Addition, 13 November 2026 (version 0.5.0): communities for two-mode networks (Barber, 2007).** Two-mode scores change; one-mode scores do not. The two-mode feature set had no community features, because standard modularity expects links within a mode. Barber's modularity expects a link between a source node and a target node in proportion to the product of their degrees and none within a mode. It is identical to directed modularity on the links oriented from the source mode to the target mode: a source node has no in-degree, so no link is expected between two source nodes. The existing directed Leiden and CHAMP are therefore used without change to their null model. Restored for two-mode networks: the modularity (and resolution), the share of all nodes in each community, and per mode the share of a node's links that stay in its community (with the weighted form) and its modularity vitality, hub and bridge.
+
+*Modularity vitality.* `modularity_vitality` computes the modularity after a node's removal with the undirected formula, which is the wrong null model for two modes. For two-mode networks the vitality is computed directly under Barber's null model, in one pass over the links (`_barber_modularity_vitality`). It agrees with removal of the node and recomputation to 1e-9.
+
+*Checked.* The reported modularity equals Barber's formula computed directly, and the package's directed modularity on the oriented links; two planted blocks are recovered in weighted and binary form; a two-mode network against itself in another row order scores exactly 1; a comparison with a reference equals the comparison of the pair.
+
 The sections below are the record as written on 28 and 29 October; line numbers refer to the file before the repairs.
 
 Line numbers refer to `julia_env/src/Large_Graph_Similarity.jl` as of 28 October 2026 (625,916 bytes).

@@ -1,0 +1,14 @@
+item,value
+feature_set,one-mode undirected weighted
+node_measure_binning,"geometric axis, fixed bin width, linear binning"
+bin_width,0.125
+lgs_version,0.5.0
+declared_type,undirected weighted
+found_type_1,"not symmetric, weights vary"
+found_type_2,"symmetric, weights vary"
+type_note,
+node_key,id
+node_overlap,0.06
+min_node_overlap,0.75
+edge_agreement_note,"not computed: 24 of 400 nodes are in both networks (6.0%), below min_node_overlap = 0.75; nodes matched on id"
+weight_scale_note,"the largest weights differ (635.0 and 875.0, ratio 1.378); the 95th percentiles are 57.0 and 23.0; the weight distributions differ by 0.4163 as they are and by 0.5708 after division by the largest weight; divided by it: total_degree_normalized"

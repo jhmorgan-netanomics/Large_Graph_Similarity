@@ -1,0 +1,3 @@
+measure,type,network_1_values,network_2_values,undefined_in
+self_loops_mean,Link Measure,NaN,NaN,both
+self_loops_std,Link Measure,NaN,NaN,both

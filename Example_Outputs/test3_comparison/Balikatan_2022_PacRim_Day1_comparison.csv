@@ -1,0 +1,107 @@
+measure,network_1_values,network_2_values,type,weight_1,weight_2,weight
+num_nodes,7.898782494756193,6.841616617903061,Component Measure,1.0,1.0,1.0
+num_edges,8.74703428943754,7.965545693693241,Component Measure,1.0,1.0,1.0
+largest_wcc_proportion,0.806978,0.989316,Component Measure,1.0,1.0,1.0
+second_largest_wcc_proportion,0.040089,0.002137,Component Measure,1.0,1.0,1.0
+min_wcc_size_proportion,0.000742,0.002137,Component Measure,1.0,1.0,1.0
+largest_scc_proportion,0.013363,0.017094,Component Measure,1.0,1.0,1.0
+second_largest_scc_proportion,0.005197,0.010684,Component Measure,1.0,1.0,1.0
+num_isolates_proportion,0.764706,0.833333,Component Measure,1.0,1.0,1.0
+num_dyads_proportion,0.095588,0.0,Component Measure,1.0,1.0,1.0
+num_triads_proportion,0.051471,0.0,Component Measure,1.0,1.0,1.0
+num_groups_proportion,0.088235,0.166667,Component Measure,1.0,1.0,1.0
+bow_tie_scc_fraction,0.013363028953229399,0.017094017094017096,Component Measure,1.0,1.0,1.0
+bow_tie_in_fraction,0.014847809948032665,0.023504273504273504,Component Measure,1.0,1.0,1.0
+bow_tie_out_fraction,0.6139569413511508,0.37393162393162394,Component Measure,1.0,1.0,1.0
+all_link_mean,1.0,1.0,Link Measure,1.0,1.0,1.0
+all_link_std,0.0,0.0,Link Measure,1.0,1.0,1.0
+non_self_proportion,0.9869675778766688,0.9979166666666667,Link Measure,1.0,1.0,1.0
+non_self_mean,1.0,1.0,Link Measure,1.0,1.0,1.0
+non_self_std,0.0,0.0,Link Measure,1.0,1.0,1.0
+self_loops_proportion,0.013032422123331213,0.0020833333333333333,Link Measure,1.0,1.0,1.0
+self_loops_mean,1.0,1.0,Link Measure,1.0,1.0,1.0
+self_loops_std,0.0,0.0,Link Measure,1.0,1.0,1.0
+degree assortativity,-0.165304,-0.027552,Global Network Measure,1.0,1.0,1.0
+transitivity,0.231834,0.427135,Global Network Measure,1.0,1.0,1.0
+local clustering coefficient,0.426538,0.454382,Global Network Measure,1.0,1.0,1.0
+reciprocity,0.010413,0.007008,Global Network Measure,1.0,1.0,1.0
+density,0.001713,0.006575,Global Network Measure,1.0,1.0,1.0
+resolution,1.0,1.0,Global Network Measure,1.0,1.0,1.0
+modularity,0.597574,0.417672,Global Network Measure,1.0,1.0,1.0
+003,0.98885,0.968046,Triad Census,0.0625,0.0625,0.0625
+012,0.01026,0.023851,Triad Census,0.0625,0.0625,0.0625
+102,0.000111,0.000187,Triad Census,0.0625,0.0625,0.0625
+021D,0.000703,0.007607,Triad Census,0.0625,0.0625,0.0625
+021U,1.2e-5,3.2e-5,Triad Census,0.0625,0.0625,0.0625
+021C,4.1e-5,0.000128,Triad Census,0.0625,0.0625,0.0625
+111D,0.0,2.0e-6,Triad Census,0.0625,0.0625,0.0625
+111U,1.0e-5,6.2e-5,Triad Census,0.0625,0.0625,0.0625
+030T,1.0e-5,5.6e-5,Triad Census,0.0625,0.0625,0.0625
+030C,0.0,0.0,Triad Census,0.0625,0.0625,0.0625
+201,0.0,0.0,Triad Census,0.0625,0.0625,0.0625
+120D,0.0,1.0e-6,Triad Census,0.0625,0.0625,0.0625
+120U,2.0e-6,2.6e-5,Triad Census,0.0625,0.0625,0.0625
+120C,0.0,0.0,Triad Census,0.0625,0.0625,0.0625
+210,0.0,1.0e-6,Triad Census,0.0625,0.0625,0.0625
+300,0.0,0.0,Triad Census,0.0625,0.0625,0.0625
+Community_1,0.1751,0.551724,Community Structure,1.0,1.0,1.0
+Community_2,0.169478,0.428879,Community Structure,1.0,1.0,1.0
+Community_3,0.131727,0.008621,Community Structure,1.0,1.0,1.0
+Community_4,0.11004,0.00431,Community Structure,1.0,1.0,1.0
+Community_5,0.095582,0.00431,Community Structure,1.0,1.0,1.0
+Community_6,0.086747,0.002155,Community Structure,1.0,1.0,1.0
+Community_7,0.043373,0.0,Community Structure,1.0,0.0,1.0
+Community_8,0.033735,0.0,Community Structure,1.0,0.0,1.0
+Community_9,0.033735,0.0,Community Structure,1.0,0.0,1.0
+Community_10,0.032129,0.0,Community Structure,1.0,0.0,1.0
+Community_11,0.007229,0.0,Community Structure,1.0,0.0,1.0
+Community_12,0.005622,0.0,Community Structure,1.0,0.0,1.0
+Community_13,0.004819,0.0,Community Structure,1.0,0.0,1.0
+Community_14,0.004819,0.0,Community Structure,1.0,0.0,1.0
+Community_15,0.004819,0.0,Community Structure,1.0,0.0,1.0
+Community_16,0.004819,0.0,Community Structure,1.0,0.0,1.0
+Community_17,0.004016,0.0,Community Structure,1.0,0.0,1.0
+Community_18,0.003213,0.0,Community Structure,1.0,0.0,1.0
+Community_19,0.003213,0.0,Community Structure,1.0,0.0,1.0
+Community_20,0.003213,0.0,Community Structure,1.0,0.0,1.0
+Community_21,0.003213,0.0,Community Structure,1.0,0.0,1.0
+Community_22,0.00241,0.0,Community Structure,1.0,0.0,1.0
+Community_23,0.00241,0.0,Community Structure,1.0,0.0,1.0
+Community_24,0.00241,0.0,Community Structure,1.0,0.0,1.0
+Community_25,0.00241,0.0,Community Structure,1.0,0.0,1.0
+Community_26,0.00241,0.0,Community Structure,1.0,0.0,1.0
+Community_27,0.00241,0.0,Community Structure,1.0,0.0,1.0
+Community_28,0.00241,0.0,Community Structure,1.0,0.0,1.0
+Community_29,0.001606,0.0,Community Structure,1.0,0.0,1.0
+Community_30,0.001606,0.0,Community Structure,1.0,0.0,1.0
+Community_31,0.001606,0.0,Community Structure,1.0,0.0,1.0
+Community_32,0.001606,0.0,Community Structure,1.0,0.0,1.0
+Community_33,0.001606,0.0,Community Structure,1.0,0.0,1.0
+Community_34,0.001606,0.0,Community Structure,1.0,0.0,1.0
+Community_35,0.001606,0.0,Community Structure,1.0,0.0,1.0
+Community_36,0.001606,0.0,Community Structure,1.0,0.0,1.0
+Community_37,0.001606,0.0,Community Structure,1.0,0.0,1.0
+Community_38,0.001606,0.0,Community Structure,1.0,0.0,1.0
+Community_39,0.001606,0.0,Community Structure,1.0,0.0,1.0
+Community_40,0.001606,0.0,Community Structure,1.0,0.0,1.0
+Community_41,0.001606,0.0,Community Structure,1.0,0.0,1.0
+Community_42,0.000803,0.0,Community Structure,1.0,0.0,1.0
+Community_43,0.000803,0.0,Community Structure,1.0,0.0,1.0
+jsd_out_degree_normalized,0.08823243834918242,-0.08823243834918242,Degree Measures,1.0,1.0,1.0
+jsd_in_degree_normalized,0.33477216355783845,-0.33477216355783845,Degree Measures,1.0,1.0,1.0
+jsd_in_out_ratio,0.045848915310636916,-0.045848915310636916,Degree Measures,1.0,1.0,1.0
+jsd_in_group_indegree_ratio,0.09328514456080199,-0.09328514456080199,Degree Measures,1.0,1.0,1.0
+jsd_in_group_outdegree_ratio,0.043234727486134786,-0.043234727486134786,Degree Measures,1.0,1.0,1.0
+jsd_in_reach_2_normalized,0.2127724564899335,-0.2127724564899335,Local Reach,1.0,1.0,1.0
+jsd_out_reach_2_normalized,0.4011260943911874,-0.4011260943911874,Local Reach,1.0,1.0,1.0
+jsd_undirected_reach_2_normalized,0.3430572224477983,-0.3430572224477983,Local Reach,1.0,1.0,1.0
+jsd_ego_density,0.14927564300182192,-0.14927564300182192,Local Structure,1.0,1.0,1.0
+jsd_density_clustering_coefficient,0.17962632101231216,-0.17962632101231216,Local Structure,1.0,1.0,1.0
+jsd_page_rank,0.4096102724601017,-0.4096102724601017,Influence,1.0,1.0,1.0
+jsd_salsa_hub,0.0780751473602996,-0.0780751473602996,Influence,1.0,1.0,1.0
+jsd_salsa_authority,0.3006931981560413,-0.3006931981560413,Influence,1.0,1.0,1.0
+jsd_modularity_vitality_hub,0.03856463085059223,-0.03856463085059223,Influence,1.0,1.0,1.0
+jsd_modularity_vitality_bridge,0.3875168666574691,-0.3875168666574691,Influence,1.0,1.0,1.0
+jsd_k_core_in,0.1709464069811164,-0.1709464069811164,K-Core Decomposition,1.0,1.0,1.0
+jsd_k_core_out,0.030854867938413258,-0.030854867938413258,K-Core Decomposition,1.0,1.0,1.0
+jsd_k_core_undirected,0.2005444882338154,-0.2005444882338154,K-Core Decomposition,1.0,1.0,1.0

@@ -1,0 +1,14 @@
+item,value
+feature_set,one-mode directed binary
+node_measure_binning,"geometric axis, fixed bin width, linear binning"
+bin_width,0.125
+lgs_version,0.5.0
+declared_type,directed binary
+found_type_1,"not symmetric, weights vary"
+found_type_2,"not symmetric, weights vary"
+type_note,declared binary; weights vary and are not used
+node_key,id
+node_overlap,0.0
+min_node_overlap,0.75
+edge_agreement_note,"not computed: 0 of 1815 nodes are in both networks (0.0%), below min_node_overlap = 0.75; nodes matched on id"
+weight_scale_note,not applicable: the networks are compared as binary

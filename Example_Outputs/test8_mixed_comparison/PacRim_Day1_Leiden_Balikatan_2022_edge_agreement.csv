@@ -1,0 +1,14 @@
+item,value
+computed,false
+angular_similarity,NaN
+angular_similarity_binary,NaN
+node_overlap,0.0
+min_node_overlap,0.75
+nodes_both,0
+nodes_1_only,468
+nodes_2_only,1347
+links_both,0
+links_1_only,0
+links_2_only,0
+links_reweighted,0
+note,"not computed: 0 of 1815 nodes are in both networks (0.0%), below min_node_overlap = 0.75; nodes matched on id"

@@ -10,7 +10,8 @@ Large_Graph_Similarity (LGS) reduces two networks to a similarity score between 
 | `julia_env/src/CLI.jl` | The command-line interface |
 | `julia_env/Self_Identity_Tests.jl` | Regression tests: self-identity, undefined measures, two-mode networks, node measure comparison, network type, core decompositions, angular similarity, reference comparison |
 | `julia_env/Benchmark_Replication_Tests.jl` | Each measure against results saved from ORA, igraph, scoredec, Pajek, Python, and R |
-| `julia_env/old_tests/` | Development scripts that predate version 0.2.0 and still refer to the raw and asinh scores |
+| `julia_env/CLI_Tests.jl` | Nine tests of the app through its command line: function help, ORA and CSV import, partition files (1- and 0-indexed), communities from an ORA attribute, an edge list without a node list, and comparisons of ORA with ORA and ORA with CSV |
+| `julia_env/old_tests/` | `Comparator_Tests.jl` and `Graph_Comparison_Tests.jl`: development scripts that predate version 0.2.0 |
 | `julia_env/build_app_*.jl` | PackageCompiler build scripts |
 | `Test_Data/` | Test networks |
 | `LGS_Pending_Fixes_28Oct2026.md` | Record of the October 2026 findings and their repair |
@@ -22,6 +23,7 @@ From this folder:
 ```bash
 julia -t auto --project=julia_env julia_env/Self_Identity_Tests.jl
 julia -t auto --project=julia_env julia_env/Benchmark_Replication_Tests.jl
+julia -t auto --project=julia_env julia_env/CLI_Tests.jl
 ```
 
 The first script includes a reference comparison on observed networks: Balikatan 2022 as the reference against Pac Rim 2023 (`Pac Rim Day 1.xml`) and Pac Sentry 2025 (`PAO_Day_6.xml`), each file's Agent x Agent - All Communication network. A file that is absent from `Test_Data` is reported as broken in the test summary.
@@ -144,7 +146,12 @@ Two two-mode networks, such as two Agent x Hashtag networks, are compared with `
 - density as links / (n_source x n_target), reciprocity when links run both ways;
 - degree assortativity as the correlation between a sender's out-degree and its receiver's in-degree;
 - four-cycle clustering (Robins and Alexander) and pairwise clustering (Latapy);
-- per mode: degree and strength, two-step reach, k-core, PageRank, SALSA hub or authority.
+- per mode: degree and strength, two-step reach, k-core, PageRank, SALSA hub or authority;
+- communities from Barber's two-mode modularity: the modularity, the share of all nodes in each community, and per mode the share of a node's links that stay in its community and its modularity vitality (hub and bridge).
+
+**Communities (version 0.5.0).** Standard modularity expects links within a mode, which a two-mode network cannot have. Barber's (2007) modularity expects a link between a source node and a target node in proportion to the product of their degrees, and none within a mode. That is what directed modularity computes when every link is oriented from the source mode to the target mode, so the same Leiden and CHAMP routines are used, with the same settings and seed as for one-mode networks. Links that run back from the target mode are folded in with their weights. A node without links is a community of its own. Modularity vitality is computed under the same null model: the modularity of the network less its modularity with the node removed. A membership can be supplied by node id.
+
+**Reading modularity vitality in two-mode scores.** Vitality carries most weight where one mode forms the centres of clusters. In hashtag networks (Agent x Hashtag, Tweet x Hashtag) the hashtags organise the agents and tweets around them, so a change in what attaches to which hashtag changes who is a hub or a bridge of each cluster, and vitality can be the largest feature of the distance even when the links agree closely. In networks where neither mode forms such centres (Tweet x Agent - Mentions, Agent x Tweet - Sender) it contributes little. This follows from the process that generates the network, not from its being two-mode.
 
 Transitivity, local clustering, the triad census, strong components, and self-loop statistics are not used.
 
@@ -154,7 +161,7 @@ Transitivity, local clustering, the triad census, strong components, and self-lo
 2. Two-mode networks whose mode names differ (override with `match_modes = false`).
 3. Two-mode networks that each run one way, in opposite directions, such as Agent x Tweet against Tweet x Agent.
 
-**Scores are not comparable across kinds.** A two-mode score rests on a different feature set from a one-mode score.
+**Scores are not comparable across kinds.** A two-mode score rests on a different feature set from a one-mode score. Two-mode scores from versions before 0.5.0, which had no community features, are not comparable with later ones.
 
 ### Projection
 
@@ -204,7 +211,7 @@ A refused network has `status` "refused" in the summary, with the reason. A netw
 
 ## Future work
 
-- **Bipartite modularity (Barber, 2007).** Community detection is left out of the two-mode feature set, because standard modularity expects links within a mode, which a two-mode network cannot have. Adding Barber's null model to `leiden_community_detection` and `champ_community_detection` would restore the community features (partition sizes, modularity, in-group ratios, modularity vitality) for two-mode networks.
+- None recorded at present. The uncertainty of a score or measure is the subject of the Network_Credible_Intervals project (see *Sampling noise* above).
 
 ## References
 

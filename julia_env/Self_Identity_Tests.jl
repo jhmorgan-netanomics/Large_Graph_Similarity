@@ -459,10 +459,10 @@ const LGS = Large_Graph_Similarity
 				@test node_value(node_stats, "a1", :source_pairwise_clustering) ≈ 0.75
 				@test node_value(node_stats, "a3", :source_two_step_reach_normalized) == 1.0
 
-			#	The feature set has no triad, community, or transitivity features
+			#	The feature set has no triad or transitivity features; communities come from Barber's two-mode modularity
 				features = bipartite_feature_builder(global_stats, triads, node_stats)
 				@test !("Triad Census" in features.type)
-				@test !("Community Structure" in features.type)
+				@test "Community Structure" in features.type
 				@test !any(occursin.("transitivity", features.measure))
 				@test !any(occursin.("backward", features.measure))
 		end
@@ -496,7 +496,7 @@ const LGS = Large_Graph_Similarity
 					@test hashtag_self.overall_similarity == 1.0
 					@test features_identical(hashtag_self)
 					@test !("Triad Census" in hashtag_self.combined_features.type)
-					@test !("Community Structure" in hashtag_self.combined_features.type)
+					@test "Community Structure" in hashtag_self.combined_features.type
 					@test hashtag_self.comparison_info.value[1] == "two-mode " * (weighted ? "weighted" : "binary")
 			end
 
@@ -1432,5 +1432,105 @@ const LGS = Large_Graph_Similarity
 				@test hasproperty(diagnostics, :noise_95)
 				@test all(diagnostics.noise_95 .>= diagnostics.expected_noise)
 				@test all(isfinite, diagnostics.noise_95)
+		end
+
+		@testset "Two-mode communities: Barber's modularity" begin
+			#	Two planted blocks: agents a with tags h, agents b with tags g, a few links across, one isolate
+				rng = MersenneTwister(20261119)
+				sources = String[]; targets = String[]; weights = Float64[]
+				for i in 1:20, j in 1:10
+					rand(rng) < 0.5 && (push!(sources, "a$i"); push!(targets, "h$j"); push!(weights, Float64(rand(rng, 1:4))))
+					rand(rng) < 0.5 && (push!(sources, "b$i"); push!(targets, "g$j"); push!(weights, Float64(rand(rng, 1:4))))
+					rand(rng) < 0.02 && (push!(sources, "a$i"); push!(targets, "g$j"); push!(weights, 1.0))
+					rand(rng) < 0.02 && (push!(sources, "b$i"); push!(targets, "h$j"); push!(weights, 1.0))
+				end
+				planted = DataFrame(src = sources, dst = targets, weight = weights)
+				ids = vcat(["a$i" for i in 1:20], ["b$i" for i in 1:20], ["h$j" for j in 1:10], ["g$j" for j in 1:10], ["alone"])
+				planted_nodes = DataFrame(id = ids, label = ids, mode = vcat(fill("Agent", 40), fill("Tag", 20), ["Agent"]))
+
+			for weighted in (true, false)
+				global_stats, _, node_stats = bipartite_constructor(planted, planted_nodes; weighted = weighted, seed = 7)
+				community = Dict(zip(node_stats.node, node_stats.community))
+
+				#	The blocks are recovered, and the node without links is a community of its own
+					@test length(unique(community["a$i"] for i in 1:20)) == 1
+					@test length(unique(community["b$i"] for i in 1:20)) == 1
+					@test community["a1"] == community["h1"] && community["b1"] == community["g1"] && community["a1"] != community["b1"]
+					@test count(==(community["alone"]), node_stats.community) == 1
+
+				#	The reported modularity is Barber's: (1/m) * sum over linked-or-not pairs in one community of (w - k_i * d_j / m)
+					weight_of = Dict{Tuple{String,String},Float64}()
+					for (s, d, w) in zip(planted.src, planted.dst, planted.weight)
+						weight_of[(s, d)] = weighted ? get(weight_of, (s, d), 0.0) + w : 1.0
+					end
+					total = sum(values(weight_of))
+					sent = Dict{String,Float64}(); received = Dict{String,Float64}()
+					for ((s, d), w) in weight_of
+						sent[s] = get(sent, s, 0.0) + w
+						received[d] = get(received, d, 0.0) + w
+					end
+					barber = sum(get(weight_of, (s, d), 0.0) - sent[s] * received[d] / total
+								 for s in keys(sent), d in keys(received) if community[s] == community[d]) / total
+					reported = parse(Float64, global_stats.value[findfirst(==("modularity"), global_stats.measure)])
+					@test reported ≈ barber atol = 1e-6
+					@test reported > 0.3
+
+				#	Modularity vitality is the modularity less the modularity with the node removed, under the same null model
+					for node in ("a1", "h1", "b7")
+						kept = Dict(pair => w for (pair, w) in weight_of if !(node in pair))
+						kept_total = sum(values(kept))
+						kept_sent = Dict{String,Float64}(); kept_received = Dict{String,Float64}()
+						for ((s, d), w) in kept
+							kept_sent[s] = get(kept_sent, s, 0.0) + w
+							kept_received[d] = get(kept_received, d, 0.0) + w
+						end
+						without = sum(get(kept, (s, d), 0.0) - kept_sent[s] * kept_received[d] / kept_total
+									  for s in keys(kept_sent), d in keys(kept_received) if community[s] == community[d]) / kept_total
+						row = findfirst(==(node), node_stats.node)
+						role = node_stats.role[row]
+						vitality = node_stats[row, Symbol(role * "_modularity_vitality_hub")] - node_stats[row, Symbol(role * "_modularity_vitality_bridge")]
+						@test vitality ≈ barber - without atol = 1e-9
+					end
+
+				#	A node whose links all stay in its community has an in-group share of 1; the isolate has 0
+					@test all(0.0 .<= skipmissing(node_stats.source_in_group_ratio) .<= 1.0)
+					@test node_stats.source_in_group_ratio[findfirst(==("alone"), node_stats.node)] == 0.0
+					@test hasproperty(node_stats, :source_in_group_strength_fraction) == weighted
+
+				#	The comparison uses the community features, and a network against itself in another order scores exactly 1
+					shuffled = network_comparator(planted, planted_nodes, planted[shuffle(rng, 1:nrow(planted)), :], planted_nodes[shuffle(rng, 1:nrow(planted_nodes)), :];
+												  weighted = weighted, bipartite = true, seed = 7)
+					@test shuffled.overall_similarity == 1.0
+					@test "Community Structure" in shuffled.combined_features.type
+					@test "modularity" in shuffled.combined_features.measure
+					@test "jsd_source_modularity_vitality_hub" in shuffled.combined_features.measure
+					@test "jsd_target_in_group_ratio" in shuffled.combined_features.measure
+					thinned = network_comparator(planted, planted_nodes, planted[1:(end - 25), :], planted_nodes; weighted = weighted, bipartite = true, seed = 7)
+					@test 0.0 < thinned.overall_similarity < 1.0
+			end
+
+			#	The helper agrees with the package's directed modularity on the links oriented from source to target
+				pairs = sparse([1, 1, 2, 3, 3, 4], [1, 2, 1, 2, 3, 3], [2.0, 1.0, 3.0, 1.0, 2.0, 4.0], 4, 3)
+				source_community = [1, 1, 2, 2]
+				target_community = [1, 1, 2]
+				oriented = spzeros(7, 7)
+				oriented[1:4, 5:7] = pairs
+				helper = LGS._barber_modularity_vitality(pairs, source_community, target_community, 1.0)
+				@test helper.modularity ≈ calculate_modularity(oriented, vcat(source_community, target_community); weighted = true, directed = true, γ = 1.0)
+
+			#	A membership can be given by node id; a plain vector is refused for two modes; the resolution sweep runs
+				given = DataFrame(node = ids, community = [startswith(id, "a") || startswith(id, "h") ? 1 : 2 for id in ids])
+				_, _, with_given = bipartite_constructor(planted, planted_nodes; weighted = true, provided_membership = given)
+				@test length(unique(with_given.community)) == 2
+				@test_throws ArgumentError bipartite_constructor(planted, planted_nodes; weighted = true, provided_membership = ones(Int, length(ids)))
+				swept, _, _ = bipartite_constructor(planted, planted_nodes; weighted = true, resolution_sweep = true, seed = 7)
+				@test parse(Float64, swept.value[findfirst(==("modularity"), swept.measure)]) > 0.3
+
+			#	A reference gives the same two-mode result as the comparison of the pair
+				reference = reference_analysis(planted, planted_nodes; weighted = true, bipartite = true, seed = 7)
+				against = compare_to_reference(reference, planted[1:(end - 25), :], planted_nodes)
+				pairwise = network_comparator(planted, planted_nodes, planted[1:(end - 25), :], planted_nodes; weighted = true, bipartite = true, seed = 7)
+				@test against.overall_similarity == pairwise.overall_similarity
+				@test isequal(against.combined_features, pairwise.combined_features)
 		end
 end

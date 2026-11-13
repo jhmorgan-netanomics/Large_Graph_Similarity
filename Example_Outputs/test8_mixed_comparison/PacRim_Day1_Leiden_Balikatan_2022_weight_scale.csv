@@ -1,0 +1,10 @@
+statistic,network_1,network_2,ratio
+largest_weight,10.0,31.0,3.1
+second_largest_weight,9.0,23.0,2.5555555555555554
+links_at_largest_weight,1.0,1.0,NaN
+percentile_95,7.0,3.0,2.3333333333333335
+median,2.0,1.0,2.0
+mean,2.4,1.4326128417037507,1.6752607055691147
+links,1440.0,3146.0,NaN
+sqrt_jsd_weights,0.30359535574229096,0.30359535574229096,NaN
+sqrt_jsd_weights_over_largest,0.7792771720670507,0.7792771720670507,NaN

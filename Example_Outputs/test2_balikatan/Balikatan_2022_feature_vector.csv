@@ -37,16 +37,16 @@ local clustering coefficient,0.426538,Global Network Measure
 reciprocity,0.010413,Global Network Measure
 density,0.001713,Global Network Measure
 resolution,1.0,Global Network Measure
-modularity,0.599786,Global Network Measure
-003,0.988838,Triad Census
+modularity,0.597574,Global Network Measure
+003,0.98885,Triad Census
 012,0.01026,Triad Census
 102,0.000111,Triad Census
 021D,0.000703,Triad Census
 021U,1.2e-5,Triad Census
-021C,5.1e-5,Triad Census
+021C,4.1e-5,Triad Census
 111D,0.0,Triad Census
 111U,1.0e-5,Triad Census
-030T,1.2e-5,Triad Census
+030T,1.0e-5,Triad Census
 030C,0.0,Triad Census
 201,0.0,Triad Census
 120D,0.0,Triad Census
@@ -74,10 +74,10 @@ k_core_undirected_10,0.008032,K-Core Decomposition
 k_core_undirected_11,0.034538,K-Core Decomposition
 Community_1,0.1751,Community Structure
 Community_2,0.169478,Community Structure
-Community_3,0.143775,Community Structure
+Community_3,0.131727,Community Structure
 Community_4,0.11004,Community Structure
-Community_5,0.097992,Community Structure
-Community_6,0.072289,Community Structure
+Community_5,0.095582,Community Structure
+Community_6,0.086747,Community Structure
 Community_7,0.043373,Community Structure
 Community_8,0.033735,Community Structure
 Community_9,0.033735,Community Structure
@@ -130,16 +130,16 @@ in_out_ratio_median,0.0,Degree Measures
 in_out_ratio_std,0.302534,Degree Measures
 in_out_ratio_skew,9.107075,Degree Measures
 in_out_ratio_kurtosis,105.590967,Degree Measures
-in_group_indegree_ratio_mean,0.836512,Degree Measures
+in_group_indegree_ratio_mean,0.832483,Degree Measures
 in_group_indegree_ratio_median,1.0,Degree Measures
-in_group_indegree_ratio_std,0.283701,Degree Measures
-in_group_indegree_ratio_skew,-1.678838,Degree Measures
-in_group_indegree_ratio_kurtosis,1.816893,Degree Measures
-in_group_outdegree_ratio_mean,0.107003,Degree Measures
+in_group_indegree_ratio_std,0.288241,Degree Measures
+in_group_indegree_ratio_skew,-1.626986,Degree Measures
+in_group_indegree_ratio_kurtosis,1.574755,Degree Measures
+in_group_outdegree_ratio_mean,0.107705,Degree Measures
 in_group_outdegree_ratio_median,0.0,Degree Measures
-in_group_outdegree_ratio_std,0.300567,Degree Measures
-in_group_outdegree_ratio_skew,2.504432,Degree Measures
-in_group_outdegree_ratio_kurtosis,4.391112,Degree Measures
+in_group_outdegree_ratio_std,0.302025,Degree Measures
+in_group_outdegree_ratio_skew,2.491496,Degree Measures
+in_group_outdegree_ratio_kurtosis,4.309915,Degree Measures
 in_reach_2_normalized_mean,0.009107,Local Reach
 in_reach_2_normalized_median,0.010401,Local Reach
 in_reach_2_normalized_std,0.006649,Local Reach
@@ -168,25 +168,25 @@ density_clustering_coefficient_kurtosis,-1.253873,Local Structure
 page_rank_mean,0.000803,Influence
 page_rank_median,0.000744,Influence
 page_rank_std,0.000273,Influence
-page_rank_skew,10.21837,Influence
-page_rank_kurtosis,136.845193,Influence
+page_rank_skew,10.218388,Influence
+page_rank_kurtosis,136.845553,Influence
 salsa_hub_mean,0.000803,Influence
 salsa_hub_median,0.0,Influence
-salsa_hub_std,0.002295,Influence
-salsa_hub_skew,2.508426,Influence
-salsa_hub_kurtosis,4.299106,Influence
+salsa_hub_std,0.003967,Influence
+salsa_hub_skew,11.277492,Influence
+salsa_hub_kurtosis,192.79508,Influence
 salsa_authority_mean,0.000803,Influence
-salsa_authority_median,0.000853,Influence
-salsa_authority_std,0.000201,Influence
-salsa_authority_skew,-3.761804,Influence
-salsa_authority_kurtosis,12.17072,Influence
-modularity_vitality_hub_mean,2.9e-5,Influence
+salsa_authority_median,0.000613,Influence
+salsa_authority_std,0.000831,Influence
+salsa_authority_skew,3.231689,Influence
+salsa_authority_kurtosis,14.74367,Influence
+modularity_vitality_hub_mean,3.0e-5,Influence
 modularity_vitality_hub_median,0.0,Influence
-modularity_vitality_hub_std,0.000583,Influence
-modularity_vitality_hub_skew,20.800473,Influence
-modularity_vitality_hub_kurtosis,440.985679,Influence
-modularity_vitality_bridge_mean,0.003999,Influence
-modularity_vitality_bridge_median,0.003838,Influence
-modularity_vitality_bridge_std,0.001579,Influence
-modularity_vitality_bridge_skew,21.602437,Influence
-modularity_vitality_bridge_kurtosis,612.567876,Influence
+modularity_vitality_hub_std,0.000589,Influence
+modularity_vitality_hub_skew,20.664086,Influence
+modularity_vitality_hub_kurtosis,433.611715,Influence
+modularity_vitality_bridge_mean,0.00399,Influence
+modularity_vitality_bridge_median,0.003827,Influence
+modularity_vitality_bridge_std,0.001572,Influence
+modularity_vitality_bridge_skew,21.19927,Influence
+modularity_vitality_bridge_kurtosis,596.593931,Influence
