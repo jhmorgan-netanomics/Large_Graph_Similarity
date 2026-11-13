@@ -5633,7 +5633,9 @@ THE SOFTWARE.
 	Nodes are indexed by sorted id before the runs, and the membership is returned in the caller's node order. The partition therefore does not depend on the order in which nodes or edges are listed. It does still depend on the ids themselves: the same network under two id schemes can receive different partitions.
 
 	**Threading**
-	Multi-start runs are parallelized using `Threads.@threads`. To control the number of threads, launch Julia with `julia --threads N` (or `--threads auto`) or set the `JULIA_NUM_THREADS` environment variable. Each run receives its own `Xoshiro` RNG, so reproducibility is preserved across different thread counts as long as the same `seed` is used.
+	Multi-start runs are parallelized using `Threads.@threads`. To control the number of threads, launch Julia with `julia --threads N` 
+    (or `--threads auto`) or set the `JULIA_NUM_THREADS` environment variable. Each run receives its own `Xoshiro` RNG, so reproducibility 
+    is preserved across different thread counts as long as the same `seed` is used.
 
 	**Value**
 	`NamedTuple` containing:
@@ -6189,11 +6191,24 @@ THE SOFTWARE.
 	1. **Sweep**: Run Leiden at each γ in the resolution grid. For each resulting partition, compute the two CHAMP coefficients:
 	   - `A` — total edge weight within communities (the modularity "internal" term)
 	   - `P` — expected within-community weight under the null model (the modularity "penalty" term)
-	   The modularity at any γ for this partition equals `(A - γP) / m_total`, so the partition's modularity is a linear function of γ with intercept `A` and slope `-P`.
-	2. **Admissible set**: Partition `i` is admissible when some γ in the swept range exists at which no other partition scores higher. Each competitor `j` constrains γ to a half-line, since `A_i - γP_i ≥ A_j - γP_j` is equivalent to `(A_i - A_j) ≥ γ(P_i - P_j)`: a competitor with smaller `P` bounds γ from above, one with larger `P` from below. The intersection of those half-lines with the swept range is the partition's dominance interval, returned as `dominance_lower` and `dominance_upper`; the partition is admissible exactly when the interval is non-empty. An earlier implementation probed a single γ per competitor and rejected admissible partitions; it passed unnoticed on graphs with a clear elbow because the partitions it dropped lay far from the bend.
-	3. **Selection at the convex-hull bend**: Identify the partition at the elbow of the upper envelope. Each admissible partition contributes a line with slope `-P`; the steep slopes (large P) come from low-γ partitions with many small communities, and the shallow slopes (small P) come from high-γ partitions with fewer larger communities. The bend of the envelope is the γ at which slope transitions most rapidly from steep to shallow. Trivial single-community partitions are excluded from selection because they always lie on the convex hull at low γ but represent the absence of community structure rather than its presence.
+	   The modularity at any γ for this partition equals `(A - γP) / m_total`, so the partition's modularity is a linear function of γ 
+       with intercept `A` and slope `-P`.
+	2. **Admissible set**: Partition `i` is admissible when some γ in the swept range exists at which no other partition scores higher. 
+       Each competitor `j` constrains γ to a half-line, since `A_i - γP_i ≥ A_j - γP_j` is equivalent to `(A_i - A_j) ≥ γ(P_i - P_j)`: 
+       a competitor with smaller `P` bounds γ from above, one with larger `P` from below. 
+       The intersection of those half-lines with the swept range is the partition's dominance interval, returned as `dominance_lower` and 
+       `dominance_upper`; the partition is admissible exactly when the interval is non-empty. 
+       An earlier implementation probed a single γ per competitor and rejected admissible partitions; it passed unnoticed on graphs with a clear 
+       elbow because the partitions it dropped lay far from the bend.
+	3. **Selection at the convex-hull bend**: Identify the partition at the elbow of the upper envelope. 
+       Each admissible partition contributes a line with slope `-P`; the steep slopes (large P) come from low-γ partitions with many small 
+       communities, and the shallow slopes (small P) come from high-γ partitions with fewer larger communities. 
+       The bend of the envelope is the γ at which slope transitions most rapidly from steep to shallow. 
+       Trivial single-community partitions are excluded from selection because they always lie on the convex hull at low γ but represent 
+       the absence of community structure rather than its presence.
 
-	The γ sweep is parallelized using `Threads.@threads`. Each γ task calls `leiden_community_detection` with `parallel_runs=false` to prevent nested thread oversubscription.
+	The γ sweep is parallelized using `Threads.@threads`. Each γ task calls `leiden_community_detection` with `parallel_runs=false` to prevent 
+    nested thread oversubscription.
 
 	**Modularity Conventions**
 
@@ -6203,7 +6218,8 @@ THE SOFTWARE.
 
 	**Threading**
 
-	The γ sweep is parallelized using `Threads.@threads`. To control thread count, launch Julia with `julia --threads N` or set `JULIA_NUM_THREADS`. Speedup scales approximately linearly with thread count when `n_resolutions ≥ n_threads`.
+	The γ sweep is parallelized using `Threads.@threads`. To control thread count, launch Julia with `julia --threads N` or 
+    set `JULIA_NUM_THREADS`. Speedup scales approximately linearly with thread count when `n_resolutions ≥ n_threads`.
 
 	**Value**
 
@@ -6253,7 +6269,8 @@ THE SOFTWARE.
 	```
 
 	**References**
-	1. Weir WH, Emmons S, Gibson R, Taylor D, Mucha PJ (2017) "Post-processing partitions to identify domains of modularity optimization." *Algorithms* 10(3):93. doi:10.3390/a10030093
+	1. Weir WH, Emmons S, Gibson R, Taylor D, Mucha PJ (2017) "Post-processing partitions to identify domains of modularity optimization." 
+       *Algorithms* 10(3):93. doi:10.3390/a10030093
 	2. Github implementation: https://github.com/wweir827/CHAMP
 
 	**See Also**
@@ -11243,7 +11260,8 @@ THE SOFTWARE.
 	$$003,\ 012,\ 102,\ 021D,\ 021U,\ 021C,\ 111D,\ 111U,\ 030T,\ 030C,\ 201,\ 120D,\ 120U,\ 120C,\ 210,\ 300$$
 
 	**Usage**
-	`triad_census(edges; nodes=nothing, weighted=false, graph_type=:directed, reciprocity_collapse=false, L=20, tau_min=1.0, tau_max=..., parallel=true, show_progress=false)`
+	`triad_census(edges; nodes=nothing, weighted=false, graph_type=:directed, reciprocity_collapse=false, L=20, 
+    tau_min=1.0, tau_max=..., parallel=true, show_progress=false)`
 
 	**Arguments**
 	- `edges::DataFrame`: Edge list with `:src`, `:dst`, optionally `:weight`
@@ -17492,7 +17510,7 @@ THE SOFTWARE.
 
 		#	One link per pair for a symmetric network
 			undirected_edges = symmetric ?
-				_symmetric_sparse_to_undirected_edgelist(adj; include_diagonal = true, node_map = node_map) : edges
+				_symmetric_sparse_to_undirected_edgelist(adj; include_diagonal = true, node_map = Dict{Any,Int}(node_map)) : edges
 
 		#	Assembling Result
 			description = (symmetric ? "symmetric" : "not symmetric") * ", " * (binary ? "all weights 1" : "weights vary")
@@ -17616,6 +17634,166 @@ THE SOFTWARE.
 			return x == y ? 1.0 : 1.0 - 2.0 * acos(cosine) / pi
 	end
 
+#	Helper Function for network_comparator: Link Weights of One Network, One Value per Link
+	function _link_weights(edges::DataFrame, between_nodes_only::Bool)
+		"""
+		Args:
+			edges::DataFrame: edge list as compared (:src, :dst, optionally :weight)
+			between_nodes_only::Bool: leave out self-links
+		Returns:
+			Vector{Float64}: one weight per link, sorted from largest to smallest
+		Notes:
+			Rows that repeat a link are summed, as the constructors sum them.
+			Without a weight column every link weighs 1.
+		"""
+
+		#	One weight per link
+			totals = Dict{Tuple{String,String},Float64}()
+			weights = hasproperty(edges, :weight) ? Float64.(edges.weight) : ones(nrow(edges))
+			for (source, target, weight) in zip(edges.src, edges.dst, weights)
+				if between_nodes_only && string(source) == string(target)
+					continue
+				end
+				key = (string(source), string(target))
+				totals[key] = get(totals, key, 0.0) + weight
+			end
+
+		#	Assembling Result
+			return sort!(collect(values(totals)); rev = true)
+	end
+
+#	Helper Function for Weight Scale: Larger of Two Values over the Smaller
+	function _larger_over_smaller(a::Float64, b::Float64)
+		"""
+		Args:
+			a::Float64: a value
+			b::Float64: another value
+		Returns:
+			Float64: max(a, b) / min(a, b), or NaN when either is NaN or the smaller is not positive
+		"""
+
+		#	Early return
+			if isnan(a) || isnan(b) || min(a, b) <= 0.0
+				return NaN
+			end
+
+		#	Assembling Result
+			return max(a, b) / min(a, b)
+	end
+
+#	Helper Function for Weight Scale: A Value in Four Significant Digits
+	function _four_digits(value::Float64)
+		"""
+		Args:
+			value::Float64: a value
+		Returns:
+			String: the value rounded to four significant digits
+		"""
+
+		#	Assembling Result
+			return string(round(value; sigdigits = 4))
+	end
+
+#	Helper Function for network_comparator: Is a Difference in Weight Scale One Heavy Link or the Whole Distribution
+	function _weight_scale(edges_1::DataFrame, edges_2::DataFrame; directed::Bool, weighted::Bool, bipartite::Bool, bin_width::Float64 = 0.125)
+		"""
+		Args:
+			edges_1::DataFrame: edge list of network 1, as compared
+			edges_2::DataFrame: edge list of network 2, as compared
+			directed::Bool: whether the networks are compared as directed
+			weighted::Bool: whether the networks are compared as weighted
+			bipartite::Bool: whether the networks are two-mode
+			bin_width::Float64: bin width of the node measure comparison, used for the two divergences
+		Returns:
+			NamedTuple:
+				- table::DataFrame (statistic, network_1, network_2, ratio): the weight scale of each network;
+					empty when the networks are compared as binary
+				- note::String: what the table shows, in words
+				- scaled_measures::Vector{String}: node measures that are divided by a network's largest weight
+		Notes:
+			Normalized degree is divided by the network's largest link weight. One link sets that weight, so a
+			change in one link rescales every node's value. The table separates the two cases:
+			a difference in the heaviest link, and a difference in the distribution of weights.
+			- largest_weight: the divisor. Directed networks: over all links. Undirected networks: over links
+			  between two different nodes, as total_degree leaves self-links out.
+			- second_largest_weight, links_at_largest_weight: whether the largest weight stands alone.
+			- percentile_95, median, mean: where the rest of the weights lie.
+			- sqrt_jsd_weights: divergence of the two weight distributions, weights as they are.
+			- sqrt_jsd_weights_over_largest: the same after each network's weights are divided by its largest.
+			The ratio is the larger value over the smaller, and is blank for the counts and the divergences.
+			Nothing here enters the score.
+		"""
+
+		#	Binary networks have no weight scale
+			table = DataFrame(statistic = String[], network_1 = Float64[], network_2 = Float64[], ratio = Float64[])
+			if !weighted
+				return (table = table, note = "not applicable: the networks are compared as binary", scaled_measures = String[])
+			end
+
+		#	Weights that set the divisor
+			between_nodes_only = !directed && !bipartite
+			weights_1 = _link_weights(edges_1, between_nodes_only)
+			weights_2 = _link_weights(edges_2, between_nodes_only)
+			if isempty(weights_1) || isempty(weights_2)
+				return (table = table, note = "not applicable: a network has no links", scaled_measures = String[])
+			end
+
+		#	Scale of each network
+			rows = [("largest_weight", weights_1[1], weights_2[1], true),
+					("second_largest_weight", get(weights_1, 2, NaN), get(weights_2, 2, NaN), true),
+					("links_at_largest_weight", Float64(count(==(weights_1[1]), weights_1)), Float64(count(==(weights_2[1]), weights_2)), false),
+					("percentile_95", quantile(weights_1, 0.95), quantile(weights_2, 0.95), true),
+					("median", median(weights_1), median(weights_2), true),
+					("mean", mean(weights_1), mean(weights_2), true),
+					("links", Float64(length(weights_1)), Float64(length(weights_2)), false)]
+			for (statistic, value_1, value_2, with_ratio) in rows
+				push!(table, (statistic, value_1, value_2, with_ratio ? _larger_over_smaller(value_1, value_2) : NaN))
+			end
+
+		#	Divergence of the weight distributions, as they are and after division by the largest weight
+			as_they_are = sqrt(_distribution_divergence(weights_1, weights_2; bin_width = bin_width).js_divergence)
+			over_largest = sqrt(_distribution_divergence(weights_1 ./ weights_1[1], weights_2 ./ weights_2[1]; bin_width = bin_width).js_divergence)
+			push!(table, ("sqrt_jsd_weights", as_they_are, as_they_are, NaN))
+			push!(table, ("sqrt_jsd_weights_over_largest", over_largest, over_largest, NaN))
+
+		#	Measures divided by the largest weight
+			scaled_measures = bipartite ? String[] :
+							  directed ? ["in_degree_normalized", "out_degree_normalized"] : ["total_degree_normalized"]
+
+		#	In words
+			affected = isempty(scaled_measures) ? "no node measure of this feature set is divided by it" :
+					   "divided by it: " * join(scaled_measures, ", ")
+			if weights_1[1] == weights_2[1]
+				note = "the largest weights are equal ($(_four_digits(weights_1[1]))); the weight distributions differ by $(_four_digits(as_they_are)) (square root of the Jensen-Shannon divergence)"
+			else
+				note = "the largest weights differ ($(_four_digits(weights_1[1])) and $(_four_digits(weights_2[1])), ratio $(_four_digits(_larger_over_smaller(weights_1[1], weights_2[1])))); " *
+					   "the 95th percentiles are $(_four_digits(quantile(weights_1, 0.95))) and $(_four_digits(quantile(weights_2, 0.95))); " *
+					   "the weight distributions differ by $(_four_digits(as_they_are)) as they are and by $(_four_digits(over_largest)) after division by the largest weight; " * affected
+			end
+
+		#	Assembling Result
+			return (table = table, note = note, scaled_measures = scaled_measures)
+	end
+
+#	Helper Function for network_comparator: Mark the Node Measures That Are Divided by the Largest Weight
+	function _mark_scaled_measures!(diagnostics::DataFrame, scaled_measures::Vector{String})
+		"""
+		Args:
+			diagnostics::DataFrame: node_measure_diagnostics (one row per node measure)
+			scaled_measures::Vector{String}: measures divided by a network's largest link weight
+		Returns:
+			DataFrame: diagnostics, with the column divided_by_largest_weight added
+		Notes:
+			A marked measure moves for every node when the heaviest link changes; read it with weight_scale.
+		"""
+
+		#	Mark
+			diagnostics.divided_by_largest_weight = [String(measure) in scaled_measures for measure in diagnostics.measure]
+
+		#	Assembling Result
+			return diagnostics
+	end
+
 #	Helper Function for network_comparator: Link-by-Link Agreement of Two Networks on the Same Nodes
 	function _edge_agreement(edges_1::DataFrame, nodes_1, edges_2::DataFrame, nodes_2;
 							 directed::Bool,
@@ -17700,337 +17878,98 @@ THE SOFTWARE.
 	end
 
 #	Version Recorded with Each Comparison
-	const LGS_VERSION = "0.3.1"
+	const LGS_VERSION = "0.4.0"
 
-#	Network Comparator: Compare Two Networks
-	function network_comparator(edges_1::DataFrame, nodes_1::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}},
-								edges_2::DataFrame, nodes_2::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}};
-								resolution_sweep::Bool = false, resolution::Float64 = 1.0, directed::Bool = true, 
-								weighted::Bool = true, n_resolutions::Int = 15, n_runs_per_gamma::Int = 5,
-								n_iterations_per_run::Int = 10, seed::Union{Int,Nothing} = nothing, 
-								provided_membership_1::Union{Nothing,DataFrame,Vector{Int},Dict} = nothing,
-								provided_membership_2::Union{Nothing,DataFrame,Vector{Int},Dict} = nothing,
-								bipartite::Union{Bool,Tuple{Bool,Bool}} = false,
-								mode_column::Union{Symbol,AbstractString} = :mode,
-								match_modes::Bool = true,
-								bin_width::Float64 = 0.125,
-								match_nodes_on::Union{Symbol,AbstractString,Nothing} = :id,
-								min_node_overlap::Float64 = 0.75)
+#	Helper Function for network_comparator and reference_analysis: Statistics of One One-Mode Network
+	function _construct_one_mode(edges::DataFrame, nodes;
+								 directed::Bool, weighted::Bool,
+								 resolution_sweep::Bool = false, resolution::Float64 = 1.0, n_resolutions::Int = 15,
+								 n_runs_per_gamma::Int = 5, n_iterations_per_run::Int = 10,
+								 seed::Union{Int,Nothing} = nothing,
+								 provided_membership::Union{Nothing,DataFrame,Vector{Int},Dict} = nothing)
 		"""
-		Compare two networks and return one similarity score.
-		
 		Args:
-			edges_1, edges_2::DataFrame: Edge lists with :src, :dst, optional :weight
-			nodes_1, nodes_2: Node universes (include isolates if present)
-			resolution_sweep::Bool: Use CHAMP multi-resolution community detection
-			resolution::Float64: Resolution parameter for modularity
-			directed::Bool: Treat networks as directed (default true)
-			weighted::Bool: Use edge weights if present (default true)
-			n_resolutions::Int: Number of resolutions for CHAMP sweep
-			n_runs_per_gamma::Int: Leiden runs per resolution
-			n_iterations_per_run::Int: Iterations per Leiden run
-			seed: Random seed for reproducibility
-			provided_membership_1, provided_membership_2: Optional pre-computed communities
-			bipartite: true when both networks are two-mode; a tuple declares each network
-			mode_column: Column of the node tables naming each node's mode (two-mode only)
-			match_modes::Bool: Require the two networks' mode names to agree (two-mode only)
-			bin_width::Float64: Bin width for comparing node-level distributions (default = 0.125)
-			match_nodes_on::Union{Symbol,AbstractString,Nothing}: How nodes of the two networks are identified as the
-				same entity for the angular similarity: :id (default), a node-table column, or nothing to skip it
-			min_node_overlap::Float64: Least share of nodes in both networks for the angular similarity
-				to be computed (default = 0.75)
+			edges::DataFrame: edge list with :src, :dst, and optionally :weight
+			nodes: node universe (DataFrame, vector of ids, or nothing)
+			directed::Bool: whether the network is measured as directed
+			weighted::Bool: whether the network is measured as weighted
+			resolution_sweep, resolution, n_resolutions, n_runs_per_gamma, n_iterations_per_run, seed:
+				community detection settings, passed to the constructor
+			provided_membership: optional pre-computed communities
 		Returns:
-			NamedTuple with fields:
-				- global_stats_1: DataFrame of global statistics for network 1
-				- triad_census_counts_1: DataFrame of triad census for network 1
-				- node_measures_1: DataFrame of node-level measures for network 1
-				- global_stats_2: DataFrame of global statistics for network 2
-				- triad_census_counts_2: DataFrame of triad census for network 2
-				- node_measures_2: DataFrame of node-level measures for network 2
-				- combined_features: DataFrame of aligned feature vectors with weights
-				- overall_distance: Weighted Euclidean distance between the feature vectors
-				- overall_similarity: Similarity score, 1 / (1 + overall_distance)
-				- type_contributions: Per-type breakdown of the distance
-				- node_measure_diagnostics: Per node measure, the divergence, its expected
-				  noise level, and the scaled Wasserstein-1 distance (not part of the score)
-				- edge_angular_similarity, edge_angular_similarity_binary: Angular similarity of the two
-				  networks' link weights and link presence (not part of the score; NaN when not computed)
-				- edge_agreement: Node overlap and link counts behind the angular similarity
-				- undefined_features: Features undefined (NaN) in one or both networks,
-				  which are excluded from the distance, with the side that lacks them
-				- comparison_info: Feature set, binning, bin width, version, the type declared and the
-				  type found for each network, and the modes of each network
+			Tuple: (global_stats::DataFrame, triad_census_counts::DataFrame, node_measures::DataFrame)
 		Notes:
-			- Tests each network's links: two symmetric networks are compared as undirected and two
-			  networks whose weights are all 1 as binary, whatever was declared
-			- Returns individual network analyses alongside comparison results
-			- Applies category weights to multi-indicator measures
-			- Node-level distributions are compared on a geometric axis with bins of fixed width
+			Chooses among the four one-mode constructors on direction and weight.
 		"""
 
-		#	Validation
-			if !(isfinite(bin_width) && bin_width > 0.0)
-				throw(ArgumentError("bin_width must be a positive number; got $bin_width."))
-			end
-			if !(0.0 <= min_node_overlap <= 1.0)
-				throw(ArgumentError("min_node_overlap must lie between 0 and 1; got $min_node_overlap."))
-			end
-		
-		#	Create working copies
-			clean_edges_1 = deepcopy(edges_1) 
-			clean_nodes_1 = deepcopy(nodes_1)
-			clean_edges_2 = deepcopy(edges_2)
-			clean_nodes_2 = deepcopy(nodes_2)
-		
-		#	========== CONSTRUCT FEATURE VECTORS ==========
-		
-		#	Refuse a two-mode network against a one-mode network
-			bipartite_1, bipartite_2 = bipartite isa Tuple ? bipartite : (bipartite, bipartite)
-			if bipartite_1 != bipartite_2
-				throw(ArgumentError(MIXED_MODE_MESSAGE))
-			end
+		#	Constructor for this type of network
+			constructor = directed ? (weighted ? directed_weighted_constructor : directed_binary_constructor) :
+									 (weighted ? undirected_weighted_constructor : undirected_binary_constructor)
 
-		#	Test each network's type from its links
-			declared_type = (bipartite_1 ? "" : (directed ? "directed " : "undirected ")) * (weighted ? "weighted" : "binary")
-			found_1 = _found_network_type(clean_edges_1, clean_nodes_1)
-			found_2 = _found_network_type(clean_edges_2, clean_nodes_2)
-			type_notes = String[]
+		#	Assembling Result
+			return constructor(edges, nodes;
+							   resolution_sweep = resolution_sweep,
+							   resolution = resolution,
+							   directed = directed,
+							   weighted = weighted,
+							   n_resolutions = n_resolutions,
+							   n_runs_per_gamma = n_runs_per_gamma,
+							   n_iterations_per_run = n_iterations_per_run,
+							   seed = seed,
+							   provided_membership = provided_membership)
+	end
 
-		#	Two symmetric networks are undirected, whatever was declared
-			if !bipartite_1 && directed
-				if found_1.symmetric && found_2.symmetric
-					directed = false
-					clean_edges_1 = found_1.undirected_edges
-					clean_edges_2 = found_2.undirected_edges
-					push!(type_notes, "declared directed; both networks are symmetric and are compared as undirected")
-				elseif found_1.symmetric || found_2.symmetric
-					push!(type_notes, "declared directed; network $(found_1.symmetric ? 1 : 2) is symmetric and the other is not, so both are compared as directed")
-				end
-			end
+#	Helper Function for network_comparator and compare_to_reference: Feature Vector of One One-Mode Network
+	function _one_mode_feature_vector(global_stats::DataFrame, triad_census_counts::DataFrame, node_measures::DataFrame;
+									  directed::Bool, weighted::Bool)
+		"""
+		Args:
+			global_stats::DataFrame: global statistics from a one-mode constructor
+			triad_census_counts::DataFrame: triad census from the same constructor
+			node_measures::DataFrame: node-level measures from the same constructor
+			directed::Bool: whether the network was measured as directed
+			weighted::Bool: whether the network was measured as weighted
+		Returns:
+			DataFrame: the network's feature vector (measure, value, type)
+		Notes:
+			Chooses among the four one-mode feature builders on direction and weight.
+		"""
 
-		#	Two networks whose weights are all 1 are binary, whatever was declared
-			if weighted
-				if found_1.binary && found_2.binary
-					weighted = false
-					push!(type_notes, "declared weighted; every weight in both networks is 1 and they are compared as binary")
-				elseif found_1.binary || found_2.binary
-					push!(type_notes, "declared weighted; every weight in network $(found_1.binary ? 1 : 2) is 1 and the other's weights vary, so both are compared as weighted")
-				end
-			end
+		#	Feature builder for this type of network
+			builder = directed ? (weighted ? directed_weighted_feature_builder : directed_binary_feature_builder) :
+								 (weighted ? symmetric_weighted_feature_builder : symmetric_binary_feature_builder)
 
-		#	A declaration that sets weight aside is a choice: it is kept, and recorded
-			if endswith(declared_type, "binary") && !(found_1.binary && found_2.binary)
-				push!(type_notes, "declared binary; weights vary and are not used")
-			end
+		#	Assembling Result
+			return builder(global_stats, triad_census_counts, node_measures)
+	end
 
-		#	Link-by-link agreement, when the two networks are on the same nodes (not part of the score)
-			agreement = _edge_agreement(clean_edges_1, clean_nodes_1, clean_edges_2, clean_nodes_2;
-										directed = bipartite_1 || directed,
-										match_nodes_on = match_nodes_on, min_node_overlap = min_node_overlap)
-			edge_agreement = DataFrame(
-				item = ["computed", "angular_similarity", "angular_similarity_binary", "node_overlap", "min_node_overlap",
-						"nodes_both", "nodes_1_only", "nodes_2_only", "links_both", "links_1_only", "links_2_only", "links_reweighted", "note"],
-				value = [string(agreement.computed), string(agreement.angular_similarity), string(agreement.angular_similarity_binary),
-						 string(agreement.node_overlap), string(min_node_overlap),
-						 string(agreement.nodes_both), string(agreement.nodes_1_only), string(agreement.nodes_2_only),
-						 string(agreement.links_both), string(agreement.links_1_only), string(agreement.links_2_only),
-						 string(agreement.links_reweighted), agreement.note])
+#	Helper Function for network_comparator and compare_to_reference: Normalize, Align, and Score Two Feature Vectors
+	function _score_feature_vectors(feature_vector_1::DataFrame, feature_vector_2::DataFrame,
+									node_measures_1::DataFrame, node_measures_2::DataFrame,
+									global_stats_1::DataFrame, global_stats_2::DataFrame,
+									directed::Bool, bipartite_1::Bool, bin_width::Float64)
+		"""
+		Args:
+			feature_vector_1::DataFrame: feature vector of network 1 (measure, value, type)
+			feature_vector_2::DataFrame: feature vector of network 2
+			node_measures_1::DataFrame: node-level measures of network 1 (normalized columns are added to it)
+			node_measures_2::DataFrame: node-level measures of network 2 (normalized columns are added to it)
+			global_stats_1::DataFrame: global statistics of network 1 (its first row is the node count)
+			global_stats_2::DataFrame: global statistics of network 2
+			directed::Bool: whether the networks are compared as directed
+			bipartite_1::Bool: whether the networks are two-mode
+			bin_width::Float64: bin width for the node-level distributions
+		Returns:
+			NamedTuple:
+				- combined_features::DataFrame: aligned feature vectors with weights
+				- overall: NamedTuple from _compute_overall_distance (distance, similarity, squared_distance)
+				- type_contributions::DataFrame: per-type breakdown of the distance
+				- node_measure_diagnostics::DataFrame: per-measure diagnostics of the node-level comparison
+		Notes:
+			Everything here is pairwise and cheap: it is run for every pair, including a pair
+			whose first network's statistics were computed earlier and kept.
+		"""
 
-		#	Record which feature set is used
-			feature_set = bipartite_1 ? "two-mode " * (weighted ? "weighted" : "binary") :
-						  "one-mode " * (directed ? "directed " : "undirected ") * (weighted ? "weighted" : "binary")
-			comparison_info = DataFrame(item = ["feature_set", "node_measure_binning", "bin_width", "lgs_version",
-												"declared_type", "found_type_1", "found_type_2", "type_note",
-												"node_overlap", "min_node_overlap", "edge_agreement_note"],
-										value = [feature_set, "geometric axis, fixed bin width, linear binning", string(bin_width), LGS_VERSION,
-												 declared_type, found_1.description, found_2.description, join(type_notes, "; "),
-												 string(agreement.node_overlap), string(min_node_overlap), agreement.note])
-
-		#	Select appropriate constructor and builder based on configuration
-			if bipartite_1
-				#	Two-mode networks
-					if provided_membership_1 !== nothing || provided_membership_2 !== nothing || resolution_sweep
-						@warn "Community measures are not part of the two-mode feature set; memberships and the resolution sweep are ignored."
-					end
-
-				#	Resolve the modes of both networks
-					modes_1 = _resolve_bipartite_modes(clean_edges_1, clean_nodes_1; mode_column = mode_column)
-					modes_2 = _resolve_bipartite_modes(clean_edges_2, clean_nodes_2; mode_column = mode_column)
-					source_mode_1 = modes_1.source_mode
-					source_mode_2 = modes_2.source_mode
-					names_1 = lowercase.([modes_1.source_mode, modes_1.target_mode])
-					names_2 = lowercase.([modes_2.source_mode, modes_2.target_mode])
-
-				#	Refuse networks whose modes differ
-					if match_modes && Set(names_1) != Set(names_2)
-						throw(ArgumentError("The two networks have different modes: '$(modes_1.source_mode)' x '$(modes_1.target_mode)' against '$(modes_2.source_mode)' x '$(modes_2.target_mode)'. " *
-											"Each mode is compared with its counterpart, so the mode names must agree. Pass match_modes = false to compare source with source and target with target regardless of names."))
-					end
-
-				#	Settle one orientation for both networks
-					if match_modes && names_1[1] != names_2[1]
-						if modes_1.one_way && modes_2.one_way
-							#	Two one-way networks that run in opposite directions
-								throw(ArgumentError("The two networks run in opposite directions: '$(modes_1.source_mode)' sends in the first and '$(modes_2.source_mode)' sends in the second. " *
-													"Orientation is part of what a two-mode network means, so they are not compared."))
-						elseif modes_2.one_way
-							#	The one-way network fixes the orientation
-								source_mode_1 = modes_1.target_mode
-						else
-							#	Otherwise the first network fixes it
-								source_mode_2 = modes_2.target_mode
-						end
-					end
-
-				#	Compute statistics
-					global_stats_1, triad_census_counts_1, node_measures_1 = bipartite_constructor(
-						clean_edges_1, clean_nodes_1; weighted = weighted, mode_column = mode_column, source_mode = source_mode_1)
-					global_stats_2, triad_census_counts_2, node_measures_2 = bipartite_constructor(
-						clean_edges_2, clean_nodes_2; weighted = weighted, mode_column = mode_column, source_mode = source_mode_2)
-
-				#	Build feature vectors on one shared feature set
-					backward_1 = parse(Int64, global_stats_1.value[findfirst(==("num_backward_edges"), global_stats_1.measure)])
-					backward_2 = parse(Int64, global_stats_2.value[findfirst(==("num_backward_edges"), global_stats_2.measure)])
-					include_backward = backward_1 + backward_2 > 0
-					feature_vector_1 = bipartite_feature_builder(global_stats_1, triad_census_counts_1, node_measures_1; include_backward = include_backward)
-					feature_vector_2 = bipartite_feature_builder(global_stats_2, triad_census_counts_2, node_measures_2; include_backward = include_backward)
-
-				#	Record the modes
-					mode_items = ["source_mode", "target_mode"]
-					append!(comparison_info, DataFrame(
-						item = [mode_items .* "_1"; mode_items .* "_2"],
-						value = [[global_stats_1.value[findfirst(==(item), global_stats_1.measure)] for item in mode_items];
-								 [global_stats_2.value[findfirst(==(item), global_stats_2.measure)] for item in mode_items]]))
-
-			elseif !directed && !weighted
-				#	Undirected binary networks
-					global_stats_1, triad_census_counts_1, node_measures_1 = undirected_binary_constructor(
-						clean_edges_1, clean_nodes_1;
-						resolution_sweep = resolution_sweep,
-						resolution = resolution,
-						directed = directed,
-						weighted = weighted,
-						n_resolutions = n_resolutions,
-						n_runs_per_gamma = n_runs_per_gamma,
-						n_iterations_per_run = n_iterations_per_run,
-						seed = seed,
-						provided_membership = provided_membership_1
-					)
-				
-					global_stats_2, triad_census_counts_2, node_measures_2 = undirected_binary_constructor(
-						clean_edges_2, clean_nodes_2;
-						resolution_sweep = resolution_sweep,
-						resolution = resolution,
-						directed = directed,
-						weighted = weighted,
-						n_resolutions = n_resolutions,
-						n_runs_per_gamma = n_runs_per_gamma,
-						n_iterations_per_run = n_iterations_per_run,
-						seed = seed,
-						provided_membership = provided_membership_2
-					)
-				
-				#	Build feature vectors
-					feature_vector_1 = symmetric_binary_feature_builder(global_stats_1, triad_census_counts_1, node_measures_1)
-					feature_vector_2 = symmetric_binary_feature_builder(global_stats_2, triad_census_counts_2, node_measures_2)
-			
-			elseif !directed && weighted
-				#	Undirected weighted networks
-					global_stats_1, triad_census_counts_1, node_measures_1 = undirected_weighted_constructor(
-						clean_edges_1, clean_nodes_1;
-						resolution_sweep = resolution_sweep,
-						resolution = resolution,
-						directed = directed,
-						weighted = weighted,
-						n_resolutions = n_resolutions,
-						n_runs_per_gamma = n_runs_per_gamma,
-						n_iterations_per_run = n_iterations_per_run,
-						seed = seed,
-						provided_membership = provided_membership_1
-					)
-				
-					global_stats_2, triad_census_counts_2, node_measures_2 = undirected_weighted_constructor(
-						clean_edges_2, clean_nodes_2;
-						resolution_sweep = resolution_sweep,
-						resolution = resolution,
-						directed = directed,
-						weighted = weighted,
-						n_resolutions = n_resolutions,
-						n_runs_per_gamma = n_runs_per_gamma,
-						n_iterations_per_run = n_iterations_per_run,
-						seed = seed,
-						provided_membership = provided_membership_2
-					)
-				
-				#	Build feature vectors
-					feature_vector_1 = symmetric_weighted_feature_builder(global_stats_1, triad_census_counts_1, node_measures_1)
-					feature_vector_2 = symmetric_weighted_feature_builder(global_stats_2, triad_census_counts_2, node_measures_2)
-			
-			elseif directed && !weighted
-				#	Directed binary networks
-					global_stats_1, triad_census_counts_1, node_measures_1 = directed_binary_constructor(
-						clean_edges_1, clean_nodes_1;
-						resolution_sweep = resolution_sweep,
-						resolution = resolution,
-						directed = directed,
-						weighted = weighted,
-						n_resolutions = n_resolutions,
-						n_runs_per_gamma = n_runs_per_gamma,
-						n_iterations_per_run = n_iterations_per_run,
-						seed = seed,
-						provided_membership = provided_membership_1
-					)
-				
-					global_stats_2, triad_census_counts_2, node_measures_2 = directed_binary_constructor(
-						clean_edges_2, clean_nodes_2;
-						resolution_sweep = resolution_sweep,
-						resolution = resolution,
-						directed = directed,
-						weighted = weighted,
-						n_resolutions = n_resolutions,
-						n_runs_per_gamma = n_runs_per_gamma,
-						n_iterations_per_run = n_iterations_per_run,
-						seed = seed,
-						provided_membership = provided_membership_2
-					)
-				
-				#	Build feature vectors
-					feature_vector_1 = directed_binary_feature_builder(global_stats_1, triad_census_counts_1, node_measures_1)
-					feature_vector_2 = directed_binary_feature_builder(global_stats_2, triad_census_counts_2, node_measures_2)
-			
-			else
-				#	Directed weighted networks
-					global_stats_1, triad_census_counts_1, node_measures_1 = directed_weighted_constructor(
-						clean_edges_1, clean_nodes_1;
-						resolution_sweep = resolution_sweep,
-						resolution = resolution,
-						directed = directed,
-						weighted = weighted,
-						n_resolutions = n_resolutions,
-						n_runs_per_gamma = n_runs_per_gamma,
-						n_iterations_per_run = n_iterations_per_run,
-						seed = seed,
-						provided_membership = provided_membership_1
-					)
-				
-					global_stats_2, triad_census_counts_2, node_measures_2 = directed_weighted_constructor(
-						clean_edges_2, clean_nodes_2;
-						resolution_sweep = resolution_sweep,
-						resolution = resolution,
-						directed = directed,
-						weighted = weighted,
-						n_resolutions = n_resolutions,
-						n_runs_per_gamma = n_runs_per_gamma,
-						n_iterations_per_run = n_iterations_per_run,
-						seed = seed,
-						provided_membership = provided_membership_2
-					)
-				
-				#	Build feature vectors
-					feature_vector_1 = directed_weighted_feature_builder(global_stats_1, triad_census_counts_1, node_measures_1)
-					feature_vector_2 = directed_weighted_feature_builder(global_stats_2, triad_census_counts_2, node_measures_2)
-			end
-		
 		#	========== GLOBAL METRIC NORMALIZATIONS ==========
 		
 		#	Isolate Numerators
@@ -18214,7 +18153,273 @@ THE SOFTWARE.
 		
 		#	Compute type-level contributions
 			type_contributions = _compute_type_contributions(combined_measures, overall.squared_distance; use_weights = true)
+
+		#	Assembling Result
+			return (combined_features = combined_measures, overall = overall, type_contributions = type_contributions,
+					node_measure_diagnostics = node_measure_diagnostics)
+	end
+
+#	Helper Function for Network Comparator: Give Every Network a Node Table
+	function _node_table(edges::DataFrame, nodes)
+		"""
+		Args:
+			edges::DataFrame: edge list with :src and :dst
+			nodes: a node table, a vector of ids, or nothing
+		Returns:
+			DataFrame: the node table as given, or a table with columns id and label
+		Notes:
+			A vector of ids becomes a table of those ids, followed by any endpoint of a link that it lacks.
+			nothing becomes a table of the endpoints of the links.
+			The measures are computed from a node table, so the other two forms are converted here.
+		"""
+
+		#	A node table is used as it is
+			if nodes isa DataFrame
+				return nodes
+			end
+
+		#	Ids given, then endpoints not among them
+			given = nodes === nothing ? String[] : unique(string.(nodes))
+			endpoints = sort(unique(vcat(string.(edges.src), string.(edges.dst))))
+			ids = vcat(given, setdiff(endpoints, given))
+
+		#	Assembling Result
+			return DataFrame(id = ids, label = ids)
+	end
+
+#	Network Comparator: Compare Two Networks
+	function network_comparator(edges_1::DataFrame, nodes_1::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}},
+								edges_2::DataFrame, nodes_2::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}};
+								resolution_sweep::Bool = false, resolution::Float64 = 1.0, directed::Bool = true, 
+								weighted::Bool = true, n_resolutions::Int = 15, n_runs_per_gamma::Int = 5,
+								n_iterations_per_run::Int = 10, seed::Union{Int,Nothing} = nothing, 
+								provided_membership_1::Union{Nothing,DataFrame,Vector{Int},Dict} = nothing,
+								provided_membership_2::Union{Nothing,DataFrame,Vector{Int},Dict} = nothing,
+								bipartite::Union{Bool,Tuple{Bool,Bool}} = false,
+								mode_column::Union{Symbol,AbstractString} = :mode,
+								match_modes::Bool = true,
+								bin_width::Float64 = 0.125,
+								match_nodes_on::Union{Symbol,AbstractString,Nothing} = :id,
+								min_node_overlap::Float64 = 0.75)
+		"""
+		Compare two networks and return one similarity score.
 		
+		Args:
+			edges_1, edges_2::DataFrame: Edge lists with :src, :dst, optional :weight
+			nodes_1, nodes_2: Node universes (include isolates if present)
+			resolution_sweep::Bool: Use CHAMP multi-resolution community detection
+			resolution::Float64: Resolution parameter for modularity
+			directed::Bool: Treat networks as directed (default true)
+			weighted::Bool: Use edge weights if present (default true)
+			n_resolutions::Int: Number of resolutions for CHAMP sweep
+			n_runs_per_gamma::Int: Leiden runs per resolution
+			n_iterations_per_run::Int: Iterations per Leiden run
+			seed: Random seed for reproducibility
+			provided_membership_1, provided_membership_2: Optional pre-computed communities
+			bipartite: true when both networks are two-mode; a tuple declares each network
+			mode_column: Column of the node tables naming each node's mode (two-mode only)
+			match_modes::Bool: Require the two networks' mode names to agree (two-mode only)
+			bin_width::Float64: Bin width for comparing node-level distributions (default = 0.125)
+			match_nodes_on::Union{Symbol,AbstractString,Nothing}: How nodes of the two networks are identified as the
+				same entity for the angular similarity: :id (default), a node-table column, or nothing to skip it
+			min_node_overlap::Float64: Least share of nodes in both networks for the angular similarity
+				to be computed (default = 0.75)
+		Returns:
+			NamedTuple with fields:
+				- global_stats_1: DataFrame of global statistics for network 1
+				- triad_census_counts_1: DataFrame of triad census for network 1
+				- node_measures_1: DataFrame of node-level measures for network 1
+				- global_stats_2: DataFrame of global statistics for network 2
+				- triad_census_counts_2: DataFrame of triad census for network 2
+				- node_measures_2: DataFrame of node-level measures for network 2
+				- combined_features: DataFrame of aligned feature vectors with weights
+				- overall_distance: Weighted Euclidean distance between the feature vectors
+				- overall_similarity: Similarity score, 1 / (1 + overall_distance)
+				- type_contributions: Per-type breakdown of the distance
+				- node_measure_diagnostics: Per node measure, the divergence, its expected
+				  noise level, and the scaled Wasserstein-1 distance (not part of the score)
+				- edge_angular_similarity, edge_angular_similarity_binary: Angular similarity of the two
+				  networks' link weights and link presence (not part of the score; NaN when not computed)
+				- edge_agreement: Node overlap and link counts behind the angular similarity
+				- undefined_features: Features undefined (NaN) in one or both networks,
+				  which are excluded from the distance, with the side that lacks them
+				- comparison_info: Feature set, binning, bin width, version, the type declared and the
+				  type found for each network, and the modes of each network
+		Notes:
+			- Tests each network's links: two symmetric networks are compared as undirected and two
+			  networks whose weights are all 1 as binary, whatever was declared
+			- Returns individual network analyses alongside comparison results
+			- Applies category weights to multi-indicator measures
+			- Node-level distributions are compared on a geometric axis with bins of fixed width
+		"""
+
+		#	Validation
+			if !(isfinite(bin_width) && bin_width > 0.0)
+				throw(ArgumentError("bin_width must be a positive number; got $bin_width."))
+			end
+			if !(0.0 <= min_node_overlap <= 1.0)
+				throw(ArgumentError("min_node_overlap must lie between 0 and 1; got $min_node_overlap."))
+			end
+		
+		#	Create working copies
+			clean_edges_1 = deepcopy(edges_1) 
+			clean_nodes_1 = _node_table(clean_edges_1, deepcopy(nodes_1))
+			clean_edges_2 = deepcopy(edges_2)
+			clean_nodes_2 = _node_table(clean_edges_2, deepcopy(nodes_2))
+		
+		#	========== CONSTRUCT FEATURE VECTORS ==========
+		
+		#	Refuse a two-mode network against a one-mode network
+			bipartite_1, bipartite_2 = bipartite isa Tuple ? bipartite : (bipartite, bipartite)
+			if bipartite_1 != bipartite_2
+				throw(ArgumentError(MIXED_MODE_MESSAGE))
+			end
+
+		#	Test each network's type from its links
+			declared_type = (bipartite_1 ? "" : (directed ? "directed " : "undirected ")) * (weighted ? "weighted" : "binary")
+			found_1 = _found_network_type(clean_edges_1, clean_nodes_1)
+			found_2 = _found_network_type(clean_edges_2, clean_nodes_2)
+			type_notes = String[]
+
+		#	Two symmetric networks are undirected, whatever was declared
+			if !bipartite_1 && directed
+				if found_1.symmetric && found_2.symmetric
+					directed = false
+					clean_edges_1 = found_1.undirected_edges
+					clean_edges_2 = found_2.undirected_edges
+					push!(type_notes, "declared directed; both networks are symmetric and are compared as undirected")
+				elseif found_1.symmetric || found_2.symmetric
+					push!(type_notes, "declared directed; network $(found_1.symmetric ? 1 : 2) is symmetric and the other is not, so both are compared as directed")
+				end
+			end
+
+		#	Two networks whose weights are all 1 are binary, whatever was declared
+			if weighted
+				if found_1.binary && found_2.binary
+					weighted = false
+					push!(type_notes, "declared weighted; every weight in both networks is 1 and they are compared as binary")
+				elseif found_1.binary || found_2.binary
+					push!(type_notes, "declared weighted; every weight in network $(found_1.binary ? 1 : 2) is 1 and the other's weights vary, so both are compared as weighted")
+				end
+			end
+
+		#	A declaration that sets weight aside is a choice: it is kept, and recorded
+			if endswith(declared_type, "binary") && !(found_1.binary && found_2.binary)
+				push!(type_notes, "declared binary; weights vary and are not used")
+			end
+
+		#	Link-by-link agreement, when the two networks are on the same nodes (not part of the score)
+			agreement = _edge_agreement(clean_edges_1, clean_nodes_1, clean_edges_2, clean_nodes_2;
+										directed = bipartite_1 || directed,
+										match_nodes_on = match_nodes_on, min_node_overlap = min_node_overlap)
+			edge_agreement = DataFrame(
+				item = ["computed", "angular_similarity", "angular_similarity_binary", "node_overlap", "min_node_overlap",
+						"nodes_both", "nodes_1_only", "nodes_2_only", "links_both", "links_1_only", "links_2_only", "links_reweighted", "note"],
+				value = [string(agreement.computed), string(agreement.angular_similarity), string(agreement.angular_similarity_binary),
+						 string(agreement.node_overlap), string(min_node_overlap),
+						 string(agreement.nodes_both), string(agreement.nodes_1_only), string(agreement.nodes_2_only),
+						 string(agreement.links_both), string(agreement.links_1_only), string(agreement.links_2_only),
+						 string(agreement.links_reweighted), agreement.note])
+
+		#	Record which feature set is used
+			feature_set = bipartite_1 ? "two-mode " * (weighted ? "weighted" : "binary") :
+						  "one-mode " * (directed ? "directed " : "undirected ") * (weighted ? "weighted" : "binary")
+			comparison_info = DataFrame(item = ["feature_set", "node_measure_binning", "bin_width", "lgs_version",
+												"declared_type", "found_type_1", "found_type_2", "type_note",
+												"node_overlap", "min_node_overlap", "edge_agreement_note"],
+										value = [feature_set, "geometric axis, fixed bin width, linear binning", string(bin_width), LGS_VERSION,
+												 declared_type, found_1.description, found_2.description, join(type_notes, "; "),
+												 string(agreement.node_overlap), string(min_node_overlap), agreement.note])
+
+		#	Select appropriate constructor and builder based on configuration
+			if bipartite_1
+				#	Two-mode networks
+					if provided_membership_1 !== nothing || provided_membership_2 !== nothing || resolution_sweep
+						@warn "Community measures are not part of the two-mode feature set; memberships and the resolution sweep are ignored."
+					end
+
+				#	Resolve the modes of both networks
+					modes_1 = _resolve_bipartite_modes(clean_edges_1, clean_nodes_1; mode_column = mode_column)
+					modes_2 = _resolve_bipartite_modes(clean_edges_2, clean_nodes_2; mode_column = mode_column)
+					source_mode_1 = modes_1.source_mode
+					source_mode_2 = modes_2.source_mode
+					names_1 = lowercase.([modes_1.source_mode, modes_1.target_mode])
+					names_2 = lowercase.([modes_2.source_mode, modes_2.target_mode])
+
+				#	Refuse networks whose modes differ
+					if match_modes && Set(names_1) != Set(names_2)
+						throw(ArgumentError("The two networks have different modes: '$(modes_1.source_mode)' x '$(modes_1.target_mode)' against '$(modes_2.source_mode)' x '$(modes_2.target_mode)'. " *
+											"Each mode is compared with its counterpart, so the mode names must agree. Pass match_modes = false to compare source with source and target with target regardless of names."))
+					end
+
+				#	Settle one orientation for both networks
+					if match_modes && names_1[1] != names_2[1]
+						if modes_1.one_way && modes_2.one_way
+							#	Two one-way networks that run in opposite directions
+								throw(ArgumentError("The two networks run in opposite directions: '$(modes_1.source_mode)' sends in the first and '$(modes_2.source_mode)' sends in the second. " *
+													"Orientation is part of what a two-mode network means, so they are not compared."))
+						elseif modes_2.one_way
+							#	The one-way network fixes the orientation
+								source_mode_1 = modes_1.target_mode
+						else
+							#	Otherwise the first network fixes it
+								source_mode_2 = modes_2.target_mode
+						end
+					end
+
+				#	Compute statistics
+					global_stats_1, triad_census_counts_1, node_measures_1 = bipartite_constructor(
+						clean_edges_1, clean_nodes_1; weighted = weighted, mode_column = mode_column, source_mode = source_mode_1)
+					global_stats_2, triad_census_counts_2, node_measures_2 = bipartite_constructor(
+						clean_edges_2, clean_nodes_2; weighted = weighted, mode_column = mode_column, source_mode = source_mode_2)
+
+				#	Build feature vectors on one shared feature set
+					backward_1 = parse(Int64, global_stats_1.value[findfirst(==("num_backward_edges"), global_stats_1.measure)])
+					backward_2 = parse(Int64, global_stats_2.value[findfirst(==("num_backward_edges"), global_stats_2.measure)])
+					include_backward = backward_1 + backward_2 > 0
+					feature_vector_1 = bipartite_feature_builder(global_stats_1, triad_census_counts_1, node_measures_1; include_backward = include_backward)
+					feature_vector_2 = bipartite_feature_builder(global_stats_2, triad_census_counts_2, node_measures_2; include_backward = include_backward)
+
+				#	Record the modes
+					mode_items = ["source_mode", "target_mode"]
+					append!(comparison_info, DataFrame(
+						item = [mode_items .* "_1"; mode_items .* "_2"],
+						value = [[global_stats_1.value[findfirst(==(item), global_stats_1.measure)] for item in mode_items];
+								 [global_stats_2.value[findfirst(==(item), global_stats_2.measure)] for item in mode_items]]))
+
+			else
+				#	One-mode networks: compute statistics
+					global_stats_1, triad_census_counts_1, node_measures_1 = _construct_one_mode(
+						clean_edges_1, clean_nodes_1; directed = directed, weighted = weighted,
+						resolution_sweep = resolution_sweep, resolution = resolution, n_resolutions = n_resolutions,
+						n_runs_per_gamma = n_runs_per_gamma, n_iterations_per_run = n_iterations_per_run,
+						seed = seed, provided_membership = provided_membership_1)
+					global_stats_2, triad_census_counts_2, node_measures_2 = _construct_one_mode(
+						clean_edges_2, clean_nodes_2; directed = directed, weighted = weighted,
+						resolution_sweep = resolution_sweep, resolution = resolution, n_resolutions = n_resolutions,
+						n_runs_per_gamma = n_runs_per_gamma, n_iterations_per_run = n_iterations_per_run,
+						seed = seed, provided_membership = provided_membership_2)
+
+				#	Build feature vectors
+					feature_vector_1 = _one_mode_feature_vector(global_stats_1, triad_census_counts_1, node_measures_1; directed = directed, weighted = weighted)
+					feature_vector_2 = _one_mode_feature_vector(global_stats_2, triad_census_counts_2, node_measures_2; directed = directed, weighted = weighted)
+			end
+
+		#	========== NORMALIZE, ALIGN, AND SCORE ==========
+
+		#	Compare the two feature vectors
+			scored = _score_feature_vectors(feature_vector_1, feature_vector_2, node_measures_1, node_measures_2,
+											global_stats_1, global_stats_2, directed, bipartite_1, bin_width)
+			combined_measures = scored.combined_features
+			overall = scored.overall
+			type_contributions = scored.type_contributions
+			node_measure_diagnostics = scored.node_measure_diagnostics
+
+		#	Weight scale: one heavy link, or the distribution of weights
+			weight_scale = _weight_scale(clean_edges_1, clean_edges_2; directed = directed, weighted = weighted, bipartite = bipartite_1, bin_width = bin_width)
+			_mark_scaled_measures!(node_measure_diagnostics, weight_scale.scaled_measures)
+			push!(comparison_info, ("weight_scale_note", weight_scale.note))
+
 		#	Return comprehensive results
 			return (global_stats_1 = global_stats_1, 
 					triad_census_counts_1 = triad_census_counts_1, 
@@ -18230,6 +18435,7 @@ THE SOFTWARE.
 					edge_angular_similarity = agreement.angular_similarity,
 					edge_angular_similarity_binary = agreement.angular_similarity_binary,
 					edge_agreement = edge_agreement,
+					weight_scale = weight_scale.table,
 					undefined_features = _undefined_features(combined_measures),
 					comparison_info = comparison_info)
 	end
@@ -18257,10 +18463,12 @@ THE SOFTWARE.
 	- `mode_column::Union{Symbol,AbstractString}`: Column of the node tables that names each node's mode (default `:mode`). Two-mode only.
 	- `match_modes::Bool`: Require the two networks' mode names to agree (default true). Two-mode only.
 	- `bin_width::Float64`: Bin width used to compare node-level distributions (default 0.125). See Details.
-	- `match_nodes_on::Union{Symbol,AbstractString,Nothing}`: How a node of one network is identified with a node of the other, for the angular similarity. 
+	- `match_nodes_on::Union{Symbol,AbstractString,Nothing}`: How a node of one network is identified with a node of the other, 
+      for the angular similarity. 
     `:id` (default) matches on node id. A node-table column name matches on that column; use it when ids were changed, 
     for example to meet an external standard, and a column carries the common identity. `nothing` skips the angular similarity.
-	- `min_node_overlap::Float64`: Least share of nodes that must be in both networks for the angular similarity to be computed (default 0.75). See Details.
+	- `min_node_overlap::Float64`: Least share of nodes that must be in both networks for the angular similarity to be computed (default 0.75). 
+      See Details.
 
 	**Details**
 	Each network is reduced to a feature vector. The score is `1 / (1 + d)`, where `d` is the weighted Euclidean distance between the two vectors.
@@ -18271,7 +18479,8 @@ THE SOFTWARE.
     a symmetric network has no direction to measure, and the directed feature set would count each of its node measures several times over. 
     When every weight in both networks is 1 they are compared as binary, even if `weighted = true`. 
     Both networks are always measured on one feature set, so if only one of them is symmetric (or binary) the declaration stands. 
-    A declaration that sets direction or weight aside (`directed = false` on links that run one way, `weighted = false` on weights that vary) is a choice and is kept. 
+    A declaration that sets direction or weight aside (`directed = false` on links that run one way, `weighted = false` on weights that vary) is 
+    a choice and is kept. 
     `comparison_info` records the type declared, the type found for each network, and any change.
 
 	*Global features.* Density, components, reciprocity, and the other network-level measures enter as they are, with three adjustments. 
@@ -18283,10 +18492,14 @@ THE SOFTWARE.
 	*Node-level distributions.* Each node measure (degree, reach, clustering, PageRank, core number, and so on) contributes one feature: 
      the distance between the two networks' distributions of that measure. Every measure is compared in the same way:
 	1. *Scale.* The typical value `s` is the median nonzero magnitude of the two distributions pooled, with the two networks weighted equally.
-	2. *Geometric axis.* Each node value `x` is placed at `u = asinh(x / s)`. The axis is linear near zero and logarithmic in the tails, so a heavy tail does not empty the bins that hold most nodes. Zeros and negative values keep their place.
-	3. *Bins.* The range runs from the joint minimum to the joint maximum and always includes zero. It is divided into bins of width `bin_width`, so a wider distribution gets more bins and not wider ones. At least two bins are used.
-	4. *Linear binning.* Each node is shared between the two nearest bin centres in proportion to its closeness. A small change in a value then moves a small amount of mass, where a hard bin edge would move the whole node.
-	5. *Divergence.* The feature is the square root of the Jensen-Shannon divergence (natural logarithm) between the two binned distributions. It lies between 0 and 0.83 and is a metric.
+	2. *Geometric axis.* Each node value `x` is placed at `u = asinh(x / s)`. The axis is linear near zero and logarithmic in the tails, 
+       so a heavy tail does not empty the bins that hold most nodes. Zeros and negative values keep their place.
+	3. *Bins.* The range runs from the joint minimum to the joint maximum and always includes zero. It is divided into bins of width `bin_width`, 
+       so a wider distribution gets more bins and not wider ones. At least two bins are used.
+	4. *Linear binning.* Each node is shared between the two nearest bin centres in proportion to its closeness. 
+       A small change in a value then moves a small amount of mass, where a hard bin edge would move the whole node.
+	5. *Divergence.* The feature is the square root of the Jensen-Shannon divergence (natural logarithm) between the two binned distributions. 
+       It lies between 0 and 0.83 and is a metric.
 
 	The k-core and s-core decompositions are compared in this way, one feature per decomposition (`jsd_k_core_in`, `jsd_s_core_undirected`, and so on). 
     A node's core number is a node-level measure, and neighbouring core levels share mass under linear binning. 
@@ -18298,16 +18511,19 @@ THE SOFTWARE.
 	*Angular similarity of the links.* Beside its own score, the comparison reports a second, independent reading: 
     the angular similarity of the two networks' link weights, `1 - 2 acos(c) / pi`, where `c` is the cosine between the two weight vectors. 
     The vectors hold one entry for every link present in either network. It is given on the weights and on link presence (binary). 
-    It is not part of the similarity score. The two readings answer different questions: the angular similarity asks whether the same links are present at the same weights, 
-    and the score asks whether the two networks have the same structure. When the links largely agree and the score is low, the type contributions, 
-    the feature table, and the node measure diagnostics show which measures a small change in links has moved. The two are not on the same scale, 
-    so a gap between them is a prompt to read those tables and is not an error in either.
+    It is not part of the similarity score. The two readings answer different questions: the angular similarity asks whether the same 
+    links are present at the same weights, and the score asks whether the two networks have the same structure. 
+    When the links largely agree and the score is low, the type contributions, the feature table, and the node measure diagnostics show 
+    which measures a small change in links has moved. 
+    The two are not on the same scale, so a gap between them is a prompt to read those tables and is not an error in either.
 
 	The angular similarity compares link by link, so it means something only when the nodes of the two networks are the same entities: 
-    each pair of nodes must have been able to be tied in both. This is checked, not assumed. Nodes are matched on their ids, or on the node-table column named by `match_nodes_on`. 
+    each pair of nodes must have been able to be tied in both. This is checked, not assumed. 
+    Nodes are matched on their ids, or on the node-table column named by `match_nodes_on`. 
     The node overlap is the number of nodes in both networks divided by the number in either, counting every node in a node table or on a link. 
     The angular similarity is computed only when the overlap is at least `min_node_overlap` (default 0.75); otherwise it is `NaN` and `edge_agreement` says why. 
-    The node sets need not be identical: a node present in one network only is treated as having no links in the other, so its links count as links found in one network only. 
+    The node sets need not be identical: a node present in one network only is treated as having no links in the other, 
+    so its links count as links found in one network only. 
     Two nodes of one network with the same identity are an error, because their links would be merged.
 
 	*Diagnostics.* `node_measure_diagnostics` reports, for each node measure, the divergence, the divergence expected from sampling alone, 
@@ -18363,6 +18579,16 @@ THE SOFTWARE.
 	  of the two networks' link weights and of link presence, between 0 and 1. Not part of the
 	  score. `NaN` when the node overlap is below `min_node_overlap`, when no node matches, when
 	  a network has no links, or when `match_nodes_on = nothing`.
+	- `weight_scale::DataFrame`: Columns [:statistic, :network_1, :network_2, :ratio]. Normalized degree is
+	  divided by the network's largest link weight, which one link sets. This table shows whether two
+	  weighted networks differ in that link or in their distribution of weights: `largest_weight`,
+	  `second_largest_weight`, `links_at_largest_weight`, `percentile_95`, `median`, `mean`, `links`, and
+	  the square root of the Jensen-Shannon divergence of the two weight distributions as they are
+	  (`sqrt_jsd_weights`) and after each is divided by its largest weight (`sqrt_jsd_weights_over_largest`).
+	  `ratio` is the larger value over the smaller. The measures concerned are marked in the column
+	  `divided_by_largest_weight` of `node_measure_diagnostics`, and `comparison_info` states the finding
+	  in words (`weight_scale_note`). Empty for networks compared as binary. Not part of the score.
+
 	- `edge_agreement::DataFrame`: Columns [:item, :value]. Rows `computed`, `angular_similarity`,
 	  `angular_similarity_binary`, `node_overlap`, `min_node_overlap`, `nodes_both`, `nodes_1_only`,
 	  `nodes_2_only`, `links_both`, `links_1_only`, `links_2_only`, `links_reweighted` (links in both
@@ -18439,8 +18665,921 @@ THE SOFTWARE.
 	Wand, M. P. (1994). Fast computation of multivariate kernel estimators. *Journal of Computational and Graphical Statistics, 3*(4), 433-445.
 	""" network_comparator
 
+#	Helper Function for reference_analysis: Fingerprint of a Network's Lists
+	function _network_fingerprint(edges::DataFrame, nodes)
+		"""
+		Args:
+			edges::DataFrame: edge list with :src, :dst, and optionally :weight
+			nodes: node table (DataFrame), vector of node ids, or nothing
+		Returns:
+			String: 16 hexadecimal digits that change when any link, weight, node, or node attribute changes
+		Notes:
+			The lists are put into sorted order first, so the fingerprint does not depend on row order.
+			The hash is 64-bit FNV-1a over the text of the lists. It is written out here, and not taken
+			from Julia's hash, so that a saved fingerprint means the same thing in every Julia version.
+			It detects change; it is not a cryptographic digest.
+		"""
+
+		#	Links as sorted text
+			weights = hasproperty(edges, :weight) ? string.(Float64.(edges.weight)) : fill("1.0", nrow(edges))
+			link_rows = sort!([string(src, '\t', dst, '\t', weight) for (src, dst, weight) in zip(edges.src, edges.dst, weights)])
+
+		#	Nodes as sorted text
+			node_rows = String[]
+			if nodes isa DataFrame
+				node_rows = sort!([join(string.(collect(row)), '\t') for row in eachrow(nodes)])
+				pushfirst!(node_rows, join(names(nodes), '\t'))
+			elseif nodes !== nothing
+				node_rows = sort!(string.(nodes))
+			end
+
+		#	64-bit FNV-1a over the bytes
+			state = 0xcbf29ce484222325
+			for row in Iterators.flatten((link_rows, ("|nodes|",), node_rows))
+				for byte in codeunits(row)
+					state = (state ⊻ UInt64(byte)) * 0x00000100000001b3
+				end
+				state = (state ⊻ 0x0a) * 0x00000100000001b3
+			end
+
+		#	Assembling Result
+			return string(state; base = 16, pad = 16)
+	end
+
+#	Helper Function for reference_analysis and compare_to_reference: The Type a Network Is Measured As
+	function _effective_network_type(edges::DataFrame, nodes, declared_directed::Bool, declared_weighted::Bool, bipartite::Bool)
+		"""
+		Args:
+			edges::DataFrame: edge list with :src, :dst, and optionally :weight
+			nodes: node universe (DataFrame, vector of ids, or nothing)
+			declared_directed::Bool: whether the network was declared directed
+			declared_weighted::Bool: whether the network was declared weighted
+			bipartite::Bool: whether the network is two-mode
+		Returns:
+			NamedTuple:
+				- directed::Bool: measured as directed (always false for a two-mode network; its direction is kept by its modes)
+				- weighted::Bool: measured as weighted
+				- edges::DataFrame: the links as measured (one per pair when a declared-directed network is symmetric)
+				- label::String: "one-mode directed weighted", "two-mode binary", and so on
+				- found::String: what the links show ("symmetric, weights vary", ...)
+				- note::String: what was changed from the declaration, or ""
+		Notes:
+			This is the single-network form of the type test in network_comparator.
+			A one-mode network declared directed whose links are symmetric is undirected.
+			A network declared weighted whose weights are all 1 is binary.
+			A declaration that sets direction or weight aside is a choice and is kept.
+		"""
+
+		#	Test the links
+			found = _found_network_type(edges, nodes)
+			notes = String[]
+
+		#	Direction
+			directed = !bipartite && declared_directed
+			measured_edges = edges
+			if directed && found.symmetric
+				directed = false
+				measured_edges = found.undirected_edges
+				push!(notes, "declared directed; the links are symmetric, so the network is undirected")
+			end
+
+		#	Weight
+			weighted = declared_weighted
+			if weighted && found.binary
+				weighted = false
+				push!(notes, "declared weighted; every weight is 1, so the network is binary")
+			elseif !declared_weighted && !found.binary
+				push!(notes, "declared binary; weights vary and are not used")
+			end
+
+		#	Assembling Result
+			label = bipartite ? "two-mode " * (weighted ? "weighted" : "binary") :
+					"one-mode " * (directed ? "directed " : "undirected ") * (weighted ? "weighted" : "binary")
+			return (directed = directed, weighted = weighted, edges = measured_edges, label = label,
+					found = found.description, note = join(notes, "; "))
+	end
+
+#	Analyse a Reference Network Once, for Comparison with Many Others
+	function reference_analysis(edges::DataFrame, nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}};
+								directed::Bool = true, weighted::Bool = true, bipartite::Bool = false,
+								mode_column::Union{Symbol,AbstractString} = :mode,
+								resolution_sweep::Bool = false, resolution::Float64 = 1.0, n_resolutions::Int = 15,
+								n_runs_per_gamma::Int = 5, n_iterations_per_run::Int = 10,
+								seed::Union{Int,Nothing} = nothing,
+								provided_membership::Union{Nothing,DataFrame,Vector{Int},Dict} = nothing)
+		"""
+		Args:
+			edges::DataFrame: edge list of the reference network (:src, :dst, optionally :weight)
+			nodes: node universe (DataFrame, vector of ids, or nothing)
+			directed::Bool: declared direction (default = true)
+			weighted::Bool: declared weighting (default = true)
+			bipartite::Bool: whether the reference is two-mode (default = false)
+			mode_column: node-table column naming each node's mode (two-mode only)
+			resolution_sweep, resolution, n_resolutions, n_runs_per_gamma, n_iterations_per_run, seed:
+				community detection settings; the same settings are used for every network compared with the reference
+			provided_membership: optional pre-computed communities for the reference
+		Returns:
+			NamedTuple:
+				- label::String: the type the reference is measured as
+				- bipartite, directed, weighted::Bool: that type in parts
+				- declared_directed, declared_weighted::Bool: the declaration
+				- found::String, type_note::String: what the links show, and what was changed
+				- edges::DataFrame, nodes: the lists as measured
+				- global_stats, triad_census_counts, node_measures::DataFrame: the reference's statistics
+				- source_mode, target_mode::String: the modes of a two-mode reference ("" otherwise)
+				- settings::DataFrame (item, value): the settings the statistics were computed under
+				- fingerprint::String: fingerprint of the lists as given
+		Notes:
+			The statistics depend only on the reference and the settings, so they are computed once.
+			The reference has one type, found from its links. A network of another type is not compared with it.
+		"""
+
+		#	Working copies
+			clean_edges = deepcopy(edges)
+			clean_nodes = _node_table(clean_edges, deepcopy(nodes))
+			fingerprint = _network_fingerprint(clean_edges, clean_nodes)
+
+		#	The type the reference is measured as
+			network_type = _effective_network_type(clean_edges, clean_nodes, directed, weighted, bipartite)
+			clean_edges = network_type.edges
+
+		#	Statistics
+			source_mode = ""
+			target_mode = ""
+			if bipartite
+				#	Two-mode: the reference fixes the orientation
+					modes = _resolve_bipartite_modes(clean_edges, clean_nodes; mode_column = mode_column)
+					source_mode = modes.source_mode
+					target_mode = modes.target_mode
+					global_stats, triad_census_counts, node_measures = bipartite_constructor(
+						clean_edges, clean_nodes; weighted = network_type.weighted, mode_column = mode_column, source_mode = source_mode)
+			else
+				#	One-mode
+					global_stats, triad_census_counts, node_measures = _construct_one_mode(
+						clean_edges, clean_nodes; directed = network_type.directed, weighted = network_type.weighted,
+						resolution_sweep = resolution_sweep, resolution = resolution, n_resolutions = n_resolutions,
+						n_runs_per_gamma = n_runs_per_gamma, n_iterations_per_run = n_iterations_per_run,
+						seed = seed, provided_membership = provided_membership)
+			end
+
+		#	Settings the statistics were computed under
+			settings = DataFrame(
+				item = ["lgs_version", "label", "bipartite", "directed", "weighted", "declared_directed", "declared_weighted",
+						"found", "type_note", "source_mode", "target_mode", "mode_column",
+						"resolution_sweep", "resolution", "n_resolutions", "n_runs_per_gamma", "n_iterations_per_run",
+						"seed", "provided_membership", "fingerprint"],
+				value = [LGS_VERSION, network_type.label, string(bipartite), string(network_type.directed), string(network_type.weighted),
+						 string(directed), string(weighted), network_type.found, network_type.note, source_mode, target_mode, string(mode_column),
+						 string(resolution_sweep), string(resolution), string(n_resolutions), string(n_runs_per_gamma), string(n_iterations_per_run),
+						 seed === nothing ? "none" : string(seed), string(provided_membership !== nothing), fingerprint])
+
+		#	Assembling Result
+			return (label = network_type.label, bipartite = bipartite, directed = network_type.directed, weighted = network_type.weighted,
+					declared_directed = directed, declared_weighted = weighted, found = network_type.found, type_note = network_type.note,
+					edges = clean_edges, nodes = clean_nodes,
+					global_stats = global_stats, triad_census_counts = triad_census_counts, node_measures = node_measures,
+					source_mode = source_mode, target_mode = target_mode, settings = settings, fingerprint = fingerprint)
+	end
+	@doc raw"""
+	**Description**
+	Analyse a reference network once, so that it can be compared with many other networks without repeating its analysis.
+
+	**Usage**
+	`reference_analysis(edges, nodes; directed=true, weighted=true, bipartite=false, mode_column=:mode, resolution_sweep=false, 
+    resolution=1.0, n_resolutions=15, n_runs_per_gamma=5, n_iterations_per_run=10, seed=nothing, provided_membership=nothing)`
+
+	**Arguments**
+	- `edges::DataFrame`: Edge list of the reference network with `:src` and `:dst` columns, optional `:weight` column
+	- `nodes::Union{Nothing,DataFrame,Vector}`: Optional node universe to include isolates
+	- `directed::Bool`: Declared direction (default true). A reference whose links are symmetric is measured as undirected.
+	- `weighted::Bool`: Declared weighting (default true). A reference whose weights are all 1 is measured as binary.
+	- `bipartite::Bool`: `true` when the reference is two-mode (default false)
+	- `mode_column::Union{Symbol,AbstractString}`: Column of the node table that names each node's mode (default `:mode`). Two-mode only.
+	- `resolution_sweep`, `resolution`, `n_resolutions`, `n_runs_per_gamma`, `n_iterations_per_run`, `seed`: Community detection settings, 
+      as in `network_comparator`. 
+    They are recorded with the reference and used for every network compared with it.
+	- `provided_membership`: Pre-computed community assignments for the reference
+
+	**Details**
+	Most of the cost of a comparison is the analysis of each network: the triad census, community detection, the core decompositions, PageRank. 
+    That analysis depends only on the network and the settings. `reference_analysis` runs it once for the reference. 
+    `compare_to_reference` then analyses one other network and compares the two, and `reference_comparator` does this for a list of networks.
+
+	The reference has one type, found from its links by the same tests as in `network_comparator`: 
+    declared directed with symmetric links is undirected, and declared weighted with all weights 1 is binary. 
+    A network of another type is not compared with the reference (see `compare_to_reference`).
+
+	Give a `seed` if the comparison is to be repeatable. With the same seed, comparing a network with the reference gives exactly the result of `network_comparator` on that pair.
+
+	**Value**
+	A `NamedTuple` with the reference's type (`label`, `bipartite`, `directed`, `weighted`), the declaration and what the links show, the lists as measured (`edges`, `nodes`), 
+    its statistics (`global_stats`, `triad_census_counts`, `node_measures`), the modes of a two-mode reference, 
+    the `settings` table, and a `fingerprint` of the lists. Pass it to `compare_to_reference` or `save_reference`.
+
+	**Examples**
+	```julia
+		reference = reference_analysis(observed_edges, observed_nodes; directed = true, weighted = true, seed = 42)
+		result = compare_to_reference(reference, simulated_edges, simulated_nodes)
+		println(result.overall_similarity)
+	```
+	**See Also**
+	`compare_to_reference`, `reference_comparator`, `save_reference`, `load_reference`, `network_comparator`
+	""" reference_analysis
+
+#	Save a Reference Analysis to a Folder
+	function save_reference(reference::NamedTuple, folder::AbstractString)
+		"""
+		Args:
+			reference::NamedTuple: result of reference_analysis
+			folder::AbstractString: folder to write to (created if absent)
+		Returns:
+			String: the folder
+		Notes:
+			Writes reference_settings.csv, reference_global_stats.csv, reference_triad_census.csv,
+			reference_node_measures.csv, reference_edges.csv, and reference_nodes.csv.
+			A reference given without a node table has no reference_nodes.csv.
+		"""
+
+		#	Write the tables
+			mkpath(folder)
+			CSV.write(joinpath(folder, "reference_settings.csv"), reference.settings)
+			CSV.write(joinpath(folder, "reference_global_stats.csv"), reference.global_stats)
+			CSV.write(joinpath(folder, "reference_triad_census.csv"), reference.triad_census_counts)
+			CSV.write(joinpath(folder, "reference_node_measures.csv"), reference.node_measures)
+			CSV.write(joinpath(folder, "reference_edges.csv"), reference.edges)
+
+		#	Node list, when there is one
+			node_path = joinpath(folder, "reference_nodes.csv")
+			if reference.nodes isa DataFrame
+				CSV.write(node_path, reference.nodes)
+			elseif reference.nodes !== nothing
+				CSV.write(node_path, DataFrame(id = string.(reference.nodes)))
+			elseif isfile(node_path)
+				rm(node_path)
+			end
+
+		#	Assembling Result
+			return String(folder)
+	end
+	@doc raw"""
+	**Description**
+	Save a reference analysis to a folder, so that later runs can reuse it.
+
+	**Usage**
+	`save_reference(reference, folder)`
+
+	**Arguments**
+	- `reference::NamedTuple`: Result of `reference_analysis`
+	- `folder::AbstractString`: Folder to write to; created if absent
+
+	**Details**
+	Six tables are written: `reference_settings.csv` (the settings, the version, the type, and the fingerprint of the lists), `reference_global_stats.csv`, 
+    `reference_triad_census.csv`, `reference_node_measures.csv`, and the lists as measured, `reference_edges.csv` and `reference_nodes.csv`.
+
+	**Value**
+	The folder, as a `String`.
+
+	**Examples**
+	```julia
+		reference = reference_analysis(edges, nodes; seed = 42)
+		save_reference(reference, "reference_statistics")
+	```
+	**See Also**
+	`load_reference`, `reference_analysis`, `reference_comparator`
+	""" save_reference
+
+#	Load a Saved Reference Analysis
+	function load_reference(folder::AbstractString)
+		"""
+		Args:
+			folder::AbstractString: folder written by save_reference
+		Returns:
+			NamedTuple: as returned by reference_analysis
+		Notes:
+			Node ids, triad labels, modes, and the global statistics are read as text, as they were written.
+			Throws ArgumentError when the folder does not hold a saved reference.
+		"""
+
+		#	Validation
+			required = ["reference_settings.csv", "reference_global_stats.csv", "reference_triad_census.csv",
+						"reference_node_measures.csv", "reference_edges.csv"]
+			absent = [file for file in required if !isfile(joinpath(folder, file))]
+			if !isempty(absent)
+				throw(ArgumentError("$folder does not hold a saved reference; missing: $(join(absent, ", "))"))
+			end
+
+		#	Settings
+			settings = CSV.read(joinpath(folder, "reference_settings.csv"), DataFrame; types = String)
+			settings.value = String.(coalesce.(settings.value, ""))
+			settings.item = String.(settings.item)
+			setting = Dict(zip(settings.item, settings.value))
+
+		#	Statistics
+			global_stats = CSV.read(joinpath(folder, "reference_global_stats.csv"), DataFrame; types = String)
+			for column in names(global_stats)
+				global_stats[!, column] = String.(coalesce.(global_stats[!, column], ""))
+			end
+			text_columns = Dict(:triad => String, :node => String, :id => String, :label => String, :mode => String, :role => String,
+								:src => String, :dst => String)
+			triad_census_counts = CSV.read(joinpath(folder, "reference_triad_census.csv"), DataFrame; types = text_columns, validate = false)
+			node_measures = CSV.read(joinpath(folder, "reference_node_measures.csv"), DataFrame; types = text_columns, validate = false)
+
+		#	Lists
+			edges = CSV.read(joinpath(folder, "reference_edges.csv"), DataFrame; types = text_columns, validate = false)
+			node_path = joinpath(folder, "reference_nodes.csv")
+			nodes = isfile(node_path) ? CSV.read(node_path, DataFrame; types = String) : nothing
+			if nodes !== nothing
+				for column in names(nodes)
+					nodes[!, column] = String.(coalesce.(nodes[!, column], ""))
+				end
+			end
+
+		#	Assembling Result
+			return (label = setting["label"], bipartite = setting["bipartite"] == "true",
+					directed = setting["directed"] == "true", weighted = setting["weighted"] == "true",
+					declared_directed = setting["declared_directed"] == "true", declared_weighted = setting["declared_weighted"] == "true",
+					found = setting["found"], type_note = setting["type_note"],
+					edges = edges, nodes = nodes,
+					global_stats = global_stats, triad_census_counts = triad_census_counts, node_measures = node_measures,
+					source_mode = setting["source_mode"], target_mode = setting["target_mode"],
+					settings = settings, fingerprint = setting["fingerprint"])
+	end
+	@doc raw"""
+	**Description**
+	Load a reference analysis saved by `save_reference`.
+
+	**Usage**
+	`load_reference(folder)`
+
+	**Arguments**
+	- `folder::AbstractString`: Folder written by `save_reference`
+
+	**Details**
+	The loaded reference is used exactly as one returned by `reference_analysis`. `reference_comparator` checks a saved reference 
+    against the network and settings in use before reusing it; `load_reference` itself does no such check.
+
+	**Value**
+	A `NamedTuple`, as returned by `reference_analysis`.
+
+	**Examples**
+	```julia
+		reference = load_reference("reference_statistics")
+		result = compare_to_reference(reference, edges, nodes)
+	```
+	**See Also**
+	`save_reference`, `reference_analysis`, `compare_to_reference`
+	""" load_reference
+
+#	Helper Function for compare_to_reference: One Setting of a Reference
+	function _reference_setting(reference::NamedTuple, item::String)
+		"""
+		Args:
+			reference::NamedTuple: result of reference_analysis or load_reference
+			item::String: name of the setting
+		Returns:
+			String: its value
+		"""
+
+		#	Assembling Result
+			return String(reference.settings.value[findfirst(==(item), reference.settings.item)])
+	end
+
+#	Compare One Network with a Reference Analysed Earlier
+	function compare_to_reference(reference::NamedTuple, edges::DataFrame,
+								  nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}};
+								  bipartite::Bool = reference.bipartite,
+								  match_modes::Bool = true,
+								  provided_membership::Union{Nothing,DataFrame,Vector{Int},Dict} = nothing,
+								  bin_width::Float64 = 0.125,
+								  match_nodes_on::Union{Symbol,AbstractString,Nothing} = :id,
+								  min_node_overlap::Float64 = 0.75)
+		"""
+		Args:
+			reference::NamedTuple: result of reference_analysis or load_reference (network 1)
+			edges::DataFrame: edge list of the network to compare (network 2)
+			nodes: its node universe (DataFrame, vector of ids, or nothing)
+			bipartite::Bool: whether the network is two-mode (default = as the reference)
+			match_modes::Bool: require a two-mode network's mode names to agree with the reference's (default = true)
+			provided_membership: optional pre-computed communities for the network
+			bin_width::Float64: bin width for comparing node-level distributions (default = 0.125)
+			match_nodes_on: how nodes are matched for the angular similarity (default = :id)
+			min_node_overlap::Float64: least node overlap for the angular similarity (default = 0.75)
+		Returns:
+			NamedTuple: the fields of network_comparator, with the reference as network 1
+		Notes:
+			Only the network is analysed; the reference's statistics are reused.
+			The network is declared as the reference was declared, and its type is found from its links.
+			A network whose type differs from the reference's is refused with an ArgumentError:
+			the two are measured by different features, so they are not comparable by definition.
+			For a pair of one type the result equals that of network_comparator with the same settings.
+		"""
+
+		#	Validation
+			if !(isfinite(bin_width) && bin_width > 0.0)
+				throw(ArgumentError("bin_width must be a positive number; got $bin_width."))
+			end
+			if !(0.0 <= min_node_overlap <= 1.0)
+				throw(ArgumentError("min_node_overlap must lie between 0 and 1; got $min_node_overlap."))
+			end
+
+		#	Refuse a two-mode network against a one-mode reference, and the reverse
+			if bipartite != reference.bipartite
+				throw(ArgumentError(MIXED_MODE_MESSAGE))
+			end
+
+		#	The network's own type, under the reference's declaration
+			clean_nodes = _node_table(edges, deepcopy(nodes))
+			network_type = _effective_network_type(deepcopy(edges), clean_nodes, reference.declared_directed, reference.declared_weighted, bipartite)
+			clean_edges = network_type.edges
+
+		#	Refuse a network of another type
+			if network_type.label != reference.label
+				throw(ArgumentError("Not compared: the reference is $(reference.label) ($(reference.found)) and this network is $(network_type.label) " *
+									"($(network_type.found)). Networks of different types are measured by different features, so they are not comparable."))
+			end
+
+		#	Settings the reference was analysed under
+			mode_column = _reference_setting(reference, "mode_column")
+			seed_text = _reference_setting(reference, "seed")
+			seed = seed_text == "none" ? nothing : parse(Int, seed_text)
+
+		#	Statistics of the network, and both feature vectors
+			comparison_modes = DataFrame(item = String[], value = String[])
+			if bipartite
+				#	Resolve the network's modes
+					modes = _resolve_bipartite_modes(clean_edges, clean_nodes; mode_column = mode_column)
+					source_mode = modes.source_mode
+					reference_names = lowercase.([reference.source_mode, reference.target_mode])
+					network_names = lowercase.([modes.source_mode, modes.target_mode])
+
+				#	Refuse a network whose modes differ
+					if match_modes && Set(reference_names) != Set(network_names)
+						throw(ArgumentError("Not compared: the reference is '$(reference.source_mode)' x '$(reference.target_mode)' and this network is " *
+											"'$(modes.source_mode)' x '$(modes.target_mode)'. Each mode is compared with its counterpart, so the mode names must agree."))
+					end
+
+				#	The reference fixes the orientation
+					if match_modes && reference_names[1] != network_names[1]
+						if modes.one_way
+							throw(ArgumentError("Not compared: '$(reference.source_mode)' sends in the reference and '$(modes.source_mode)' sends in this network. " *
+												"Orientation is part of what a two-mode network means."))
+						end
+						source_mode = modes.target_mode
+					end
+
+				#	Compute statistics
+					global_stats_2, triad_census_counts_2, node_measures_2 = bipartite_constructor(
+						clean_edges, clean_nodes; weighted = reference.weighted, mode_column = mode_column, source_mode = source_mode)
+
+				#	Build feature vectors on one shared feature set
+					backward_1 = parse(Int64, reference.global_stats.value[findfirst(==("num_backward_edges"), reference.global_stats.measure)])
+					backward_2 = parse(Int64, global_stats_2.value[findfirst(==("num_backward_edges"), global_stats_2.measure)])
+					include_backward = backward_1 + backward_2 > 0
+					feature_vector_1 = bipartite_feature_builder(reference.global_stats, reference.triad_census_counts, reference.node_measures;
+																 include_backward = include_backward)
+					feature_vector_2 = bipartite_feature_builder(global_stats_2, triad_census_counts_2, node_measures_2; include_backward = include_backward)
+
+				#	Record the modes
+					mode_items = ["source_mode", "target_mode"]
+					comparison_modes = DataFrame(
+						item = [mode_items .* "_1"; mode_items .* "_2"],
+						value = [[reference.global_stats.value[findfirst(==(item), reference.global_stats.measure)] for item in mode_items];
+								 [global_stats_2.value[findfirst(==(item), global_stats_2.measure)] for item in mode_items]])
+			else
+				#	One-mode: compute statistics under the reference's settings
+					global_stats_2, triad_census_counts_2, node_measures_2 = _construct_one_mode(
+						clean_edges, clean_nodes; directed = reference.directed, weighted = reference.weighted,
+						resolution_sweep = _reference_setting(reference, "resolution_sweep") == "true",
+						resolution = parse(Float64, _reference_setting(reference, "resolution")),
+						n_resolutions = parse(Int, _reference_setting(reference, "n_resolutions")),
+						n_runs_per_gamma = parse(Int, _reference_setting(reference, "n_runs_per_gamma")),
+						n_iterations_per_run = parse(Int, _reference_setting(reference, "n_iterations_per_run")),
+						seed = seed, provided_membership = provided_membership)
+
+				#	Build feature vectors
+					feature_vector_1 = _one_mode_feature_vector(reference.global_stats, reference.triad_census_counts, reference.node_measures;
+																directed = reference.directed, weighted = reference.weighted)
+					feature_vector_2 = _one_mode_feature_vector(global_stats_2, triad_census_counts_2, node_measures_2;
+																directed = reference.directed, weighted = reference.weighted)
+			end
+
+		#	Link-by-link agreement, when the two networks are on the same nodes (not part of the score)
+			agreement = _edge_agreement(reference.edges, reference.nodes, clean_edges, clean_nodes;
+										directed = bipartite || reference.directed,
+										match_nodes_on = match_nodes_on, min_node_overlap = min_node_overlap)
+			edge_agreement = DataFrame(
+				item = ["computed", "angular_similarity", "angular_similarity_binary", "node_overlap", "min_node_overlap",
+						"nodes_both", "nodes_1_only", "nodes_2_only", "links_both", "links_1_only", "links_2_only", "links_reweighted", "note"],
+				value = [string(agreement.computed), string(agreement.angular_similarity), string(agreement.angular_similarity_binary),
+						 string(agreement.node_overlap), string(min_node_overlap),
+						 string(agreement.nodes_both), string(agreement.nodes_1_only), string(agreement.nodes_2_only),
+						 string(agreement.links_both), string(agreement.links_1_only), string(agreement.links_2_only),
+						 string(agreement.links_reweighted), agreement.note])
+
+		#	Compare the two feature vectors; the reference's node table is copied, because columns are added to it
+			node_measures_1 = deepcopy(reference.node_measures)
+			scored = _score_feature_vectors(feature_vector_1, feature_vector_2, node_measures_1, node_measures_2,
+											reference.global_stats, global_stats_2, reference.directed, bipartite, bin_width)
+
+		#	Record of the comparison
+			declared_type = (bipartite ? "" : (reference.declared_directed ? "directed " : "undirected ")) * (reference.declared_weighted ? "weighted" : "binary")
+			comparison_info = DataFrame(item = ["feature_set", "node_measure_binning", "bin_width", "lgs_version",
+												"declared_type", "found_type_1", "found_type_2", "type_note",
+												"node_overlap", "min_node_overlap", "edge_agreement_note", "reference"],
+										value = [reference.label, "geometric axis, fixed bin width, linear binning", string(bin_width), LGS_VERSION,
+												 declared_type, reference.found, network_type.found, network_type.note,
+												 string(agreement.node_overlap), string(min_node_overlap), agreement.note,
+												 "network 1 is a reference analysed once (fingerprint $(reference.fingerprint), version $(_reference_setting(reference, "lgs_version")))"])
+			append!(comparison_info, comparison_modes)
+
+		#	Weight scale: one heavy link, or the distribution of weights
+			weight_scale = _weight_scale(reference.edges, clean_edges; directed = reference.directed, weighted = reference.weighted,
+										 bipartite = bipartite, bin_width = bin_width)
+			_mark_scaled_measures!(scored.node_measure_diagnostics, weight_scale.scaled_measures)
+			push!(comparison_info, ("weight_scale_note", weight_scale.note))
+
+		#	Assembling Result
+			return (global_stats_1 = reference.global_stats,
+					triad_census_counts_1 = reference.triad_census_counts,
+					node_measures_1 = node_measures_1,
+					global_stats_2 = global_stats_2,
+					triad_census_counts_2 = triad_census_counts_2,
+					node_measures_2 = node_measures_2,
+					combined_features = scored.combined_features,
+					overall_distance = scored.overall.distance,
+					overall_similarity = scored.overall.similarity,
+					type_contributions = scored.type_contributions,
+					node_measure_diagnostics = scored.node_measure_diagnostics,
+					edge_angular_similarity = agreement.angular_similarity,
+					edge_angular_similarity_binary = agreement.angular_similarity_binary,
+					edge_agreement = edge_agreement,
+					weight_scale = weight_scale.table,
+					undefined_features = _undefined_features(scored.combined_features),
+					comparison_info = comparison_info)
+	end
+	@doc raw"""
+	**Description**
+	Compare one network with a reference network that was analysed earlier. Only the network is analysed; the reference's statistics are reused.
+
+	**Usage**
+	`compare_to_reference(reference, edges, nodes; bipartite=reference.bipartite, match_modes=true, provided_membership=nothing, bin_width=0.125, 
+    match_nodes_on=:id, min_node_overlap=0.75)`
+
+	**Arguments**
+	- `reference::NamedTuple`: Result of `reference_analysis` or `load_reference`. It is network 1 of the comparison.
+	- `edges::DataFrame`: Edge list of the network to compare (network 2), with `:src` and `:dst` columns, optional `:weight` column
+	- `nodes::Union{Nothing,DataFrame,Vector}`: Optional node universe to include isolates
+	- `bipartite::Bool`: `true` when the network is two-mode (default: as the reference)
+	- `match_modes::Bool`: Require a two-mode network's mode names to agree with the reference's (default true)
+	- `provided_membership`: Pre-computed community assignments for the network
+	- `bin_width::Float64`: Bin width used to compare node-level distributions (default 0.125)
+	- `match_nodes_on`, `min_node_overlap`: How nodes are matched, and the least node overlap, for the angular similarity of the links, 
+       as in `network_comparator`
+
+	**Details**
+	The network is declared as the reference was declared (`directed`, `weighted`), and its type is then found from its links by the same tests. 
+    The community detection settings and the seed are those recorded with the reference.
+
+	*Networks of another type are not compared.* The rule here is stricter than in `network_comparator`. 
+    The reference has one type, and a network is compared with it only when the network has the same type: both one-mode or both two-mode, 
+    both directed or both undirected, both weighted or both binary. Otherwise an `ArgumentError` names the two types. 
+    Networks of different types are measured by different features, so a batch of comparisons against a reference should not include them: 
+    if a transformation has turned a weighted network binary, that is a finding to flag, and a score would hide it. 
+    For a two-mode network the reference also fixes the orientation: a network whose modes differ from the reference's, 
+    or which runs one way in the opposite direction, is refused.
+
+	*Same result as a pairwise comparison.* For a pair of one type, the result equals that of `network_comparator` on the same two networks 
+    with the same settings and seed. 
+    The normalizations, the node measure divergences, the distance, and the tables that explain it are pairwise and are computed for every pair.
+
+	*Angular similarity.* It follows the rules of `network_comparator`. A reconstruction on the reference's nodes gets one. 
+    A simulated network on other nodes falls below `min_node_overlap`, and it is reported as not computed with the reason.
+
+	**Value**
+	A `NamedTuple` with the fields of `network_comparator`. Fields ending in `_1` are the reference's. `comparison_info` has a further row, `reference`, with the reference's fingerprint and version.
+
+	**Examples**
+	```julia
+		reference = reference_analysis(observed_edges, observed_nodes; seed = 42)
+		for (name, simulated) in simulations
+			result = compare_to_reference(reference, simulated.edges, simulated.nodes)
+			println(name, ": ", result.overall_similarity)
+		end
+	```
+	**See Also**
+	`reference_analysis`, `reference_comparator`, `network_comparator`
+	""" compare_to_reference
+
+#	Helper Function for reference_comparator: The Largest Features of One Comparison, as Text
+	function _largest_features_text(combined_features::DataFrame, n_features::Int)
+		"""
+		Args:
+			combined_features::DataFrame: aligned features of a comparison, with weights
+			n_features::Int: how many to name
+		Returns:
+			String: "measure (share%); ..." for the features with the largest share of the squared distance; "" when the networks do not differ
+		"""
+
+		#	Each feature's term in the squared distance
+			squared = Float64[(isfinite(a) && isfinite(b)) ? w * (a - b)^2 : 0.0
+							  for (a, b, w) in zip(combined_features.network_1_values, combined_features.network_2_values, combined_features.weight)]
+			total = sum(squared; init = 0.0)
+
+		#	Early return
+			if !(total > 0.0)
+				return ""
+			end
+
+		#	Assembling Result
+			order = sortperm(squared; rev = true)[1:min(n_features, length(squared))]
+			return join(["$(combined_features.measure[i]) ($(round(100 * squared[i] / total; digits = 1))%)" for i in order if squared[i] > 0.0], "; ")
+	end
+
+#	Helper Function for reference_comparator: Why a Saved Reference Cannot Be Reused
+	function _reference_differences(saved::NamedTuple, current_settings::DataFrame)
+		"""
+		Args:
+			saved::NamedTuple: a reference loaded from disk
+			current_settings::DataFrame (item, value): the settings table the current run would produce,
+				without the items that only an analysis can supply
+		Returns:
+			Vector{String}: one line per setting that differs; empty when the saved reference can be reused
+		Notes:
+			Compared: the version, the fingerprint of the lists, the declaration, the mode column,
+			and the community detection settings with the seed.
+			A reference analysed without a seed is never reused, since it could not be reproduced.
+		"""
+
+		#	Compare each setting
+			differences = String[]
+			saved_value = Dict(zip(saved.settings.item, saved.settings.value))
+			for (item, value) in zip(current_settings.item, current_settings.value)
+				if get(saved_value, item, "") != value
+					push!(differences, "$item: saved $(get(saved_value, item, "(absent)")), now $value")
+				end
+			end
+
+		#	A reference without a seed cannot be reproduced
+			if get(saved_value, "seed", "none") == "none"
+				push!(differences, "seed: the saved reference was analysed without a seed")
+			end
+
+		#	Assembling Result
+			return differences
+	end
+
+#	Helper Function for Reference Comparator: Read One Entry of the List of Networks
+	function _reference_network_entry(network)
+		"""
+		Args:
+			network: (name, edges, nodes), (name, edges), or (name, load), as a tuple or a named tuple
+				with those field names; load is a function without arguments that returns (edges, nodes)
+		Returns:
+			Tuple: (name::String, load::Function), where load() returns (edges, nodes)
+		Notes:
+			A network given as (name, load) is read only when its turn comes.
+		"""
+
+		#	Named fields
+			if network isa NamedTuple
+				name = String(network.name)
+				if haskey(network, :load)
+					return name, network.load
+				end
+				edges = network.edges
+				nodes = haskey(network, :nodes) ? network.nodes : nothing
+				return name, () -> (edges, nodes)
+			end
+
+		#	Positional fields
+			if !(network isa Tuple) || !(length(network) in (2, 3))
+				throw(ArgumentError("Each network is (name, edges, nodes), (name, edges), or (name, load)"))
+			end
+			name = String(network[1])
+			if network[2] isa Function
+				return name, network[2]
+			end
+			edges = network[2]
+			nodes = length(network) == 3 ? network[3] : nothing
+
+		#	Assembling Result
+			return name, () -> (edges, nodes)
+	end
+
+#	Compare a Reference Network with a List of Other Networks
+	function reference_comparator(reference_edges::DataFrame,
+								  reference_nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}},
+								  networks::AbstractVector;
+								  reference_dir::Union{Nothing,AbstractString} = nothing,
+								  directed::Bool = true, weighted::Bool = true, bipartite::Bool = false,
+								  mode_column::Union{Symbol,AbstractString} = :mode, match_modes::Bool = true,
+								  resolution_sweep::Bool = false, resolution::Float64 = 1.0, n_resolutions::Int = 15,
+								  n_runs_per_gamma::Int = 5, n_iterations_per_run::Int = 10,
+								  seed::Union{Int,Nothing} = nothing,
+								  provided_membership::Union{Nothing,DataFrame,Vector{Int},Dict} = nothing,
+								  bin_width::Float64 = 0.125,
+								  match_nodes_on::Union{Symbol,AbstractString,Nothing} = :id,
+								  min_node_overlap::Float64 = 0.75,
+								  n_top_features::Int = 3,
+								  keep_results::Bool = true,
+								  on_result::Union{Nothing,Function} = nothing,
+								  verbose::Bool = false)
+		"""
+		Args:
+			reference_edges::DataFrame: edge list of the reference network
+			reference_nodes: its node universe (DataFrame, vector of ids, or nothing)
+			networks::AbstractVector: the networks to compare, each a tuple or NamedTuple (name, edges, nodes);
+				nodes may be nothing. An element may instead give (name, load), where load() returns (edges, nodes),
+				so that each network is read only when its turn comes.
+			reference_dir::Union{Nothing,AbstractString}: folder in which the reference's statistics are saved and looked for
+			directed, weighted, bipartite, mode_column: the declaration, applied to the reference and to every network
+			match_modes::Bool: require two-mode mode names to agree with the reference's
+			resolution_sweep, resolution, n_resolutions, n_runs_per_gamma, n_iterations_per_run, seed: community detection settings
+			provided_membership: optional pre-computed communities for the reference
+			bin_width, match_nodes_on, min_node_overlap: as in network_comparator
+			n_top_features::Int: features named per network in the summary (default = 3)
+			keep_results::Bool: keep each comparison's full result in memory (default = true)
+			on_result::Union{Nothing,Function}: called as on_result(name, result) after each comparison, for example to write it to disk
+			verbose::Bool: print progress
+		Returns:
+			NamedTuple:
+				- reference::NamedTuple: the reference analysis
+				- reference_status::String: "computed", "computed and saved", "reused from <folder>", or "recomputed: <what differed>"
+				- summary::DataFrame: one row per network
+				- results::Dict{String,NamedTuple}: full results by name (empty when keep_results = false)
+		Notes:
+			The reference is analysed once. With reference_dir, a saved analysis is reused when the lists,
+			the settings, the seed, and the version are the same; otherwise it is recomputed and saved again.
+			A network of another type than the reference is refused and recorded; a network that fails is recorded.
+			Neither stops the run.
+		"""
+
+		#	Settings a saved reference must share with this run
+			current_settings = DataFrame(
+				item = ["lgs_version", "fingerprint", "bipartite", "declared_directed", "declared_weighted", "mode_column",
+						"resolution_sweep", "resolution", "n_resolutions", "n_runs_per_gamma", "n_iterations_per_run",
+						"seed", "provided_membership"],
+				value = [LGS_VERSION, _network_fingerprint(reference_edges, _node_table(reference_edges, reference_nodes)), string(bipartite), string(directed), string(weighted),
+						 string(mode_column), string(resolution_sweep), string(resolution), string(n_resolutions), string(n_runs_per_gamma),
+						 string(n_iterations_per_run), seed === nothing ? "none" : string(seed), string(provided_membership !== nothing)])
+
+		#	Reuse a saved reference when it matches
+			reference = nothing
+			reference_status = "computed"
+			if reference_dir !== nothing && isfile(joinpath(reference_dir, "reference_settings.csv"))
+				saved = load_reference(reference_dir)
+				differences = _reference_differences(saved, current_settings)
+				if isempty(differences) && provided_membership === nothing
+					reference = saved
+					reference_status = "reused from $(reference_dir)"
+				else
+					isempty(differences) && push!(differences, "a membership was provided for the reference")
+					reference_status = "recomputed: " * join(differences, "; ")
+				end
+			end
+			verbose && println("Reference statistics: ", reference_status)
+
+		#	Analyse the reference once
+			if reference === nothing
+				reference = reference_analysis(reference_edges, reference_nodes;
+											   directed = directed, weighted = weighted, bipartite = bipartite, mode_column = mode_column,
+											   resolution_sweep = resolution_sweep, resolution = resolution, n_resolutions = n_resolutions,
+											   n_runs_per_gamma = n_runs_per_gamma, n_iterations_per_run = n_iterations_per_run,
+											   seed = seed, provided_membership = provided_membership)
+				if reference_dir !== nothing
+					save_reference(reference, reference_dir)
+					reference_status == "computed" && (reference_status = "computed and saved")
+				end
+			end
+
+		#	One row per network
+			summary = DataFrame(name = String[], status = String[], reason = String[],
+								similarity = Float64[], distance = Float64[],
+								edge_angular_similarity = Float64[], edge_angular_similarity_binary = Float64[], node_overlap = Float64[],
+								feature_set = String[], nodes = Int[], top_type = String[], top_features = String[],
+								undefined_one_side = String[], weight_scale_note = String[])
+			results = Dict{String,NamedTuple}()
+
+		#	Compare each network with the reference
+			for network in networks
+				name, load = _reference_network_entry(network)
+				verbose && println("Comparing with the reference: ", name)
+				try
+					#	Read the network when its turn comes; one that cannot be read is a failure
+						edges, nodes = try
+							load()
+						catch err
+							throw(ErrorException("the network could not be read: " * sprint(showerror, err)))
+						end
+
+					#	Analyse it and compare
+						result = compare_to_reference(reference, edges, nodes;
+													  bipartite = bipartite, match_modes = match_modes, bin_width = bin_width,
+													  match_nodes_on = match_nodes_on, min_node_overlap = min_node_overlap)
+
+					#	Largest type and features, and measures defined on one side only
+						contributions = result.type_contributions
+						top_type = (nrow(contributions) == 0 || result.overall_similarity >= 1.0) ? "" :
+								   string(contributions.type[argmax(contributions.normalized_contribution)])
+						undefined = result.undefined_features
+						one_side = join(["$(row.measure) (undefined in $(row.undefined_in == "network_1" ? "the reference" : "this network"))"
+										 for row in eachrow(undefined) if row.undefined_in != "both"], "; ")
+						overlap_row = findfirst(==("node_overlap"), result.edge_agreement.item)
+
+					#	Record
+						push!(summary, (name, "compared", "", result.overall_similarity, result.overall_distance,
+										result.edge_angular_similarity, result.edge_angular_similarity_binary,
+										parse(Float64, result.edge_agreement.value[overlap_row]),
+										reference.label, parse(Int, result.global_stats_2.value[1]), top_type,
+										_largest_features_text(result.combined_features, n_top_features), one_side,
+										result.comparison_info.value[findfirst(==("weight_scale_note"), result.comparison_info.item)]))
+						keep_results && (results[name] = result)
+						on_result !== nothing && on_result(name, result)
+				catch err
+					#	A refusal is a finding about the network; anything else is a failure. Neither stops the run.
+						status = err isa ArgumentError ? "refused" : "failed"
+						reason = err isa ArgumentError ? err.msg : sprint(showerror, err)
+						push!(summary, (name, status, reason, NaN, NaN, NaN, NaN, NaN, "", 0, "", "", "", ""))
+						verbose && println("  ", status, ": ", reason)
+				end
+			end
+
+		#	Assembling Result
+			return (reference = reference, reference_status = reference_status, summary = summary, results = results)
+	end
+	@doc raw"""
+	**Description**
+	Compare one reference network with a list of other networks, analysing the reference once. 
+    Use it for reconstructions of a network, or for simulated networks that should resemble it in structure.
+
+	**Usage**
+	`reference_comparator(reference_edges, reference_nodes, networks; reference_dir=nothing, directed=true, weighted=true, bipartite=false, 
+    mode_column=:mode, match_modes=true, resolution_sweep=false, resolution=1.0, n_resolutions=15, n_runs_per_gamma=5, n_iterations_per_run=10, seed=nothing, provided_membership=nothing, bin_width=0.125, match_nodes_on=:id, min_node_overlap=0.75, n_top_features=3, keep_results=true, on_result=nothing, verbose=false)`
+
+	**Arguments**
+	- `reference_edges::DataFrame`, `reference_nodes`: The reference network's edge list and optional node universe
+	- `networks::AbstractVector`: The networks to compare. Each element is a tuple or `NamedTuple` `(name, edges, nodes)`, 
+      where `nodes` may be `nothing`. 
+    An element may instead be `(name, load)`, where `load()` returns `(edges, nodes)`; each network is then read only when its turn comes.
+	- `reference_dir::Union{Nothing,AbstractString}`: Folder in which the reference's statistics are saved, and looked for on a later run 
+      (default nothing: not saved)
+	- `directed`, `weighted`, `bipartite`, `mode_column`: The declaration. It applies to the reference and to every network.
+	- `match_modes::Bool`: Require a two-mode network's mode names to agree with the reference's (default true)
+	- `resolution_sweep`, `resolution`, `n_resolutions`, `n_runs_per_gamma`, `n_iterations_per_run`, `seed`: 
+      Community detection settings, as in `network_comparator`
+	- `provided_membership`: Pre-computed community assignments for the reference
+	- `bin_width`, `match_nodes_on`, `min_node_overlap`: As in `network_comparator`
+	- `n_top_features::Int`: Features named per network in the summary (default 3)
+	- `keep_results::Bool`: Keep each comparison's full result in memory (default true). Set false for a long list, 
+      and collect what is needed with `on_result`.
+	- `on_result::Union{Nothing,Function}`: Called as `on_result(name, result)` after each comparison, for example to write its tables to disk
+	- `verbose::Bool`: Print progress (default false)
+
+	**Details**
+	A pairwise comparison analyses both networks. Comparing one reference with N networks pairwise would analyse the reference N times. 
+    Here it is analysed once, so the work is N + 1 network analyses in place of 2N.
+
+	*Saved reference.* With `reference_dir`, the reference's statistics are written to that folder. On a later run they are reused when 
+    the reference's lists (by fingerprint), the declaration, the community detection settings, the seed, and the version are all the same. 
+    If anything differs, `reference_status` says what, and the reference is analysed again and saved again. 
+    A reference analysed without a seed is not reused, because it could not be reproduced.
+
+	*What is compared.* Each network is compared by `compare_to_reference`, which see. A network of another type than the reference 
+    (one-mode against two-mode, directed against undirected, weighted against binary) is refused: its row in the summary has `status = "refused"` 
+    and the reason. 
+    A network that cannot be analysed has `status = "failed"` and the error. Neither stops the run.
+
+	*Repeatability.* With a `seed`, each row equals the result of `network_comparator` on that pair with the same settings and seed.
+
+	**Value**
+	A `NamedTuple`:
+	- `reference::NamedTuple`: The reference analysis (see `reference_analysis`)
+	- `reference_status::String`: "computed", "computed and saved", "reused from <folder>", or "recomputed: <what differed>"
+	- `summary::DataFrame`: One row per network, with columns [:name, :status, :reason, :similarity, :distance, :edge_angular_similarity, 
+    :edge_angular_similarity_binary, :node_overlap, :feature_set, :nodes, :top_type, :top_features, :undefined_one_side]. 
+    `top_type` and `top_features` name the feature type and the features with the largest share of the squared distance.
+	- `results::Dict{String,NamedTuple}`: The full result of each comparison by name, as returned by `network_comparator`; 
+      empty when `keep_results = false`
+
+	**Examples**
+	```julia
+		networks = [(name = "simulation_$(i)", edges = simulated_edges[i], nodes = nothing) for i in 1:100]
+		batch = reference_comparator(observed_edges, observed_nodes, networks;
+									 reference_dir = "reference_statistics", directed = true, weighted = true, seed = 42)
+		println(batch.reference_status)
+		println(batch.summary[:, [:name, :status, :similarity, :top_features]])
+	```
+	**See Also**
+	`reference_analysis`, `compare_to_reference`, `save_reference`, `load_reference`, `network_comparator`
+	""" reference_comparator
+
 #   Exporting Objects
-    export adjusted_rand_index,
+    export reference_analysis,
+		   compare_to_reference,
+		   reference_comparator,
+		   save_reference,
+		   load_reference,
+		   adjusted_rand_index,
 		   load_ora_xml,
 		   in_degree,
 		   out_degree,

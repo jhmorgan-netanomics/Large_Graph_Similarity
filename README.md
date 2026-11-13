@@ -6,9 +6,9 @@ Large_Graph_Similarity (LGS) reduces two networks to a similarity score between 
 
 | Path | Contents |
 |---|---|
-| `julia_env/src/Large_Graph_Similarity.jl` | The measures, constructors, feature builders, and `network_comparator` |
+| `julia_env/src/Large_Graph_Similarity.jl` | The measures, constructors, feature builders, `network_comparator`, and `reference_comparator` |
 | `julia_env/src/CLI.jl` | The command-line interface |
-| `julia_env/Self_Identity_Tests.jl` | Regression tests: self-identity, undefined measures, two-mode networks, node measure comparison, network type, core decompositions |
+| `julia_env/Self_Identity_Tests.jl` | Regression tests: self-identity, undefined measures, two-mode networks, node measure comparison, network type, core decompositions, angular similarity, reference comparison |
 | `julia_env/Benchmark_Replication_Tests.jl` | Each measure against results saved from ORA, igraph, scoredec, Pajek, Python, and R |
 | `julia_env/Comparator_Tests.jl`, `CLI_Tests.jl`, `Graph_Comparison_Tests.jl` | Development scripts. The first two predate version 0.2.0 and still refer to the raw and asinh scores |
 | `julia_env/build_app_*.jl` | PackageCompiler build scripts |
@@ -24,6 +24,8 @@ julia -t auto --project=julia_env julia_env/Self_Identity_Tests.jl
 julia -t auto --project=julia_env julia_env/Benchmark_Replication_Tests.jl
 ```
 
+The first script includes a reference comparison on observed networks: Balikatan 2022 as the reference against Pac Rim 2023 (`Pac Rim Day 1.xml`) and Pac Sentry 2025 (`PAO_Day_6.xml`), each file's Agent x Agent - All Communication network. A file that is absent from `Test_Data` is reported as broken in the test summary.
+
 The second script compares each measure on Balikatan's All Communication network with the benchmark files in `Test_Data` and writes `Test_Data/benchmark_replication_results.csv`. Set `LGS_SOURCE` to another copy of `Large_Graph_Similarity.jl` to run the same benchmarks against it.
 
 Rebuild the app after any change to `src`; the compiled app does not pick up source changes on its own.
@@ -37,8 +39,9 @@ Rebuild the app after any change to `src`; the compiled app does not pick up sou
 - `comparison_info` names the feature set, the bin width, and the version that were used, with the network type that was declared and the type found in each network's links.
 
 - `edge_agreement` holds the node overlap and link counts behind the angular similarity of the links (see below).
+- `weight_scale` shows whether two weighted networks differ in their heaviest link or in their distribution of weights (see below).
 
-The CLI writes one file of each kind: `<name_1>_<name_2>_similarity_scores.csv` (the score, with the angular similarity of the links), `_comparison.csv`, `_type_contributions.csv`, `_node_measure_diagnostics.csv`, `_edge_agreement.csv`, `_undefined_features.csv`, and `_comparison_info.csv`.
+The CLI writes one file of each kind: `<name_1>_<name_2>_similarity_scores.csv` (the score, with the angular similarity of the links), `_comparison.csv`, `_type_contributions.csv`, `_node_measure_diagnostics.csv`, `_edge_agreement.csv`, `_weight_scale.csv`, `_undefined_features.csv`, and `_comparison_info.csv`.
 
 ### Angular similarity of the links: a second reading
 
@@ -53,6 +56,24 @@ The angular similarity compares link by link, so it means something only when th
 - **Threshold.** The angular similarity is computed only when the overlap is at least `min_node_overlap` (default 0.75; CLI `--min-node-overlap`). Below it the value is `NaN`, and `edge_agreement` gives the overlap and the reason.
 - **Unequal node sets.** The node sets need not be identical. A node present in one network only is treated as having no links in the other, so its links count as links found in one network only.
 - **Switching it off.** `match_nodes_on = nothing` (CLI `--match-nodes-on none`) skips it, for networks that are not on the same nodes.
+
+### Weight scale: one heavy link, or the distribution of weights
+
+Normalized degree is divided by the network's largest link weight. That puts networks with different weight scales on one scale, and it is ORA's scaled degree. The largest weight is set by one link, so when that link changes, every node's normalized degree changes with it, and the score moves by more than one link would suggest. The comparison reports this so that the two cases can be told apart. None of it enters the score.
+
+`weight_scale` has one row per statistic, with each network's value and the ratio of the larger to the smaller:
+
+| Statistic | Reading |
+|---|---|
+| `largest_weight` | The divisor. Directed networks: over all links. Undirected networks: over links between two different nodes |
+| `second_largest_weight`, `links_at_largest_weight` | Whether the largest weight stands alone |
+| `percentile_95`, `median`, `mean`, `links` | Where the rest of the weights lie |
+| `sqrt_jsd_weights` | Divergence of the two weight distributions, weights as they are |
+| `sqrt_jsd_weights_over_largest` | The same after each network's weights are divided by its largest weight |
+
+The two divergences are computed as for a node measure (geometric axis, same bin width). When the largest weights differ, the lower percentiles agree, and the first divergence is small while the second is large, one heavy link differs and the distributions do not. When the first divergence is itself large, the distributions of weights differ.
+
+`node_measure_diagnostics` marks the measures concerned in the column `divided_by_largest_weight`: `in_degree_normalized` and `out_degree_normalized` for directed weighted networks, `total_degree_normalized` for undirected weighted networks, none for two-mode networks. `comparison_info` states the finding in words (`weight_scale_note`). The table is empty for networks compared as binary.
 
 ### Network type is tested, not assumed
 
@@ -127,6 +148,43 @@ To compare a two-mode network with a one-mode network, project it first: `projec
 - A projection is far more clustered and dense than an observed network, because every node of the dropped mode becomes a clique. Treat a projected-against-observed score with caution.
 - A node of the dropped mode with k links creates k(k-1)/2 ties. Projections above `max_pairs` are refused.
 - The mode matters. Agent x Tweet - Sender projected onto agents is empty, because no two agents send the same tweet.
+
+## Comparing a reference network with many networks
+
+To compare one network with many others (reconstructions of it, or simulated networks that should resemble it), analyse the reference once and compare each network with the saved analysis. Only the other network is measured in each comparison. The result is the same, to the last digit, as `network_comparator` gives for that pair.
+
+```julia
+networks = [("model_a", edges_a, nodes_a), ("model_b", edges_b, nothing),
+            ("model_c", () -> read_my_network("model_c"))]      # read when its turn comes
+batch = reference_comparator(reference_edges, reference_nodes, networks;
+                             directed = true, weighted = true, seed = 11, reference_dir = "reference")
+batch.summary        # one row per network
+```
+
+From the command line, network 1 is the reference and a table lists the others:
+
+```bash
+Large_Graph_Similarity --mode reference --edgelist-1 target_edges.csv --nodelist-1 target_nodes.csv --name-1 target \
+    --network-table networks.csv --directed true --weighted true --seed 11 --output-dir run
+```
+
+`networks.csv` has the columns `name`, `edgelist`, and `nodelist`. Leave `nodelist` empty, or leave the column out, for a network given by its links alone. A path that is not absolute is read relative to the table's folder. The reference may also be read from ORA XML (`--ora-xml-1`, `--network-name-1`).
+
+**Only networks of the reference's type are compared.** The reference's type is found from its links, as in a comparison of two networks: declared directed and symmetric, it is undirected; declared weighted with every weight 1, it is binary. Every other network is tested in the same way and must come out as the same type. This is stricter than `network_comparator`, which keeps the declaration when only one of two networks is symmetric or binary. A run of many comparisons should not contain pairs that are not comparable by definition, so here they are refused and recorded:
+
+- a network whose direction or weight differs from the reference's, for example a binary reconstruction of a weighted reference;
+- a one-mode network against a two-mode reference, or the reverse;
+- a two-mode network whose mode names differ from the reference's (unless `match_modes = false`), or whose links run the other way.
+
+A refused network has `status` "refused" in the summary, with the reason. A network that cannot be read or measured has `status` "failed". Neither stops the run.
+
+**What is saved.** With `reference_dir` (CLI `--reference-dir`, default `<output-dir>/reference`) the reference's analysis is written to disk: `reference_settings.csv`, `reference_global_stats.csv`, `reference_triad_census.csv`, `reference_node_measures.csv`, `reference_edges.csv`, and `reference_nodes.csv`. A later run reuses it when the reference's lists, the declaration, the community detection settings, the seed, and the LGS version are all the same. Otherwise it is recomputed and saved again, and `reference_status` says what differed. A reference analysed without a seed is never reused, because its community detection could not be repeated. `save_reference`, `load_reference`, `reference_analysis`, and `compare_to_reference` do the steps one at a time.
+
+**Seed.** The seed is used for the reference and for every network, as `network_comparator` uses it for both of a pair. With the seed and the lists, any single comparison of the run can be repeated with `network_comparator`.
+
+**Angular similarity.** It is reported for a network on the reference's nodes (overlap at least `min_node_overlap`) and is `NaN` for the others, as in a comparison of two networks. Simulated networks on their own nodes have none.
+
+**Output.** The summary has one row per network: `name`, `status`, `reason`, `similarity`, `distance`, `edge_angular_similarity`, `edge_angular_similarity_binary`, `node_overlap`, `feature_set`, `nodes`, `top_type`, `top_features`, `undefined_one_side`, and `weight_scale_note`. The CLI writes it as `reference_comparison_summary.csv`, with `reference_comparison_info.csv` (the reference's type, whether its statistics were computed or reused, and the counts compared, refused, and failed). Each compared network gets a folder of its own holding its statistics and the same comparison tables as a comparison of two networks.
 
 ## Future work
 

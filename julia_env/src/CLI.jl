@@ -433,6 +433,205 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 			return result
 	end
 
+#	Helper Function for CLI: Read the Table of Networks to Compare with a Reference
+	function _read_network_table(filepath::String)
+		"""
+		Args:
+			filepath::String: a CSV or TSV table with columns name, edgelist, and optionally nodelist
+		Returns:
+			DataFrame (name::String, edgelist::String, nodelist::String): one row per network;
+				nodelist is "" where none was given
+		Notes:
+			Column names are matched without regard to case.
+			A path that is not absolute is taken relative to the folder of the table.
+			Names must be unique, because each network's tables are written to a folder of that name.
+		"""
+
+		#	Read the File
+			if !isfile(filepath)
+				throw(ArgumentError("Network table not found: $filepath"))
+			end
+			first_line = readline(filepath)
+			delimiter = occursin("\t", first_line) ? '\t' : ','
+			table = CSV.read(filepath, DataFrame; delim = delimiter, types = String, stripwhitespace = true)
+			rename!(table, [lowercase(strip(name)) for name in names(table)])
+
+		#	Validation
+			for column in ("name", "edgelist")
+				if !(column in names(table))
+					throw(ArgumentError("Network table $filepath needs a '$column' column. Columns: $(join(names(table), ", "))"))
+				end
+			end
+			if any(ismissing, table.name) || any(ismissing, table.edgelist)
+				throw(ArgumentError("Network table $filepath has a row without a name or an edge list"))
+			end
+			if !allunique(table.name)
+				throw(ArgumentError("Network table $filepath repeats a name; each network needs its own"))
+			end
+
+		#	Paths relative to the table's folder
+			folder = dirname(abspath(filepath))
+			node_lists = "nodelist" in names(table) ? String.(coalesce.(table.nodelist, "")) : fill("", nrow(table))
+
+		#	Assembling Result
+			return DataFrame(name = String.(table.name),
+							 edgelist = [isabspath(path) ? String(path) : joinpath(folder, path) for path in table.edgelist],
+							 nodelist = [isempty(path) ? "" : (isabspath(path) ? path : joinpath(folder, path)) for path in node_lists])
+	end
+
+#	Helper Function for CLI: Load One Network Named in the Network Table
+	function _load_listed_network(edge_path::String, node_path::String, bipartite::Bool,
+								  mode_column::Union{Nothing,String}, match_nodes_on::String)
+		"""
+		Args:
+			edge_path::String: the network's edge list
+			node_path::String: its node list, or "" when none was given
+			bipartite::Bool: whether the network is two-mode
+			mode_column::Union{Nothing,String}: node-list column naming each node's mode, if any
+			match_nodes_on::String: the --match-nodes-on argument
+		Returns:
+			Tuple: (edges::DataFrame, nodes::DataFrame)
+		Notes:
+			Without a node list, the nodes are the endpoints of the links.
+			The mode column and the identity column are attached as for the first two networks.
+		"""
+
+		#	Edge list
+			edges = _load_edge_list(edge_path; verbose = false)
+
+		#	Node list: the file when given, else the endpoints of the links
+			if isempty(node_path)
+				ids = sort(unique(vcat(string.(edges.src), string.(edges.dst))))
+				return edges, DataFrame(id = ids, label = ids)
+			end
+			nodes = _load_node_list(node_path; verbose = false)
+			if bipartite && mode_column !== nothing
+				nodes = _attach_node_modes(nodes, node_path, mode_column)
+			end
+			if !(lowercase(match_nodes_on) in ("id", "label", "none"))
+				nodes = _attach_node_identity(nodes, node_path, match_nodes_on)
+			end
+
+		#	Assembling Result
+			return edges, nodes
+	end
+
+#	Helper Function for CLI: Write the Tables of One Comparison with the Reference
+	function _write_reference_pair(name::String, result::NamedTuple, output_dir::String, reference_name::String)
+		"""
+		Args:
+			name::String: the compared network's name
+			result::NamedTuple: result of compare_to_reference
+			output_dir::String: the run's output folder
+			reference_name::String: the reference network's name
+		Returns:
+			Nothing
+		Notes:
+			Writes to <output_dir>/<name>: the network's own statistics and the comparison tables.
+			The reference's statistics are in the reference folder and are not written again.
+		"""
+
+		#	The network's own statistics
+			folder = joinpath(output_dir, name)
+			mkpath(folder)
+			CSV.write(joinpath(folder, "$(name)_global_stats.csv"), result.global_stats_2)
+			CSV.write(joinpath(folder, "$(name)_triad_census.csv"), result.triad_census_counts_2)
+			CSV.write(joinpath(folder, "$(name)_node_measures.csv"), result.node_measures_2)
+
+		#	The comparison tables
+			_write_comparison_results(result, folder; name_1 = reference_name, name_2 = name, verbose = false)
+
+		#	Early return
+			return nothing
+	end
+
+#	Helper Function for CLI: Compare a Reference Network with the Networks of a Table
+	function _run_reference_mode(edges_1::DataFrame, nodes_1::DataFrame, partition_1, bipartite::Bool,
+								 run_directed::Bool, run_weighted::Bool, parsed_args::Dict, output_dir::String, verbose::Bool)
+		"""
+		Args:
+			edges_1::DataFrame: the reference network's edge list
+			nodes_1::DataFrame: its node list
+			partition_1: its pre-computed communities, or nothing
+			bipartite::Bool: whether the reference is two-mode
+			run_directed::Bool, run_weighted::Bool: the declaration
+			parsed_args::Dict: the command-line arguments
+			output_dir::String: output folder
+			verbose::Bool: print progress
+		Returns:
+			DataFrame: the summary, one row per network
+		Notes:
+			The reference's statistics are saved in --reference-dir (default <output_dir>/reference)
+			and reused on a later run when the network, the settings, the seed, and the version are the same.
+			Each network is read when its turn comes and its tables are written at once, so a long
+			table does not hold every network in memory.
+		"""
+
+		#	Validation
+			if parsed_args["network-table"] === nothing
+				throw(ArgumentError("Reference mode needs --network-table: a table with columns name, edgelist, and optionally nodelist"))
+			end
+			if parsed_args["seed"] === nothing && verbose
+				println("No --seed given: the comparison cannot be repeated exactly, and the saved reference will not be reused.")
+			end
+
+		#	Networks to compare, each read when its turn comes
+			table = _read_network_table(parsed_args["network-table"])
+			networks = [(name = row.name,
+						 load = () -> _load_listed_network(row.edgelist, row.nodelist, bipartite, parsed_args["mode-column"], parsed_args["match-nodes-on"]))
+						for row in eachrow(table)]
+
+		#	How nodes are matched for the angular similarity
+			requested_match = lowercase(strip(parsed_args["match-nodes-on"]))
+			match_nodes_on = requested_match == "none" ? nothing :
+							 requested_match == "id" ? :id :
+							 requested_match == "label" ? :label : :node_identity
+
+		#	Compare
+			reference_dir = parsed_args["reference-dir"] === nothing ? joinpath(output_dir, "reference") : parsed_args["reference-dir"]
+			reference_name = parsed_args["name-1"]
+			mkpath(output_dir)
+			batch = reference_comparator(
+				edges_1, nodes_1, networks;
+				reference_dir         = reference_dir,
+				directed              = run_directed,
+				weighted              = run_weighted,
+				bipartite             = bipartite,
+				match_modes           = parsed_args["match-modes"],
+				resolution_sweep      = parsed_args["resolution-sweep"],
+				resolution            = parsed_args["resolution"],
+				n_resolutions         = parsed_args["n-resolutions"],
+				n_runs_per_gamma      = parsed_args["n-runs"],
+				n_iterations_per_run  = parsed_args["n-iterations"],
+				seed                  = parsed_args["seed"],
+				provided_membership   = partition_1,
+				bin_width             = parsed_args["bin-width"],
+				match_nodes_on        = match_nodes_on,
+				min_node_overlap      = parsed_args["min-node-overlap"],
+				keep_results          = false,
+				on_result             = (name, result) -> _write_reference_pair(name, result, output_dir, reference_name),
+				verbose               = verbose)
+
+		#	Write the summary, with what was done about the reference
+			summary_path = joinpath(output_dir, "reference_comparison_summary.csv")
+			CSV.write(summary_path, batch.summary)
+			CSV.write(joinpath(output_dir, "reference_comparison_info.csv"),
+					  DataFrame(item = ["reference", "reference_type", "reference_statistics", "reference_dir", "network_table",
+										"networks", "compared", "refused", "failed"],
+								value = [reference_name, batch.reference.label, batch.reference_status, reference_dir, parsed_args["network-table"],
+										 string(nrow(batch.summary)), string(count(==("compared"), batch.summary.status)),
+										 string(count(==("refused"), batch.summary.status)), string(count(==("failed"), batch.summary.status))]))
+			if verbose
+				println("Reference statistics: ", batch.reference_status)
+				println("Compared ", count(==("compared"), batch.summary.status), " of ", nrow(batch.summary), " networks; refused ",
+						count(==("refused"), batch.summary.status), ", failed ", count(==("failed"), batch.summary.status))
+				println("Wrote summary to: $summary_path")
+			end
+
+		#	Assembling Result
+			return batch.summary
+	end
+
 #	Helper Function for CLI: Settle Whether a Network Is Two-Mode and Project It if Asked
 	function _prepare_network_kind(edges::DataFrame, nodes::DataFrame, bipartite::Bool,
 								   project_onto::Union{Nothing,String}, weighting::String;
@@ -999,6 +1198,13 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 				println("Wrote edge agreement to: $agreement_path")
 			end
 		
+		#	Write the weight scale of each network (not part of the score); empty for binary networks
+			weight_scale_path = joinpath(output_dir, "$(pair_prefix)_weight_scale.csv")
+			CSV.write(weight_scale_path, comparison_result.weight_scale)
+			if verbose
+				println("Wrote weight scale to: $weight_scale_path")
+			end
+
 		#	Write the node measure diagnostics (not part of the score)
 			diagnostics_path = joinpath(output_dir, "$(pair_prefix)_node_measure_diagnostics.csv")
 			CSV.write(diagnostics_path, comparison_result.node_measure_diagnostics)
@@ -1197,9 +1403,17 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 
 			@add_arg_table s begin
 				"--mode"
-					help = "Operation mode: analysis or comparison"
+					help = "Operation mode: analysis, comparison, or reference (network 1 is a reference, analysed once and compared with every network in --network-table)"
 					arg_type = String
 					default = "analysis"
+
+				"--network-table"
+					help = "Reference mode: a CSV or TSV table of the networks to compare with the reference, with columns name, edgelist, and optionally nodelist. Paths that are not absolute are relative to the table's folder"
+					arg_type = String
+
+				"--reference-dir"
+					help = "Reference mode: folder in which the reference's statistics are saved, and reused on a later run when the network, settings, seed, and version are the same (default: <output-dir>/reference)"
+					arg_type = String
 				
 				"--ora-xml-1"
 					help = "Path to first ORA metanetwork XML"
@@ -1432,7 +1646,17 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 			end
 		
 		#	Determine if comparison mode
-			if mode == "comparison" || parsed_args["ora-xml-2"] !== nothing || 
+			if !(mode in ("analysis", "comparison", "reference"))
+				throw(ArgumentError("--mode must be analysis, comparison, or reference; got '$mode'"))
+			end
+			if mode == "reference"
+				if parsed_args["ora-xml-2"] !== nothing || parsed_args["edgelist-2"] !== nothing
+					throw(ArgumentError("Reference mode takes the networks to compare from --network-table, not from a second network"))
+				end
+				if parsed_args["project-onto"] !== nothing
+					throw(ArgumentError("Reference mode does not project networks. Project each network first and compare the projections as one-mode networks"))
+				end
+			elseif mode == "comparison" || parsed_args["ora-xml-2"] !== nothing || 
 			   parsed_args["edgelist-2"] !== nothing
 				mode = "comparison"
 			end
@@ -1533,8 +1757,17 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 				println("Projections are analysed as undirected $(run_weighted ? "weighted" : "binary") one-mode networks")
 			end
 
-		#	Execute analysis or comparison
-			if mode == "analysis"
+		#	Execute reference comparison, analysis, or comparison
+			if mode == "reference"
+				#	Announcing Reference Mode
+					if verbose
+						println("\n=== Running Reference Comparison ===")
+					end
+
+				#	Compare the reference with every network of the table
+					_run_reference_mode(edges_1, nodes_1, partition_1, bipartite_1, run_directed, run_weighted, parsed_args, output_dir, verbose)
+
+			elseif mode == "analysis"
 				#	Announcing Analysis Mode
 					if verbose
 						println("\n=== Running Network Analysis ===")

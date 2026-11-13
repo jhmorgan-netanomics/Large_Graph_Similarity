@@ -1015,4 +1015,290 @@ const LGS = Large_Graph_Similarity
 					@test written.value[findfirst(==("computed"), written.item)] == "true"
 				end
 		end
+
+		@testset "Reference network compared with many networks" begin
+			#	A reference and three networks of its type, on other nodes
+				rng = MersenneTwister(20261113)
+				reference_ids = ["r" * string(i) for i in 1:30]
+				reference_links = unique([(rand(rng, 1:30), rand(rng, 1:30)) for _ in 1:140])
+				reference_edges = DataFrame(src = [reference_ids[i] for (i, j) in reference_links],
+											dst = [reference_ids[j] for (i, j) in reference_links],
+											weight = Float64.(rand(rng, 1:5, length(reference_links))))
+				reference_nodes = DataFrame(id = reference_ids, label = reference_ids)
+				others = Any[]
+				for k in 1:3
+					ids = ["n$(k)_" * string(i) for i in 1:(26 + 2k)]
+					links = unique([(rand(rng, 1:length(ids)), rand(rng, 1:length(ids))) for _ in 1:(110 + 15k)])
+					push!(others, (name = "network_$k",
+								   edges = DataFrame(src = [ids[i] for (i, j) in links], dst = [ids[j] for (i, j) in links],
+													 weight = Float64.(rand(rng, 1:5, length(links)))),
+								   nodes = DataFrame(id = ids, label = ids)))
+				end
+
+			#	Each comparison equals the pairwise comparison, with the reference analysed once
+				reference = reference_analysis(reference_edges, reference_nodes; directed = true, weighted = true, seed = 11)
+				@test reference.label == "one-mode directed weighted"
+				for other in others
+					pairwise = network_comparator(reference_edges, reference_nodes, other.edges, other.nodes; directed = true, weighted = true, seed = 11)
+					against = compare_to_reference(reference, other.edges, other.nodes)
+					@test against.overall_similarity == pairwise.overall_similarity
+					@test against.overall_distance == pairwise.overall_distance
+					@test isequal(against.combined_features, pairwise.combined_features)
+					@test isequal(against.node_measure_diagnostics, pairwise.node_measure_diagnostics)
+					@test isnan(against.edge_angular_similarity)
+				end
+
+			#	A network on the reference's nodes gets the angular similarity as well
+				perturbed = reference_edges[6:end, :]
+				pairwise = network_comparator(reference_edges, reference_nodes, perturbed, reference_nodes; directed = true, weighted = true, seed = 11)
+				against = compare_to_reference(reference, perturbed, reference_nodes)
+				@test against.overall_similarity == pairwise.overall_similarity
+				@test against.edge_angular_similarity == pairwise.edge_angular_similarity
+				@test 0.0 < against.edge_angular_similarity < 1.0
+				@test compare_to_reference(reference, reference_edges, reference_nodes).overall_similarity == 1.0
+
+			#	Saved to disk and read back, the reference gives the same result
+				mktempdir() do folder
+					save_reference(reference, folder)
+					for file in ("reference_settings.csv", "reference_global_stats.csv", "reference_triad_census.csv",
+								 "reference_node_measures.csv", "reference_edges.csv", "reference_nodes.csv")
+						@test isfile(joinpath(folder, file))
+					end
+					loaded = load_reference(folder)
+					@test loaded.fingerprint == reference.fingerprint
+					@test loaded.label == reference.label
+					from_disk = compare_to_reference(loaded, others[1].edges, others[1].nodes)
+					in_memory = compare_to_reference(reference, others[1].edges, others[1].nodes)
+					@test from_disk.overall_similarity == in_memory.overall_similarity
+					@test isequal(from_disk.combined_features, in_memory.combined_features)
+				end
+
+			#	A network of another type is refused: direction, weight, or mode
+				symmetric_edges = vcat(others[1].edges, DataFrame(src = others[1].edges.dst, dst = others[1].edges.src, weight = others[1].edges.weight))
+				symmetric_edges = combine(groupby(symmetric_edges, [:src, :dst]), :weight => maximum => :weight)
+				for row in eachrow(symmetric_edges)
+					mirror = findfirst((symmetric_edges.src .== row.dst) .& (symmetric_edges.dst .== row.src))
+					symmetric_edges.weight[mirror] = row.weight
+				end
+				binary_edges = DataFrame(src = others[2].edges.src, dst = others[2].edges.dst, weight = ones(nrow(others[2].edges)))
+				agents = ["a" * string(i) for i in 1:12]
+				tags = ["h" * string(i) for i in 1:6]
+				two_mode_links = unique([(rand(rng, 1:12), rand(rng, 1:6)) for _ in 1:40])
+				two_mode_edges = DataFrame(src = [agents[i] for (i, j) in two_mode_links], dst = [tags[j] for (i, j) in two_mode_links],
+										   weight = Float64.(rand(rng, 1:4, length(two_mode_links))))
+				two_mode_nodes = DataFrame(id = vcat(agents, tags), label = vcat(agents, tags), mode = vcat(fill("Agent", 12), fill("Hashtag", 6)))
+				@test_throws ArgumentError compare_to_reference(reference, symmetric_edges, nothing)
+				@test_throws ArgumentError compare_to_reference(reference, binary_edges, others[2].nodes)
+				@test_throws ArgumentError compare_to_reference(reference, two_mode_edges, two_mode_nodes; bipartite = true)
+
+			#	A network may be given without a node table, or with a vector of ids
+				with_table = compare_to_reference(reference, others[1].edges, others[1].nodes)
+				@test compare_to_reference(reference, others[1].edges, nothing).overall_similarity == with_table.overall_similarity
+				@test compare_to_reference(reference, others[1].edges, others[1].nodes.id).overall_similarity == with_table.overall_similarity
+				@test network_comparator(reference_edges, nothing, others[1].edges, nothing; seed = 11).overall_similarity == with_table.overall_similarity
+				no_table = reference_analysis(reference_edges, nothing; seed = 11)
+				@test compare_to_reference(no_table, others[1].edges, nothing).overall_similarity == with_table.overall_similarity
+				@test network_comparator(symmetric_edges, nothing, symmetric_edges, nothing; seed = 11).overall_similarity == 1.0
+
+			#	The batch records a refusal or a failure and carries on
+				broken = () -> error("file could not be read")
+				networks = Any[(others[1].name, others[1].edges, others[1].nodes),
+							   ("symmetric", symmetric_edges, nothing),
+							   ("binary", binary_edges, others[2].nodes),
+							   (name = "loaded_on_demand", load = () -> (others[3].edges, others[3].nodes)),
+							   (name = "broken", load = broken),
+							   ("same_nodes", perturbed, reference_nodes)]
+				seen = String[]
+				batch = reference_comparator(reference_edges, reference_nodes, networks; directed = true, weighted = true, seed = 11,
+											 on_result = (name, result) -> push!(seen, name))
+				@test batch.summary.name == ["network_1", "symmetric", "binary", "loaded_on_demand", "broken", "same_nodes"]
+				@test batch.summary.status == ["compared", "refused", "refused", "compared", "failed", "compared"]
+				@test seen == ["network_1", "loaded_on_demand", "same_nodes"]
+				@test batch.reference_status == "computed"
+				@test all(!isempty, batch.summary.reason[[2, 3, 5]])
+				@test occursin("undirected", batch.summary.reason[2])
+				@test occursin("binary", batch.summary.reason[3])
+				@test batch.summary.similarity[1] == compare_to_reference(reference, others[1].edges, others[1].nodes).overall_similarity
+				@test batch.summary.similarity[4] == compare_to_reference(reference, others[3].edges, others[3].nodes).overall_similarity
+				@test all(isnan, batch.summary.similarity[[2, 3, 5]])
+				@test isnan(batch.summary.edge_angular_similarity[1])
+				@test batch.summary.edge_angular_similarity[6] == against.edge_angular_similarity
+				@test !isempty(batch.summary.top_features[1])
+				@test haskey(batch.results, "network_1") && !haskey(batch.results, "symmetric")
+
+			#	A two-mode reference: same result as the pairwise comparison, and a one-mode network is refused
+				other_links = unique([(rand(rng, 1:12), rand(rng, 1:6)) for _ in 1:45])
+				other_two_mode = DataFrame(src = [agents[i] for (i, j) in other_links], dst = [tags[j] for (i, j) in other_links],
+										   weight = Float64.(rand(rng, 1:4, length(other_links))))
+				two_mode_reference = reference_analysis(two_mode_edges, two_mode_nodes; weighted = true, bipartite = true, seed = 11)
+				pairwise = network_comparator(two_mode_edges, two_mode_nodes, other_two_mode, two_mode_nodes; weighted = true, bipartite = true, seed = 11)
+				against_two_mode = compare_to_reference(two_mode_reference, other_two_mode, two_mode_nodes)
+				@test against_two_mode.overall_similarity == pairwise.overall_similarity
+				@test against_two_mode.edge_angular_similarity == pairwise.edge_angular_similarity
+				@test_throws ArgumentError compare_to_reference(two_mode_reference, others[1].edges, others[1].nodes; bipartite = false)
+				reversed = DataFrame(src = other_two_mode.dst, dst = other_two_mode.src, weight = other_two_mode.weight)
+				@test_throws ArgumentError compare_to_reference(two_mode_reference, reversed, two_mode_nodes)
+
+			#	A saved reference is used again only when the network, the settings, the seed, and the version are the same
+				mktempdir() do folder
+					small = Any[(others[1].name, others[1].edges, others[1].nodes)]
+					first_run = reference_comparator(reference_edges, reference_nodes, small; reference_dir = folder, seed = 11)
+					@test first_run.reference_status == "computed and saved"
+					second_run = reference_comparator(reference_edges, reference_nodes, small; reference_dir = folder, seed = 11)
+					@test startswith(second_run.reference_status, "reused")
+					@test second_run.summary.similarity == first_run.summary.similarity
+					other_seed = reference_comparator(reference_edges, reference_nodes, small; reference_dir = folder, seed = 12)
+					@test startswith(other_seed.reference_status, "recomputed") && occursin("seed", other_seed.reference_status)
+					other_network = reference_comparator(perturbed, reference_nodes, small; reference_dir = folder, seed = 12)
+					@test startswith(other_network.reference_status, "recomputed") && occursin("fingerprint", other_network.reference_status)
+					no_seed = reference_comparator(perturbed, reference_nodes, small; reference_dir = folder)
+					@test startswith(no_seed.reference_status, "recomputed")
+					again_no_seed = reference_comparator(perturbed, reference_nodes, small; reference_dir = folder)
+					@test startswith(again_no_seed.reference_status, "recomputed") && occursin("seed", again_no_seed.reference_status)
+				end
+
+			#	The app: a table of networks, one without a node list; the reference is reused on the second run
+				mktempdir() do output_dir
+					data_dir = joinpath(output_dir, "data")
+					mkpath(data_dir)
+					CSV.write(joinpath(data_dir, "reference_edges.csv"), reference_edges)
+					CSV.write(joinpath(data_dir, "reference_nodes.csv"), reference_nodes)
+					CSV.write(joinpath(data_dir, "one_edges.csv"), others[1].edges)
+					CSV.write(joinpath(data_dir, "one_nodes.csv"), others[1].nodes)
+					CSV.write(joinpath(data_dir, "two_edges.csv"), others[2].edges)
+					CSV.write(joinpath(data_dir, "binary_edges.csv"), binary_edges)
+					CSV.write(joinpath(data_dir, "networks.csv"),
+							  DataFrame(name = ["one", "two", "binary", "absent"],
+										edgelist = ["one_edges.csv", "two_edges.csv", "binary_edges.csv", "no_such_file.csv"],
+										nodelist = ["one_nodes.csv", "", "", ""]))
+					args = ["--mode", "reference", "--edgelist-1", joinpath(data_dir, "reference_edges.csv"),
+							"--nodelist-1", joinpath(data_dir, "reference_nodes.csv"), "--name-1", "target",
+							"--network-table", joinpath(data_dir, "networks.csv"), "--output-dir", joinpath(output_dir, "run"),
+							"--directed", "true", "--weighted", "true", "--seed", "11", "--verbose", "false"]
+					LGS.CLI.cli_main(args)
+					run_dir = joinpath(output_dir, "run")
+					written = CSV.read(joinpath(run_dir, "reference_comparison_summary.csv"), DataFrame)
+					@test written.name == ["one", "two", "binary", "absent"]
+					@test written.status == ["compared", "compared", "refused", "failed"]
+					@test written.similarity[1] ≈ compare_to_reference(reference, others[1].edges, others[1].nodes).overall_similarity
+					@test written.similarity[2] ≈ compare_to_reference(reference, others[2].edges, nothing).overall_similarity
+					@test isfile(joinpath(run_dir, "reference", "reference_node_measures.csv"))
+					@test isfile(joinpath(run_dir, "one", "target_one_similarity_scores.csv"))
+					@test isfile(joinpath(run_dir, "one", "target_one_weight_scale.csv"))
+					@test isfile(joinpath(run_dir, "two", "two_node_measures.csv"))
+					@test !isdir(joinpath(run_dir, "binary"))
+					info = CSV.read(joinpath(run_dir, "reference_comparison_info.csv"), DataFrame; types = String)
+					@test info.value[findfirst(==("reference_statistics"), info.item)] == "computed and saved"
+					LGS.CLI.cli_main(args)
+					info = CSV.read(joinpath(run_dir, "reference_comparison_info.csv"), DataFrame; types = String)
+					@test startswith(info.value[findfirst(==("reference_statistics"), info.item)], "reused")
+					@test CSV.read(joinpath(run_dir, "reference_comparison_summary.csv"), DataFrame).similarity[1:2] == written.similarity[1:2]
+					@test_throws ArgumentError LGS.CLI.cli_main(vcat(args, ["--edgelist-2", joinpath(data_dir, "one_edges.csv")]))
+				end
+		end
+
+		@testset "Weight scale: one heavy link or the distribution of weights" begin
+			#	Two directed weighted networks that differ in one link: weight 2 in one, 9 in the other
+				rng = MersenneTwister(20261116)
+				ids = ["w" * lpad(i, 2, "0") for i in 1:30]
+				arcs = [(i, j) for (i, j) in unique([(rand(rng, 1:30), rand(rng, 1:30)) for _ in 1:160]) if i != j]
+				weights = Float64.(rand(rng, 1:3, length(arcs)))
+				weights[1] = 4.0
+				base = DataFrame(src = [ids[i] for (i, j) in arcs], dst = [ids[j] for (i, j) in arcs], weight = weights)
+				heavy = copy(base)
+				heavy.weight[2] = 9.0
+				nodes = DataFrame(id = ids, label = ids)
+				result = network_comparator(base, nodes, heavy, nodes; directed = true, weighted = true, seed = 5)
+				scale = Dict(row.statistic => row for row in eachrow(result.weight_scale))
+				@test scale["largest_weight"].network_1 == 4.0 && scale["largest_weight"].network_2 == 9.0
+				@test scale["largest_weight"].ratio == 2.25
+				@test scale["second_largest_weight"].network_2 == 4.0
+				@test scale["links_at_largest_weight"].network_2 == 1.0
+				@test scale["median"].ratio == 1.0
+				@test scale["links"].network_1 == length(arcs)
+
+			#	The weights themselves hardly differ; divided by the largest weight they differ a great deal
+				@test scale["sqrt_jsd_weights"].network_1 < 0.1
+				@test scale["sqrt_jsd_weights_over_largest"].network_1 > 5.0 * scale["sqrt_jsd_weights"].network_1
+
+			#	The measures divided by the largest weight are marked, and the note names them
+				diagnostics = result.node_measure_diagnostics
+				@test sort(diagnostics.measure[diagnostics.divided_by_largest_weight]) == ["in_degree_normalized", "out_degree_normalized"]
+				note = result.comparison_info.value[findfirst(==("weight_scale_note"), result.comparison_info.item)]
+				@test occursin("the largest weights differ (4.0 and 9.0, ratio 2.25)", note)
+				@test occursin("in_degree_normalized", note)
+
+			#	Equal largest weights are said to be equal; the same network has no divergence
+				same = network_comparator(base, nodes, base, nodes; directed = true, weighted = true, seed = 5)
+				same_scale = Dict(row.statistic => row for row in eachrow(same.weight_scale))
+				@test same_scale["sqrt_jsd_weights"].network_1 == 0.0 && same_scale["sqrt_jsd_weights_over_largest"].network_1 == 0.0
+				@test startswith(same.comparison_info.value[findfirst(==("weight_scale_note"), same.comparison_info.item)], "the largest weights are equal")
+
+			#	Undirected: total degree is the marked measure, and self-links do not set the divisor
+				pairs = unique([(min(i, j), max(i, j)) for (i, j) in arcs])
+				undirected_1 = DataFrame(src = [ids[i] for (i, j) in pairs], dst = [ids[j] for (i, j) in pairs], weight = Float64.(rand(rng, 1:3, length(pairs))))
+				undirected_2 = vcat(undirected_1, DataFrame(src = ["w01"], dst = ["w01"], weight = [50.0]))
+				undirected = network_comparator(undirected_1, nodes, undirected_2, nodes; directed = false, weighted = true, seed = 5)
+				@test undirected.weight_scale.ratio[1] == 1.0
+				undirected_diagnostics = undirected.node_measure_diagnostics
+				@test undirected_diagnostics.measure[undirected_diagnostics.divided_by_largest_weight] == ["total_degree_normalized"]
+
+			#	Binary networks have no weight scale
+				binary = network_comparator(base, nodes, heavy, nodes; directed = true, weighted = false, seed = 5)
+				@test nrow(binary.weight_scale) == 0
+				@test !any(binary.node_measure_diagnostics.divided_by_largest_weight)
+				@test occursin("binary", binary.comparison_info.value[findfirst(==("weight_scale_note"), binary.comparison_info.item)])
+
+			#	The score does not use any of it, and a comparison with a reference reports the same table
+				reference = reference_analysis(base, nodes; directed = true, weighted = true, seed = 5)
+				against = compare_to_reference(reference, heavy, nodes)
+				@test against.overall_similarity == result.overall_similarity
+				@test isequal(against.weight_scale, result.weight_scale)
+				@test isequal(against.node_measure_diagnostics, result.node_measure_diagnostics)
+				batch = reference_comparator(base, nodes, Any[("heavy", heavy, nodes)]; directed = true, weighted = true, seed = 5)
+				@test batch.summary.weight_scale_note[1] == note
+		end
+
+		@testset "Reference comparison on observed networks" begin
+			#	Reference: Balikatan 2022. Compared: Pac Rim 2023 (day 1) and Pac Sentry 2025 (day 6), synthetic networks on other nodes.
+			#	Each is the Agent x Agent - All Communication network of its ORA file.
+				test_data = dirname(BALIKATAN_ORA_PATH)
+				balikatan_2022 = load_ora_xml(BALIKATAN_ORA_PATH)
+				reference_nodes = balikatan_2022.nodesets["Agent"][:, 1:2]
+				rename!(reference_nodes, ["id", "label"])
+				reference_arcs = balikatan_2022.networks["Agent x Agent - All Communication"].edges
+				reference = reference_analysis(reference_arcs, reference_nodes; directed = true, weighted = true, seed = 11)
+				@test reference.label == "one-mode directed weighted"
+
+			#	Saved and read back, as a batch run uses it
+				saved_dir = mktempdir()
+				save_reference(reference, saved_dir)
+				loaded = load_reference(saved_dir)
+
+			#	Each comparison with the reference equals the comparison of the pair
+				for file in ("Pac Rim Day 1.xml", "PAO_Day_6.xml")
+					path = joinpath(test_data, file)
+					if !isfile(path)
+						#	Recorded as broken, so that a missing file is seen in the summary
+							@test_skip isfile(path)
+							continue
+					end
+					meta_network = load_ora_xml(path)
+					nodes = meta_network.nodesets["Agent"][:, 1:2]
+					rename!(nodes, ["id", "label"])
+					arcs = meta_network.networks["Agent x Agent - All Communication"].edges
+					pairwise = network_comparator(reference_arcs, reference_nodes, arcs, nodes; directed = true, weighted = true, seed = 11)
+					for against in (compare_to_reference(reference, arcs, nodes), compare_to_reference(loaded, arcs, nodes))
+						@test against.overall_similarity == pairwise.overall_similarity
+						@test isequal(against.combined_features, pairwise.combined_features)
+						@test isequal(against.type_contributions, pairwise.type_contributions)
+						@test isequal(against.node_measure_diagnostics, pairwise.node_measure_diagnostics)
+						@test isequal(against.undefined_features, pairwise.undefined_features)
+						@test isequal(against.weight_scale, pairwise.weight_scale)
+						@test isnan(against.edge_angular_similarity)
+					end
+					@test 0.0 < pairwise.overall_similarity < 1.0
+				end
+				rm(saved_dir; recursive = true)
+		end
 end
