@@ -34,7 +34,7 @@ Rebuild the app after any change to `src`; the compiled app does not pick up sou
 
 `network_comparator(edges_1, nodes_1, edges_2, nodes_2; directed, weighted, ...)` compares two one-mode networks. It returns one score (`overall_similarity`), the aligned features, the contribution of each feature type, and three tables to read alongside the score:
 
-- `node_measure_diagnostics` gives, for each node measure, the divergence that entered the score, the divergence expected from sampling alone, and the scaled Wasserstein-1 distance.
+- `node_measure_diagnostics` gives, for each node measure, the divergence that entered the score, the divergence expected from node sampling alone with its 95% level, and the scaled Wasserstein-1 distance.
 - `undefined_features` lists every feature that is undefined (NaN) in one or both networks. Those features are left out of the score. One that is undefined in only one network is a difference the score does not contain.
 - `comparison_info` names the feature set, the bin width, and the version that were used, with the network type that was declared and the type found in each network's links.
 
@@ -123,7 +123,12 @@ For weighted networks the triad census is taken over a grid of weight thresholds
 
 In a sparse network most triad types are densest at the lowest threshold, so their position is 0 in both networks and the feature adds nothing to the distance. That is intended: the position counts where a type peaks in the interior of the grid, and is silent otherwise.
 
-In small networks (fewer than about 500 nodes), sampling alone produces a divergence close to that of a real difference. Compare `js_divergence` with `expected_noise` in `node_measure_diagnostics` before reading much into a single measure.
+**Sampling noise.** Two networks that differ only by chance still show a nonzero divergence on every node measure, and more so when they are small. `node_measure_diagnostics` gives two reference levels for each measure: `expected_noise`, the mean divergence between two samples of these sizes drawn from one distribution, and `noise_95`, the level such a divergence stays under 95 times in 100. A `js_divergence` below `noise_95` is not evidence of a difference. Neither level enters the score.
+
+- *How they are computed.* With hard bins the noise follows a chi-square distribution on the number of occupied bins less one. Linear binning lowers it by a smoothing ratio that depends on where values sit within their bins: two thirds when they are spread evenly, 1 at bin centres, one half at bin edges. The ratio is taken as two thirds a priori and informed by the measure's own values, so that small networks lean on the prior and larger ones on their data. A small-sample term (Williams' correction, held to at most 1.25) is applied.
+- *How well they hold.* Against random splits of 946 node measures from 30 network pairs (47 to 3,200 nodes), the estimate over the true noise has median 1.03 and lies between 0.94 and 1.13 in 90 of 100 cases. The formula used before version 0.4.2 was about 50% too high.
+- *What they do not cover.* Nodes are treated as independent draws. A change in one link can move many nodes together, and that variation is not included. PageRank, the k-core and s-core numbers, and degree normalized by the largest weight vary several times more between two networks of one process than these levels say; for those measures the levels are a lower bound.
+- *The proper route.* The uncertainty of a score, or of a measure, under a stated assumption about how a network was observed belongs to the Network_Credible_Intervals project, which deforms and reconstructs real networks and returns an interval for any measure. Its validation is in progress. An LGS score can be passed to it as a metric, with `compare_to_reference` keeping the reference fixed.
 
 ## Two-mode (bipartite) networks
 

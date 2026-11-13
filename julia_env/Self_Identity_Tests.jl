@@ -1392,4 +1392,45 @@ const LGS = Large_Graph_Similarity
 					@test startswith(info.value[findfirst(==("node_key"), info.item)], "id (handle was asked for and not found")
 				end
 		end
+
+		@testset "Sampling noise of a node measure divergence" begin
+			#	The smoothing ratio: 1 when values sit at bin centres, two thirds when they are spread evenly, one half at bin edges
+				centres = repeat([0.5, 1.5, 2.5, 3.5], 500)
+				edges_of_bins = repeat([1.0, 2.0, 3.0], 500)
+				spread = collect(range(0.5, 3.5; length = 6001))
+				@test LGS._sampling_noise(centres, 0.0, 1.0, 4, 1000, 1000).factor ≈ 1.0 atol = 0.02
+				@test LGS._sampling_noise(edges_of_bins, 0.0, 1.0, 4, 750, 750).factor ≈ 0.5 atol = 0.03
+				@test LGS._sampling_noise(spread, 0.0, 1.0, 4, 3000, 3001).factor ≈ 2 / 3 atol = 0.03
+
+			#	A small sample leans on the prior of two thirds; one occupied bin has no noise
+				few = LGS._sampling_noise([0.5, 1.5, 0.5, 1.5], 0.0, 1.0, 2, 2, 2)
+				@test abs(few.factor - 2 / 3) < abs(1.0 - 2 / 3) / 10
+				@test LGS._sampling_noise(fill(0.5, 40), 0.0, 1.0, 2, 20, 20).expected_noise == 0.0
+
+			#	Against random splits of one sample: the mean divergence is the expected noise, and about 5 in 100 exceed the 95% level
+				rng = MersenneTwister(20261118)
+				for (sample, n_x) in ((exp.(randn(rng, 600)), 300), (Float64.(rand(rng, 0:12, 500)), 200), (abs.(randn(rng, 240)) .^ 3, 120))
+					estimate = LGS._distribution_divergence(sample[1:n_x], sample[(n_x + 1):end])
+					splits = Float64[]
+					for _ in 1:400
+						shuffle!(rng, sample)
+						push!(splits, LGS._distribution_divergence(sample[1:n_x], sample[(n_x + 1):end]).js_divergence)
+					end
+					@test 0.85 < estimate.expected_noise / (sum(splits) / length(splits)) < 1.2
+					@test 0.01 < count(>(estimate.noise_95), splits) / 400 < 0.12
+					@test estimate.noise_95 > estimate.expected_noise
+				end
+
+			#	The comparison reports both levels for every node measure; they do not enter the score
+				ids = ["s" * lpad(i, 2, "0") for i in 1:40]
+				arcs = [(i, j) for (i, j) in unique([(rand(rng, 1:40), rand(rng, 1:40)) for _ in 1:220]) if i != j]
+				first_network = DataFrame(src = [ids[i] for (i, j) in arcs], dst = [ids[j] for (i, j) in arcs], weight = Float64.(rand(rng, 1:4, length(arcs))))
+				second_network = first_network[10:end, :]
+				nodes = DataFrame(id = ids, label = ids)
+				result = network_comparator(first_network, nodes, second_network, nodes; directed = true, weighted = true, seed = 9)
+				diagnostics = result.node_measure_diagnostics
+				@test hasproperty(diagnostics, :noise_95)
+				@test all(diagnostics.noise_95 .>= diagnostics.expected_noise)
+				@test all(isfinite, diagnostics.noise_95)
+		end
 end

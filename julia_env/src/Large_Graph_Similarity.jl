@@ -16931,6 +16931,77 @@ THE SOFTWARE.
 			return distance / scale
 	end
 
+#	Helper Function for _distribution_divergence: Divergence That Sampling Alone Produces
+	function _sampling_noise(pooled_positions::Vector{Float64}, lower::Float64, width::Float64, n_bins::Int, n_x::Int, n_y::Int)
+		"""
+		Args:
+			pooled_positions::Vector{Float64}: both networks' node values on the geometric axis
+			lower::Float64: lower end of the binned range
+			width::Float64: bin width
+			n_bins::Int: number of bins
+			n_x::Int: number of nodes in the first network
+			n_y::Int: number of nodes in the second network
+		Returns:
+			NamedTuple:
+				- expected_noise: mean divergence between two samples of n_x and n_y nodes drawn from the pooled distribution
+				- noise_95: the level that such a divergence stays under 95 times in 100
+				- factor: the smoothing ratio of linear binning (1 = none, two thirds = values spread evenly within bins)
+		Notes:
+			With hard bins, 4 x harmonic n x divergence follows a chi-square distribution on (occupied bins - 1)
+			degrees of freedom, so its mean is (occupied bins - 1).
+			Linear binning shares each node between two bins, which lowers the noise: the mean becomes
+			(ratio x occupied bins - 1), where the smoothing ratio is the mean over occupied bins of
+			(mean squared share / mean share). The ratio is two thirds when values are spread evenly within
+			bins, 1 when they sit at bin centres, and one half when they sit at bin edges.
+			Prior and data: the ratio is two thirds, as if seen on NOISE_PRIOR_NODES nodes, combined with the
+			ratio computed from this measure's own values at their own number of nodes. Small networks lean
+			on the prior; larger ones are governed by their data.
+			Small-sample term: Williams' correction to the chi-square approximation, held to at most
+			NOISE_SMALL_SAMPLE_CAP, since it is a first-order term and is not reliable when large.
+			Checked against random splits of 946 node measures (30 network pairs, 47 to 3,200 nodes):
+			estimate over true noise has median 1.03 and lies between 0.94 and 1.13 for 90 of 100.
+			Nodes are treated as independent draws. Chance variation that moves many nodes together is not
+			included: measures such as PageRank, core numbers, and degree normalized by the largest weight
+			vary more between two networks of one process than this level says.
+		"""
+
+		#	Mean share and mean squared share of a node in each bin
+			total = length(pooled_positions)
+			mass = zeros(Float64, n_bins)
+			squared = zeros(Float64, n_bins)
+			for value in sort(pooled_positions)
+				position = clamp((value - lower) / width - 0.5, 0.0, Float64(n_bins - 1))
+				index = floor(Int, position)
+				fraction = position - index
+				mass[index + 1] += (1.0 - fraction) / total
+				squared[index + 1] += (1.0 - fraction)^2 / total
+				mass[min(index + 2, n_bins)] += fraction / total
+				squared[min(index + 2, n_bins)] += fraction^2 / total
+			end
+			occupied = findall(>(0.0), mass)
+
+		#	Early return
+			if length(occupied) < 2
+				return (expected_noise = 0.0, noise_95 = 0.0, factor = NOISE_PRIOR_FACTOR)
+			end
+
+		#	Smoothing ratio: the prior of two thirds, informed by this measure's values
+			degrees = length(occupied) - 1
+			data_ratio = sum(squared[occupied] ./ mass[occupied]) / length(occupied)
+			factor = (NOISE_PRIOR_NODES * NOISE_PRIOR_FACTOR + total * data_ratio) / (NOISE_PRIOR_NODES + total)
+			effective_degrees = max(factor * length(occupied) - 1.0, 0.0)
+
+		#	Small-sample term
+			small_sample = 1.0 + (total / n_x + total / n_y - 1.0) * (sum(1.0 ./ mass[occupied]) - 1.0) / (6.0 * total * degrees)
+			small_sample = min(small_sample, NOISE_SMALL_SAMPLE_CAP)
+
+		#	Assembling Result
+			harmonic_n = 2.0 / (1.0 / n_x + 1.0 / n_y)
+			scale = small_sample / (4.0 * harmonic_n)
+			return (expected_noise = scale * effective_degrees,
+					noise_95 = scale * (effective_degrees / degrees) * chisqinvcdf(Float64(degrees), 0.95), factor = factor)
+	end
+
 #	Helper Function for _js_divergence_computation: Divergence Between Two Node-Level Distributions
 	function _distribution_divergence(x::Vector{Float64}, y::Vector{Float64}; bin_width::Float64 = 0.125)
 		"""
@@ -16944,6 +17015,7 @@ THE SOFTWARE.
 				- typical_value: pooled typical magnitude that scales the axis
 				- n_bins: number of bins used
 				- expected_noise: divergence expected from two samples of one distribution
+				- noise_95: the level such a divergence stays under 95 times in 100
 				- wasserstein: scaled Wasserstein-1 distance (diagnostic)
 		Notes:
 			Values are placed on the geometric axis u = asinh(value / typical_value).
@@ -16951,8 +17023,8 @@ THE SOFTWARE.
 			Scaling by the typical value places the bins where this measure's nodes are.
 			The range runs from the joint minimum to the joint maximum and always includes zero.
 			The bin count follows from the range, so a wider distribution gets more bins of the same width.
-			expected_noise = (occupied bins - 1) / (4 x harmonic mean of the two node counts).
-			It treats nodes as independent draws, so read it as a rough reference level.
+			expected_noise and noise_95 come from _sampling_noise. They treat nodes as independent draws,
+			so they are a reference level for node sampling and nothing more.
 		"""
 
 		#	Diagnostics that do not depend on the bins
@@ -16961,7 +17033,7 @@ THE SOFTWARE.
 
 		#	Early return
 			if typical_value == 0.0
-				return (js_divergence = 0.0, typical_value = 0.0, n_bins = 0, expected_noise = 0.0, wasserstein = wasserstein)
+				return (js_divergence = 0.0, typical_value = 0.0, n_bins = 0, expected_noise = 0.0, noise_95 = 0.0, wasserstein = wasserstein)
 			end
 
 		#	Geometric axis
@@ -16982,13 +17054,11 @@ THE SOFTWARE.
 
 		#	Divergence and its reference noise level
 			js_divergence = _jensen_shannon_divergence(p, q)
-			occupied = count(>(0.0), p .+ q)
-			harmonic_n = 2.0 / (1.0 / length(x) + 1.0 / length(y))
-			expected_noise = (occupied - 1) / (4.0 * harmonic_n)
+			noise = _sampling_noise(vcat(u_x, u_y), lower, width, n_bins, length(x), length(y))
 
 		#	Assembling Result
 			return (js_divergence = js_divergence, typical_value = typical_value, n_bins = n_bins,
-					expected_noise = expected_noise, wasserstein = wasserstein)
+					expected_noise = noise.expected_noise, noise_95 = noise.noise_95, wasserstein = wasserstein)
 	end
 
 #	Helper Function for _global_metric_normalizer: Compare Node-Level Distributions of Two Networks
@@ -17027,6 +17097,7 @@ THE SOFTWARE.
 				network_2_value = Float64[],
 				js_divergence = Float64[],
 				expected_noise = Float64[],
+				noise_95 = Float64[],
 				wasserstein = Float64[],
 				typical_value = Float64[],
 				n_bins = Int[],
@@ -17046,7 +17117,7 @@ THE SOFTWARE.
 
 				#	Nothing to compare
 					if isempty(x) || isempty(y)
-						push!(results, (base, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, length(x), length(y)))
+						push!(results, (base, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, length(x), length(y)))
 						continue
 					end
 
@@ -17056,7 +17127,7 @@ THE SOFTWARE.
 				#	Map to a symmetric pair
 					root_jsd = sqrt(divergence.js_divergence)
 					push!(results, (base, 0.5 * root_jsd, -0.5 * root_jsd, divergence.js_divergence,
-									divergence.expected_noise, divergence.wasserstein, divergence.typical_value,
+									divergence.expected_noise, divergence.noise_95, divergence.wasserstein, divergence.typical_value,
 									divergence.n_bins, length(x), length(y)))
 			end
 
@@ -17998,7 +18069,12 @@ THE SOFTWARE.
 	end
 
 #	Version Recorded with Each Comparison
-	const LGS_VERSION = "0.4.1"
+	const LGS_VERSION = "0.4.2"
+
+#	Sampling Noise of a Node Measure Divergence (see _sampling_noise)
+	const NOISE_PRIOR_FACTOR = 2.0 / 3.0
+	const NOISE_PRIOR_NODES = 60.0
+	const NOISE_SMALL_SAMPLE_CAP = 1.25
 
 #	Helper Function for network_comparator and reference_analysis: Statistics of One One-Mode Network
 	function _construct_one_mode(edges::DataFrame, nodes;
@@ -18705,12 +18781,18 @@ THE SOFTWARE.
 		- `type_similarity` is a per-type similarity, computed as `1 / (1 + distance)`
 		   using only that type's features.
 	- `node_measure_diagnostics::DataFrame`: One row per node measure, with columns
-	  [:measure, :type, :js_divergence, :expected_noise, :wasserstein, :typical_value,
-	  :n_bins, :n_1, :n_2]. `expected_noise` is the divergence expected when both
-	  networks' values are drawn from one distribution: (occupied bins - 1) / (4 x the
-	  harmonic mean of the two node counts). It treats nodes as independent draws, so
-	  it is a rough reference level. A `js_divergence` near it is not evidence of a
-	  difference. `wasserstein` is the scaled Wasserstein-1 distance.
+	  [:measure, :type, :js_divergence, :expected_noise, :noise_95, :wasserstein,
+	  :typical_value, :n_bins, :n_1, :n_2, :divided_by_largest_weight]. `expected_noise`
+	  is the mean divergence between two samples of these sizes drawn from one
+	  distribution, and `noise_95` is the level such a divergence stays under 95 times
+	  in 100. A `js_divergence` below `noise_95` is not evidence of a difference. Both
+	  allow for linear binning (a smoothing ratio that is two thirds a priori and is
+	  informed by the measure's own values). Both treat nodes as
+	  independent draws: they are a reference level for node sampling only, and a lower
+	  bound for measures that one link moves for many nodes at once (PageRank, core
+	  numbers, degree normalized by the largest weight). For the uncertainty of a score
+	  or a measure under a stated observation process, see the Network_Credible_Intervals
+	  project. `wasserstein` is the scaled Wasserstein-1 distance.
 
 	- `edge_angular_similarity::Float64`, `edge_angular_similarity_binary::Float64`: Angular similarity
 	  of the two networks' link weights and of link presence, between 0 and 1. Not part of the
