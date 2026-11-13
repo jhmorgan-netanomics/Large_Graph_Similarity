@@ -973,8 +973,7 @@ const LGS = Large_Graph_Similarity
 				clashing_nodes.original_id[2] = clashing_nodes.original_id[1]
 				@test_throws ArgumentError network_comparator(first_network, keyed_nodes, relabelled, clashing_nodes; directed = true, weighted = true,
 															  match_nodes_on = :original_id)
-				@test_throws ArgumentError network_comparator(first_network, nodes, second_network, nodes; directed = true, weighted = true,
-															  match_nodes_on = :no_such_column)
+				@test_logs (:warn, r"not found") match_mode = :any network_comparator(first_network, nodes, second_network, nodes; directed = true, weighted = true, match_nodes_on = :no_such_column)
 
 			#	A symmetric network gives the same value listed both ways or once
 				pairs = [(i, j) for (i, j) in arcs if i < j]
@@ -1300,5 +1299,97 @@ const LGS = Large_Graph_Similarity
 					@test 0.0 < pairwise.overall_similarity < 1.0
 				end
 				rm(saved_dir; recursive = true)
+		end
+
+		@testset "Node key: ids by default, names when asked" begin
+			#	One network under two id schemes; the label is the same in both. A third copy has neither in common.
+				rng = MersenneTwister(20261117)
+				labels = ["person_" * lpad(i, 2, "0") for i in 1:36]
+				arcs = [(i, j) for (i, j) in unique([(rand(rng, 1:36), rand(rng, 1:36)) for _ in 1:220]) if i != j]
+				weights = Float64.(rand(rng, 1:4, length(arcs)))
+				order = shuffle(rng, 1:36)
+				ids_a = ["a" * lpad(i, 3, "0") for i in 1:36]
+				ids_b = ["b" * lpad(order[i], 3, "0") for i in 1:36]
+				edges_a = DataFrame(src = [ids_a[i] for (i, j) in arcs], dst = [ids_a[j] for (i, j) in arcs], weight = weights)
+				edges_b = DataFrame(src = [ids_b[i] for (i, j) in arcs], dst = [ids_b[j] for (i, j) in arcs], weight = weights)
+				nodes_a = DataFrame(id = ids_a, label = labels)
+				nodes_b = DataFrame(id = ids_b, label = labels)
+
+			#	With the name as the key the two copies are one network: the score is exactly 1 and so is the angular similarity
+				by_name = network_comparator(edges_a, nodes_a, edges_b, nodes_b; directed = true, weighted = true, seed = 3, match_nodes_on = :name)
+				@test by_name.overall_similarity == 1.0
+				@test by_name.edge_angular_similarity == 1.0
+				@test by_name.comparison_info.value[findfirst(==("node_key"), by_name.comparison_info.item)] == "label"
+				@test network_comparator(edges_a, nodes_a, edges_b, nodes_b; seed = 3, match_nodes_on = :label).overall_similarity == 1.0
+
+			#	Node measures come back under the ids the caller gave
+				@test sort(string.(by_name.node_measures_1.node)) == sort(ids_a)
+				@test sort(string.(by_name.node_measures_2.node)) == sort(ids_b)
+
+			#	By default ids are the key: the two copies share no node, so there is no angular similarity; the score is still computed
+				by_id = network_comparator(edges_a, nodes_a, edges_b, nodes_b; directed = true, weighted = true, seed = 3)
+				@test isnan(by_id.edge_angular_similarity)
+				@test 0.0 < by_id.overall_similarity <= 1.0
+				@test by_id.comparison_info.value[findfirst(==("node_key"), by_id.comparison_info.item)] == "id"
+
+			#	A name that is asked for and absent is reported, and ids are used: the result is that of the default
+				bare_b = DataFrame(id = ids_b)
+				fallback = @test_logs (:warn, r"not found in network 2") match_mode = :any network_comparator(edges_a, nodes_a, edges_b, bare_b; directed = true, weighted = true, seed = 3, match_nodes_on = :name)
+				@test fallback.overall_similarity == by_id.overall_similarity
+				@test occursin("was asked for and not found in network 2", fallback.comparison_info.value[findfirst(==("node_key"), fallback.comparison_info.item)])
+
+			#	Two nodes with one name are an error; a node without a name keeps its id
+				duplicated = copy(nodes_b)
+				duplicated.label[2] = duplicated.label[1]
+				@test_throws ArgumentError network_comparator(edges_a, nodes_a, edges_b, duplicated; seed = 3, match_nodes_on = :name)
+				blank_a, blank_b = copy(nodes_a), copy(nodes_b)
+				blank_a.label[5] = ""
+				blank_b.label[5] = ""
+				blank = network_comparator(edges_a, blank_a, edges_b, blank_b; directed = true, weighted = true, seed = 3, match_nodes_on = :name)
+				@test 35 / 37 - 1e-9 <= parse(Float64, blank.edge_agreement.value[findfirst(==("node_overlap"), blank.edge_agreement.item)]) <= 35 / 37 + 1e-9
+
+			#	A membership given by node id follows the key
+				membership = DataFrame(node = ids_a, community = [1 + (i % 3) for i in 1:36])
+				membership_b = DataFrame(node = ids_b, community = [1 + (i % 3) for i in 1:36])
+				with_membership = network_comparator(edges_a, nodes_a, edges_b, nodes_b; seed = 3, match_nodes_on = :name,
+													 provided_membership_1 = membership, provided_membership_2 = membership_b)
+				@test with_membership.overall_similarity == 1.0
+
+			#	Graphs on different nodes need no key: nothing is asked for and nothing is reported
+				other = DataFrame(src = ["x" * string(i) for (i, j) in arcs[1:150]], dst = ["x" * string(j) for (i, j) in arcs[1:150]], weight = weights[1:150])
+				structural = @test_logs min_level = Base.CoreLogging.Warn network_comparator(edges_a, nodes_a, other, nothing; directed = true, weighted = true, seed = 3)
+				@test 0.0 < structural.overall_similarity < 1.0
+
+			#	A reference fixes the key; a network without the field is identified by id and still compared
+				reference = reference_analysis(edges_a, nodes_a; directed = true, weighted = true, seed = 3, match_nodes_on = :name)
+				against = compare_to_reference(reference, edges_b, nodes_b)
+				@test against.overall_similarity == 1.0 && against.edge_angular_similarity == 1.0
+				@test sort(string.(against.node_measures_1.node)) == sort(ids_a)
+				@test isequal(against.combined_features, by_name.combined_features)
+				without_field = @test_logs (:warn,) match_mode = :any compare_to_reference(reference, edges_b, bare_b)
+				@test isnan(without_field.edge_angular_similarity) && 0.0 < without_field.overall_similarity <= 1.0
+				mktempdir() do folder
+					first_run = reference_comparator(edges_a, nodes_a, Any[("copy", edges_b, nodes_b)]; reference_dir = folder, seed = 3, match_nodes_on = :name)
+					@test first_run.summary.similarity == [1.0]
+					@test startswith(reference_comparator(edges_a, nodes_a, Any[("copy", edges_b, nodes_b)]; reference_dir = folder, seed = 3, match_nodes_on = :name).reference_status, "reused")
+					other_key = reference_comparator(edges_a, nodes_a, Any[("copy", edges_b, nodes_b)]; reference_dir = folder, seed = 3)
+					@test startswith(other_key.reference_status, "recomputed") && occursin("node_key", other_key.reference_status)
+				end
+
+			#	The app: --match-nodes-on name; a field that is not in the file is reported and ids are used
+				mktempdir() do output_dir
+					paths = Dict(name => joinpath(output_dir, name * ".csv") for name in ("edges_a", "nodes_a", "edges_b", "nodes_b"))
+					CSV.write(paths["edges_a"], edges_a); CSV.write(paths["nodes_a"], nodes_a)
+					CSV.write(paths["edges_b"], edges_b); CSV.write(paths["nodes_b"], nodes_b)
+					common = ["--mode", "comparison", "--edgelist-1", paths["edges_a"], "--nodelist-1", paths["nodes_a"], "--name-1", "a",
+							  "--edgelist-2", paths["edges_b"], "--nodelist-2", paths["nodes_b"], "--name-2", "b",
+							  "--directed", "true", "--weighted", "true", "--seed", "3", "--verbose", "false"]
+					LGS.CLI.cli_main(vcat(common, ["--output-dir", joinpath(output_dir, "by_name"), "--match-nodes-on", "name"]))
+					scores = CSV.read(joinpath(output_dir, "by_name", "a_b_similarity_scores.csv"), DataFrame)
+					@test scores.value[findfirst(==("overall_similarity"), scores.metric)] == 1.0
+					LGS.CLI.cli_main(vcat(common, ["--output-dir", joinpath(output_dir, "absent"), "--match-nodes-on", "handle"]))
+					info = CSV.read(joinpath(output_dir, "absent", "a_b_comparison_info.csv"), DataFrame; types = String)
+					@test startswith(info.value[findfirst(==("node_key"), info.item)], "id (handle was asked for and not found")
+				end
 		end
 end

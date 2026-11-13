@@ -405,12 +405,12 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 			filepath::String: the node list file
 			identity_column::String: name of the column holding each node's identity
 		Returns:
-			DataFrame: nodes with an added :node_identity column
+			DataFrame: nodes with the column added under its own name (lower case); unchanged when
+				the file has no such column
 		Notes:
-			The identity matches a node of one network with a node of the other for the
-			angular similarity of their links, when ids differ between the two networks.
+			The column identifies a node when ids differ between the two networks.
 			Rows of the file and of nodes are in the same order.
-			Throws ArgumentError when the column is absent.
+			A column that is absent is reported and left out; the comparison then identifies nodes by id.
 		"""
 
 		#	Read the File
@@ -421,7 +421,8 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 		#	Validation
 			column = findfirst(name -> lowercase(strip(name)) == lowercase(strip(identity_column)), names(df))
 			if column === nothing
-				throw(ArgumentError("Column '$identity_column' (--match-nodes-on) not found in $filepath. Columns: $(join(names(df), ", "))"))
+				println("--match-nodes-on $identity_column: not found in $filepath (columns: $(join(names(df), ", "))).")
+				return nodes
 			end
 			if nrow(df) != nrow(nodes)
 				throw(ArgumentError("Node list $filepath could not be aligned with its '$identity_column' column"))
@@ -429,7 +430,7 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 
 		#	Assembling Result
 			result = copy(nodes)
-			result.node_identity = strip.(string.(df[!, column]))
+			result[!, Symbol(lowercase(strip(identity_column)))] = [ismissing(value) ? "" : strip(string(value)) for value in df[!, column]]
 			return result
 	end
 
@@ -583,9 +584,7 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 
 		#	How nodes are matched for the angular similarity
 			requested_match = lowercase(strip(parsed_args["match-nodes-on"]))
-			match_nodes_on = requested_match == "none" ? nothing :
-							 requested_match == "id" ? :id :
-							 requested_match == "label" ? :label : :node_identity
+			match_nodes_on = requested_match == "none" ? nothing : Symbol(requested_match)
 
 		#	Compare
 			reference_dir = parsed_args["reference-dir"] === nothing ? joinpath(output_dir, "reference") : parsed_args["reference-dir"]
@@ -1504,7 +1503,7 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 				default = 0.125
 				
 			"--match-nodes-on"
-				help = "How nodes of the two networks are matched for the angular similarity of their links (comparison mode): 'id', a node-list column name, or 'none' to skip it"
+				help = "The node-list field that identifies a node: 'id' (default), 'name' (or 'label'), or another column. Use it when the same network carries different ids in the two files. A field that is not found is reported and ids are used. 'none' uses ids and skips the angular similarity of the links"
 				arg_type = String
 				default = "id"
 
@@ -1877,11 +1876,7 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 			else  # comparison mode
 				#	How nodes of the two networks are matched for the angular similarity
 					requested_match = lowercase(strip(parsed_args["match-nodes-on"]))
-					match_nodes_on = requested_match == "none" ? nothing :
-									 requested_match == "id" ? :id :
-									 requested_match == "label" ? :label :
-									 (hasproperty(nodes_1, :node_identity) && hasproperty(nodes_2, :node_identity)) ? :node_identity :
-									 Symbol(parsed_args["match-nodes-on"])
+					match_nodes_on = requested_match == "none" ? nothing : Symbol(requested_match)
 
 				#	Announcing Comparator Mode
 					if verbose

@@ -10,7 +10,7 @@ Large_Graph_Similarity (LGS) reduces two networks to a similarity score between 
 | `julia_env/src/CLI.jl` | The command-line interface |
 | `julia_env/Self_Identity_Tests.jl` | Regression tests: self-identity, undefined measures, two-mode networks, node measure comparison, network type, core decompositions, angular similarity, reference comparison |
 | `julia_env/Benchmark_Replication_Tests.jl` | Each measure against results saved from ORA, igraph, scoredec, Pajek, Python, and R |
-| `julia_env/Comparator_Tests.jl`, `CLI_Tests.jl`, `Graph_Comparison_Tests.jl` | Development scripts. The first two predate version 0.2.0 and still refer to the raw and asinh scores |
+| `julia_env/old_tests/` | Development scripts that predate version 0.2.0 and still refer to the raw and asinh scores |
 | `julia_env/build_app_*.jl` | PackageCompiler build scripts |
 | `Test_Data/` | Test networks |
 | `LGS_Pending_Fixes_28Oct2026.md` | Record of the October 2026 findings and their repair |
@@ -51,11 +51,22 @@ The two readings answer different questions. The angular similarity asks whether
 
 The angular similarity compares link by link, so it means something only when the nodes of the two networks are the same entities: each pair of nodes must have been able to be tied in both. This is checked.
 
-- **Matching.** Nodes are matched on their ids. If ids were changed, for example to meet an external standard, `match_nodes_on` (CLI `--match-nodes-on`) names the node-table column that carries the common identity. Two nodes of one network with the same identity are an error.
+- **Matching.** Nodes are matched on the node key (see *Node key* below): their ids by default, or their names when the caller says so.
 - **Overlap.** The node overlap is the number of nodes in both networks divided by the number in either, counting every node in a node table or on a link.
 - **Threshold.** The angular similarity is computed only when the overlap is at least `min_node_overlap` (default 0.75; CLI `--min-node-overlap`). Below it the value is `NaN`, and `edge_agreement` gives the overlap and the reason.
 - **Unequal node sets.** The node sets need not be identical. A node present in one network only is treated as having no links in the other, so its links count as links found in one network only.
 - **Switching it off.** `match_nodes_on = nothing` (CLI `--match-nodes-on none`) skips it, for networks that are not on the same nodes.
+
+### Node key: ids by default, names when asked
+
+Most comparisons are structural: the two networks need not share a single node, and nothing has to be said about node identity. The key matters in one situation, when the same network is compared under different ids, for example after ids were changed to meet an external standard. Something must then be constant between the two node lists, and the caller says what it is.
+
+- **Default.** Nodes are identified by id. Nothing is guessed.
+- **Names.** `match_nodes_on = :name` (CLI `--match-nodes-on name`) identifies nodes by name: the node list's `name` or `label` column, whichever both lists have. Any other column can be named in the same way.
+- **Not found.** If the field is not in both node lists, that is reported and ids are used. `comparison_info` records the key that was used (`node_key`).
+- **What the key does.** Both networks are put onto the key before anything is measured. The same network under two id schemes is then the same input: it scores exactly 1, and the angular similarity of its links is 1. Node measures are returned under the ids that were given.
+- **Limits.** Two nodes of one network with the same name are an error, because their links would be merged. A node without a name keeps its id. If neither ids nor names are constant, there is no key; the score is still computed, and the angular similarity is left out.
+- **Reference mode.** The reference fixes the key (`reference_analysis(...; match_nodes_on)`). A network that lacks the field is identified by id and still compared.
 
 ### Weight scale: one heavy link, or the distribution of weights
 
@@ -189,7 +200,6 @@ A refused network has `status` "refused" in the summary, with the reason. A netw
 ## Future work
 
 - **Bipartite modularity (Barber, 2007).** Community detection is left out of the two-mode feature set, because standard modularity expects links within a mode, which a two-mode network cannot have. Adding Barber's null model to `leiden_community_detection` and `champ_community_detection` would restore the community features (partition sizes, modularity, in-group ratios, modularity vitality) for two-mode networks.
-- **Id-independent node ordering.** The Leiden partition no longer depends on row order, but it still depends on the ids: the same network under two id schemes can receive different partitions.
 
 ## References
 

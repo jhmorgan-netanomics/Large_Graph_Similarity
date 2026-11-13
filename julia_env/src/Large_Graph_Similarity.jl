@@ -17561,7 +17561,7 @@ THE SOFTWARE.
 		#	Identity from the named column
 			id_column = hasproperty(nodes, :id) ? :id : Symbol(first(names(nodes)))
 			for (id, identity) in zip(string.(nodes[!, id_column]), nodes[!, Symbol(match_nodes_on)])
-				if !ismissing(identity)
+				if !ismissing(identity) && !isempty(strip(string(identity)))
 					identity_of[id] = string(identity)
 				end
 			end
@@ -17794,6 +17794,126 @@ THE SOFTWARE.
 			return diagnostics
 	end
 
+#	Helper Function for network_comparator: Settle the Field That Identifies a Node
+	function _resolve_node_key(node_tables, match_nodes_on::Union{Symbol,AbstractString,Nothing})
+		"""
+		Args:
+			node_tables: the node tables of the networks that must share the key, as the caller gave them
+				(a table that is not a DataFrame has no columns)
+			match_nodes_on::Union{Symbol,AbstractString,Nothing}: :id (default), :name or :label, any other
+				node-table column, or nothing
+		Returns:
+			NamedTuple:
+				- column::Symbol: the column that identifies a node (:id when ids are used)
+				- description::String: the key in words, for comparison_info
+				- fell_back::Bool: whether a named column was asked for and not found
+		Notes:
+			Ids are the key unless the caller names another field. Nothing is guessed.
+			:name and :label mean the node's name: whichever of the two columns every table has.
+			A named column must be in every table. If it is not, ids are used and the description says so.
+			nothing leaves ids as the key (and the caller skips the angular similarity).
+		"""
+
+		#	Ids are the key unless another field is named
+			if match_nodes_on === nothing || Symbol(match_nodes_on) == :id
+				return (column = :id, description = "id", fell_back = false)
+			end
+
+		#	Columns that can serve: a name is called name or label
+			requested = Symbol(lowercase(strip(string(match_nodes_on))))
+			candidates = requested in (:name, :label) ? (requested == :name ? [:name, :label] : [:label, :name]) : [requested, Symbol(match_nodes_on)]
+
+		#	The first candidate that every table has
+			for candidate in candidates
+				if all(table -> table isa DataFrame && hasproperty(table, candidate), node_tables)
+					return (column = candidate, description = string(candidate), fell_back = false)
+				end
+			end
+
+		#	Not found: say so and use ids
+			missing_in = [k for (k, table) in enumerate(node_tables) if !(table isa DataFrame && any(candidate -> hasproperty(table, candidate), candidates))]
+			where_text = isempty(missing_in) ? "the same column of every network" : "network " * join(missing_in, " and ")
+			description = "id ($(match_nodes_on) was asked for and not found in $where_text)"
+			@warn "match_nodes_on = $(match_nodes_on): not found in $where_text. Nodes are identified by id."
+
+		#	Assembling Result
+			return (column = :id, description = description, fell_back = true)
+	end
+
+#	Helper Function for network_comparator: Rewrite a Network onto Its Node Key
+	function _rekey_network(edges::DataFrame, nodes::DataFrame, key_column::Symbol, network_number::Int, provided_membership)
+		"""
+		Args:
+			edges::DataFrame: edge list with :src and :dst
+			nodes::DataFrame: node table with :id and the key column
+			key_column::Symbol: the column that identifies a node; :id leaves the network as it is
+			network_number::Int: 1 or 2, used in error messages
+			provided_membership: communities given by the caller (DataFrame, Vector, Dict, or nothing)
+		Returns:
+			NamedTuple:
+				- edges::DataFrame: the links, with endpoints named by the key
+				- nodes::DataFrame: the node table, with :id holding the key and :original_id the id
+				- id_of::Dict{String,String}: key => original id (empty when ids are the key)
+				- provided_membership: the membership, with nodes named by the key
+		Notes:
+			Everything downstream identifies a node by its id: the node order used by community
+			detection, and the link-by-link matching of two networks. Writing the key into the id
+			makes the same network under other ids the same input.
+			A node without a value in the key column keeps its id. Two nodes with one key are an error.
+		"""
+
+		#	Ids are the key
+			if key_column == :id
+				return (edges = edges, nodes = nodes, id_of = Dict{String,String}(), provided_membership = provided_membership)
+			end
+
+		#	Key of every node (an error when two nodes share one)
+			key_of = _node_identities(edges, nodes, key_column, network_number)
+
+		#	Rewrite the lists
+			new_edges = copy(edges)
+			new_edges.src = [key_of[string(id)] for id in edges.src]
+			new_edges.dst = [key_of[string(id)] for id in edges.dst]
+			new_nodes = copy(nodes)
+			new_nodes.original_id = string.(nodes.id)
+			new_nodes.id = [key_of[string(id)] for id in nodes.id]
+
+		#	Rewrite a membership given by node id
+			membership = provided_membership
+			if provided_membership isa DataFrame
+				membership = copy(provided_membership)
+				node_column = first(name for name in names(membership) if lowercase(name) == "node")
+				membership[!, node_column] = [get(key_of, string(id), string(id)) for id in membership[!, node_column]]
+			elseif provided_membership isa Dict
+				membership = Dict(get(key_of, string(id), string(id)) => community for (id, community) in provided_membership)
+			end
+
+		#	Assembling Result
+			return (edges = new_edges, nodes = new_nodes, id_of = Dict{String,String}(key => id for (id, key) in key_of), provided_membership = membership)
+	end
+
+#	Helper Function for network_comparator: Give the Node Measures Their Original Ids Back
+	function _restore_node_ids!(node_measures::DataFrame, id_of::Dict{String,String})
+		"""
+		Args:
+			node_measures::DataFrame: node-level measures, with nodes named by the key
+			id_of::Dict{String,String}: key => original id (empty when ids are the key)
+		Returns:
+			DataFrame: node_measures, with the node column holding the original ids
+		"""
+
+		#	Early return
+			if isempty(id_of) || !hasproperty(node_measures, :node)
+				return node_measures
+			end
+
+		#	Restore
+			node_measures.node = [get(id_of, string(node), string(node)) for node in node_measures.node]
+
+		#	Assembling Result
+			return node_measures
+	end
+
 #	Helper Function for network_comparator: Link-by-Link Agreement of Two Networks on the Same Nodes
 	function _edge_agreement(edges_1::DataFrame, nodes_1, edges_2::DataFrame, nodes_2;
 							 directed::Bool,
@@ -17878,7 +17998,7 @@ THE SOFTWARE.
 	end
 
 #	Version Recorded with Each Comparison
-	const LGS_VERSION = "0.4.0"
+	const LGS_VERSION = "0.4.1"
 
 #	Helper Function for network_comparator and reference_analysis: Statistics of One One-Mode Network
 	function _construct_one_mode(edges::DataFrame, nodes;
@@ -18173,8 +18293,12 @@ THE SOFTWARE.
 			The measures are computed from a node table, so the other two forms are converted here.
 		"""
 
-		#	A node table is used as it is
+		#	A node table is used as it is; one without labels is given its ids as labels
 			if nodes isa DataFrame
+				if hasproperty(nodes, :id) && !hasproperty(nodes, :label)
+					nodes = copy(nodes)
+					nodes.label = string.(nodes.id)
+				end
 				return nodes
 			end
 
@@ -18266,6 +18390,13 @@ THE SOFTWARE.
 			clean_nodes_1 = _node_table(clean_edges_1, deepcopy(nodes_1))
 			clean_edges_2 = deepcopy(edges_2)
 			clean_nodes_2 = _node_table(clean_edges_2, deepcopy(nodes_2))
+
+		#	The field that identifies a node: ids, unless the caller names another that both networks have
+			node_key = _resolve_node_key((nodes_1, nodes_2), match_nodes_on)
+			keyed_1 = _rekey_network(clean_edges_1, clean_nodes_1, node_key.column, 1, provided_membership_1)
+			keyed_2 = _rekey_network(clean_edges_2, clean_nodes_2, node_key.column, 2, provided_membership_2)
+			clean_edges_1, clean_nodes_1, provided_membership_1 = keyed_1.edges, keyed_1.nodes, keyed_1.provided_membership
+			clean_edges_2, clean_nodes_2, provided_membership_2 = keyed_2.edges, keyed_2.nodes, keyed_2.provided_membership
 		
 		#	========== CONSTRUCT FEATURE VECTORS ==========
 		
@@ -18311,7 +18442,7 @@ THE SOFTWARE.
 		#	Link-by-link agreement, when the two networks are on the same nodes (not part of the score)
 			agreement = _edge_agreement(clean_edges_1, clean_nodes_1, clean_edges_2, clean_nodes_2;
 										directed = bipartite_1 || directed,
-										match_nodes_on = match_nodes_on, min_node_overlap = min_node_overlap)
+										match_nodes_on = match_nodes_on === nothing ? nothing : :id, min_node_overlap = min_node_overlap)
 			edge_agreement = DataFrame(
 				item = ["computed", "angular_similarity", "angular_similarity_binary", "node_overlap", "min_node_overlap",
 						"nodes_both", "nodes_1_only", "nodes_2_only", "links_both", "links_1_only", "links_2_only", "links_reweighted", "note"],
@@ -18326,10 +18457,10 @@ THE SOFTWARE.
 						  "one-mode " * (directed ? "directed " : "undirected ") * (weighted ? "weighted" : "binary")
 			comparison_info = DataFrame(item = ["feature_set", "node_measure_binning", "bin_width", "lgs_version",
 												"declared_type", "found_type_1", "found_type_2", "type_note",
-												"node_overlap", "min_node_overlap", "edge_agreement_note"],
+												"node_key", "node_overlap", "min_node_overlap", "edge_agreement_note"],
 										value = [feature_set, "geometric axis, fixed bin width, linear binning", string(bin_width), LGS_VERSION,
 												 declared_type, found_1.description, found_2.description, join(type_notes, "; "),
-												 string(agreement.node_overlap), string(min_node_overlap), agreement.note])
+												 node_key.description, string(agreement.node_overlap), string(min_node_overlap), agreement.note])
 
 		#	Select appropriate constructor and builder based on configuration
 			if bipartite_1
@@ -18420,6 +18551,10 @@ THE SOFTWARE.
 			_mark_scaled_measures!(node_measure_diagnostics, weight_scale.scaled_measures)
 			push!(comparison_info, ("weight_scale_note", weight_scale.note))
 
+		#	Node measures are returned under the ids the caller gave
+			_restore_node_ids!(node_measures_1, keyed_1.id_of)
+			_restore_node_ids!(node_measures_2, keyed_2.id_of)
+
 		#	Return comprehensive results
 			return (global_stats_1 = global_stats_1, 
 					triad_census_counts_1 = triad_census_counts_1, 
@@ -18463,10 +18598,12 @@ THE SOFTWARE.
 	- `mode_column::Union{Symbol,AbstractString}`: Column of the node tables that names each node's mode (default `:mode`). Two-mode only.
 	- `match_modes::Bool`: Require the two networks' mode names to agree (default true). Two-mode only.
 	- `bin_width::Float64`: Bin width used to compare node-level distributions (default 0.125). See Details.
-	- `match_nodes_on::Union{Symbol,AbstractString,Nothing}`: How a node of one network is identified with a node of the other, 
-      for the angular similarity. 
-    `:id` (default) matches on node id. A node-table column name matches on that column; use it when ids were changed, 
-    for example to meet an external standard, and a column carries the common identity. `nothing` skips the angular similarity.
+	- `match_nodes_on::Union{Symbol,AbstractString,Nothing}`: The node-table field that identifies a node (the node key). 
+    `:id` (default) uses node ids. `:name` (or `:label`) uses the node's name, and any other column can be named; use it when the 
+    same network carries different ids in the two node tables. Both networks are put onto the key before anything is measured, 
+    so a network compared with a copy under other ids scores exactly 1. A field that is not in both node tables is reported 
+    and ids are used. Two nodes with one name are an error; a node without a name keeps its id. Networks that share no nodes 
+    need no key. `nothing` uses ids and skips the angular similarity.
 	- `min_node_overlap::Float64`: Least share of nodes that must be in both networks for the angular similarity to be computed (default 0.75). 
       See Details.
 
@@ -18519,7 +18656,7 @@ THE SOFTWARE.
 
 	The angular similarity compares link by link, so it means something only when the nodes of the two networks are the same entities: 
     each pair of nodes must have been able to be tied in both. This is checked, not assumed. 
-    Nodes are matched on their ids, or on the node-table column named by `match_nodes_on`. 
+    Nodes are matched on the node key: their ids, or the field named by `match_nodes_on`. 
     The node overlap is the number of nodes in both networks divided by the number in either, counting every node in a node table or on a link. 
     The angular similarity is computed only when the overlap is at least `min_node_overlap` (default 0.75); otherwise it is `NaN` and `edge_agreement` says why. 
     The node sets need not be identical: a node present in one network only is treated as having no links in the other, 
@@ -18611,7 +18748,8 @@ THE SOFTWARE.
 	  and so on), `node_measure_binning`, `bin_width`, `lgs_version`,
 	  `declared_type`, `found_type_1`, `found_type_2` (for example "symmetric,
 	  weights vary"), and `type_note` (what was changed, or why the declaration
-	  stands; empty when declaration and links agree), `node_overlap`,
+	  stands; empty when declaration and links agree), `node_key` (the field
+	  that identified a node), `node_overlap`,
 	  `min_node_overlap`, and `edge_agreement_note`. For two-mode networks,
 	  further rows give the source and target mode of each network.
 
@@ -18766,9 +18904,12 @@ THE SOFTWARE.
 								resolution_sweep::Bool = false, resolution::Float64 = 1.0, n_resolutions::Int = 15,
 								n_runs_per_gamma::Int = 5, n_iterations_per_run::Int = 10,
 								seed::Union{Int,Nothing} = nothing,
-								provided_membership::Union{Nothing,DataFrame,Vector{Int},Dict} = nothing)
+								provided_membership::Union{Nothing,DataFrame,Vector{Int},Dict} = nothing,
+								match_nodes_on::Union{Symbol,AbstractString,Nothing} = :id)
 		"""
 		Args:
+			match_nodes_on: the field that identifies a node (:id, :name or :label, or a node-table column);
+				it is fixed for every network compared with this reference
 			edges::DataFrame: edge list of the reference network (:src, :dst, optionally :weight)
 			nodes: node universe (DataFrame, vector of ids, or nothing)
 			directed::Bool: declared direction (default = true)
@@ -18799,6 +18940,11 @@ THE SOFTWARE.
 			clean_nodes = _node_table(clean_edges, deepcopy(nodes))
 			fingerprint = _network_fingerprint(clean_edges, clean_nodes)
 
+		#	The field that identifies a node, fixed for every network compared with this reference
+			node_key = _resolve_node_key((nodes,), match_nodes_on)
+			keyed = _rekey_network(clean_edges, clean_nodes, node_key.column, 1, provided_membership)
+			clean_edges, clean_nodes, provided_membership = keyed.edges, keyed.nodes, keyed.provided_membership
+
 		#	The type the reference is measured as
 			network_type = _effective_network_type(clean_edges, clean_nodes, directed, weighted, bipartite)
 			clean_edges = network_type.edges
@@ -18821,15 +18967,17 @@ THE SOFTWARE.
 						n_runs_per_gamma = n_runs_per_gamma, n_iterations_per_run = n_iterations_per_run,
 						seed = seed, provided_membership = provided_membership)
 			end
+			_restore_node_ids!(node_measures, keyed.id_of)
 
 		#	Settings the statistics were computed under
 			settings = DataFrame(
 				item = ["lgs_version", "label", "bipartite", "directed", "weighted", "declared_directed", "declared_weighted",
-						"found", "type_note", "source_mode", "target_mode", "mode_column",
+						"found", "type_note", "source_mode", "target_mode", "node_key", "node_key_description", "mode_column",
 						"resolution_sweep", "resolution", "n_resolutions", "n_runs_per_gamma", "n_iterations_per_run",
 						"seed", "provided_membership", "fingerprint"],
 				value = [LGS_VERSION, network_type.label, string(bipartite), string(network_type.directed), string(network_type.weighted),
-						 string(directed), string(weighted), network_type.found, network_type.note, source_mode, target_mode, string(mode_column),
+						 string(directed), string(weighted), network_type.found, network_type.note, source_mode, target_mode,
+						 string(node_key.column), node_key.description, string(mode_column),
 						 string(resolution_sweep), string(resolution), string(n_resolutions), string(n_runs_per_gamma), string(n_iterations_per_run),
 						 seed === nothing ? "none" : string(seed), string(provided_membership !== nothing), fingerprint])
 
@@ -18846,7 +18994,7 @@ THE SOFTWARE.
 
 	**Usage**
 	`reference_analysis(edges, nodes; directed=true, weighted=true, bipartite=false, mode_column=:mode, resolution_sweep=false, 
-    resolution=1.0, n_resolutions=15, n_runs_per_gamma=5, n_iterations_per_run=10, seed=nothing, provided_membership=nothing)`
+    resolution=1.0, n_resolutions=15, n_runs_per_gamma=5, n_iterations_per_run=10, seed=nothing, provided_membership=nothing, match_nodes_on=:id)`
 
 	**Arguments**
 	- `edges::DataFrame`: Edge list of the reference network with `:src` and `:dst` columns, optional `:weight` column
@@ -18859,6 +19007,8 @@ THE SOFTWARE.
       as in `network_comparator`. 
     They are recorded with the reference and used for every network compared with it.
 	- `provided_membership`: Pre-computed community assignments for the reference
+	- `match_nodes_on`: The node-table field that identifies a node (default `:id`; `:name`, `:label`, or another column), as in `network_comparator`. 
+    It is fixed for every network compared with this reference.
 
 	**Details**
 	Most of the cost of a comparison is the analysis of each network: the triad census, community detection, the core decompositions, PageRank. 
@@ -19087,9 +19237,17 @@ THE SOFTWARE.
 				throw(ArgumentError(MIXED_MODE_MESSAGE))
 			end
 
-		#	The network's own type, under the reference's declaration
+		#	The reference fixed the field that identifies a node; a network without that field is identified by id
 			clean_nodes = _node_table(edges, deepcopy(nodes))
-			network_type = _effective_network_type(deepcopy(edges), clean_nodes, reference.declared_directed, reference.declared_weighted, bipartite)
+			reference_key = Symbol(_reference_setting(reference, "node_key"))
+			node_key = reference_key == :id ? (column = :id, description = _reference_setting(reference, "node_key_description"), fell_back = false) :
+											  _resolve_node_key((nodes,), reference_key)
+			key_description = node_key.fell_back ? "$(reference_key) for the reference; id for this network, which has no such column" : node_key.description
+			keyed = _rekey_network(deepcopy(edges), clean_nodes, node_key.column, 2, provided_membership)
+			clean_nodes, provided_membership = keyed.nodes, keyed.provided_membership
+
+		#	The network's own type, under the reference's declaration
+			network_type = _effective_network_type(keyed.edges, clean_nodes, reference.declared_directed, reference.declared_weighted, bipartite)
 			clean_edges = network_type.edges
 
 		#	Refuse a network of another type
@@ -19166,7 +19324,7 @@ THE SOFTWARE.
 		#	Link-by-link agreement, when the two networks are on the same nodes (not part of the score)
 			agreement = _edge_agreement(reference.edges, reference.nodes, clean_edges, clean_nodes;
 										directed = bipartite || reference.directed,
-										match_nodes_on = match_nodes_on, min_node_overlap = min_node_overlap)
+										match_nodes_on = match_nodes_on === nothing ? nothing : :id, min_node_overlap = min_node_overlap)
 			edge_agreement = DataFrame(
 				item = ["computed", "angular_similarity", "angular_similarity_binary", "node_overlap", "min_node_overlap",
 						"nodes_both", "nodes_1_only", "nodes_2_only", "links_both", "links_1_only", "links_2_only", "links_reweighted", "note"],
@@ -19185,10 +19343,10 @@ THE SOFTWARE.
 			declared_type = (bipartite ? "" : (reference.declared_directed ? "directed " : "undirected ")) * (reference.declared_weighted ? "weighted" : "binary")
 			comparison_info = DataFrame(item = ["feature_set", "node_measure_binning", "bin_width", "lgs_version",
 												"declared_type", "found_type_1", "found_type_2", "type_note",
-												"node_overlap", "min_node_overlap", "edge_agreement_note", "reference"],
+												"node_key", "node_overlap", "min_node_overlap", "edge_agreement_note", "reference"],
 										value = [reference.label, "geometric axis, fixed bin width, linear binning", string(bin_width), LGS_VERSION,
 												 declared_type, reference.found, network_type.found, network_type.note,
-												 string(agreement.node_overlap), string(min_node_overlap), agreement.note,
+												 key_description, string(agreement.node_overlap), string(min_node_overlap), agreement.note,
 												 "network 1 is a reference analysed once (fingerprint $(reference.fingerprint), version $(_reference_setting(reference, "lgs_version")))"])
 			append!(comparison_info, comparison_modes)
 
@@ -19197,6 +19355,7 @@ THE SOFTWARE.
 										 bipartite = bipartite, bin_width = bin_width)
 			_mark_scaled_measures!(scored.node_measure_diagnostics, weight_scale.scaled_measures)
 			push!(comparison_info, ("weight_scale_note", weight_scale.note))
+			_restore_node_ids!(node_measures_2, keyed.id_of)
 
 		#	Assembling Result
 			return (global_stats_1 = reference.global_stats,
@@ -19233,8 +19392,9 @@ THE SOFTWARE.
 	- `match_modes::Bool`: Require a two-mode network's mode names to agree with the reference's (default true)
 	- `provided_membership`: Pre-computed community assignments for the network
 	- `bin_width::Float64`: Bin width used to compare node-level distributions (default 0.125)
-	- `match_nodes_on`, `min_node_overlap`: How nodes are matched, and the least node overlap, for the angular similarity of the links, 
-       as in `network_comparator`
+	- `match_nodes_on`, `min_node_overlap`: `nothing` skips the angular similarity of the links; `min_node_overlap` is the least 
+       node overlap for it, as in `network_comparator`. The node key is the one the reference was analysed with 
+       (`reference_analysis(...; match_nodes_on)`); a network without that field is identified by id and still compared.
 
 	**Details**
 	The network is declared as the reference was declared (`directed`, `weighted`), and its type is then found from its links by the same tests. 
@@ -19416,10 +19576,12 @@ THE SOFTWARE.
 
 		#	Settings a saved reference must share with this run
 			current_settings = DataFrame(
-				item = ["lgs_version", "fingerprint", "bipartite", "declared_directed", "declared_weighted", "mode_column",
+				item = ["lgs_version", "fingerprint", "node_key", "bipartite", "declared_directed", "declared_weighted", "mode_column",
 						"resolution_sweep", "resolution", "n_resolutions", "n_runs_per_gamma", "n_iterations_per_run",
 						"seed", "provided_membership"],
-				value = [LGS_VERSION, _network_fingerprint(reference_edges, _node_table(reference_edges, reference_nodes)), string(bipartite), string(directed), string(weighted),
+				value = [LGS_VERSION, _network_fingerprint(reference_edges, _node_table(reference_edges, reference_nodes)),
+						 string(_resolve_node_key((reference_nodes,), match_nodes_on).column),
+						 string(bipartite), string(directed), string(weighted),
 						 string(mode_column), string(resolution_sweep), string(resolution), string(n_resolutions), string(n_runs_per_gamma),
 						 string(n_iterations_per_run), seed === nothing ? "none" : string(seed), string(provided_membership !== nothing)])
 
@@ -19445,7 +19607,7 @@ THE SOFTWARE.
 											   directed = directed, weighted = weighted, bipartite = bipartite, mode_column = mode_column,
 											   resolution_sweep = resolution_sweep, resolution = resolution, n_resolutions = n_resolutions,
 											   n_runs_per_gamma = n_runs_per_gamma, n_iterations_per_run = n_iterations_per_run,
-											   seed = seed, provided_membership = provided_membership)
+											   seed = seed, provided_membership = provided_membership, match_nodes_on = match_nodes_on)
 				if reference_dir !== nothing
 					save_reference(reference, reference_dir)
 					reference_status == "computed" && (reference_status = "computed and saved")
