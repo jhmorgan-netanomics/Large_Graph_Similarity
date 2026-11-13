@@ -16701,50 +16701,68 @@ THE SOFTWARE.
 		Returns:
 			Nothing (modifies in place)
 		Notes:
-			Applies weights to normalize multi-indicator categories:
-			- Triad Census: weight = 1/n_triads
-			- K-Core Decomposition: weight = 1/n_kcore_levels
-			- S-Core Decomposition: weight = 1/n_score_levels (weighted only)
-			- Community Structure: weight = 1/n_community_measures
+			Adds a :weight column.
+			A Triad Census feature gets weight 1 / (number of Triad Census features), so the
+			whole census counts as one feature. Every other feature gets weight 1.
+			The k-core and s-core decompositions need no group weight: each enters as one
+			feature per decomposition (see _add_core_measures!).
+			Community Structure is left at weight 1 per feature. Its features are shares that
+			sum to 1, so their combined size is bounded, and they supply little of the distance.
 		"""
-		
-		#	Define Multi-Indicator Category Names
-			weighted_types = Set([
-				"Triad Census",
-				"K-Core Decomposition",
-				"S-Core Decomposition",
-				"Community Structure"
-			])
-		
-		#	Get Unique Types in Order
-			measure_types = unique(measures_df.type)
-		
-		#	Build Weight Vectors for Each Type
-			weight_vectors = Vector{Float64}[]
-			
-			for type_name in measure_types
-				#	Count measures of this type
-					type_mask = measures_df.type .== type_name
-					type_count = sum(type_mask)
-				
-				#	Apply appropriate weight
-					if type_name in weighted_types && type_count > 0
-						#	Multi-indicator category: normalized weight
-							push!(weight_vectors, fill(1.0 / type_count, type_count))
-					else
-						#	Regular category: unit weight
-							push!(weight_vectors, ones(Float64, type_count))
-					end
-			end
-		
-		#	Combine All Weights
-			measure_weights = vcat(weight_vectors...)
-		
-		#	Add Weight Column
-			measures_df.weight = measure_weights
-		
-		#	Return nothing (in-place modification)
+
+		#	Number of Triad Census features
+			n_triad = count(==("Triad Census"), measures_df.type)
+
+		#	One weight per row
+			measures_df.weight = Float64[type_name == "Triad Census" ? 1.0 / n_triad : 1.0 for type_name in measures_df.type]
+
+		#	Early return
 			return nothing
+	end
+
+#	Helper Function for _global_metric_normalizer: Core Numbers Held in the Node Tables
+	function _add_core_measures!(node_measures_1::DataFrame, node_measures_2::DataFrame, bipartite::Bool)
+		"""
+		Args:
+			node_measures_1::DataFrame: Node-level measures for network 1
+			node_measures_2::DataFrame: Node-level measures for network 2
+			bipartite::Bool: Whether the networks are two-mode
+		Returns:
+			NamedTuple (measures::Vector{String}, types::Vector{String}): the core-number
+				columns present in both node tables, k-core first, with their feature types
+		Notes:
+			A node's core number is a node-level measure, so each decomposition is compared
+			as one distribution, like degree or PageRank. Neighbouring core levels then share
+			mass, where one feature per level treated levels 12 and 13 as unrelated.
+			One-mode tables hold k_core_in, k_core_out, k_core_undirected (or k_core_all) and
+			the matching s_core columns. A two-mode table holds k_core for every node; it is
+			split here into source_k_core and target_k_core, so each mode is compared with
+			its counterpart.
+		"""
+
+		#	Two-mode: one column per mode
+			if bipartite
+				for node_measures in (node_measures_1, node_measures_2)
+					if hasproperty(node_measures, :k_core) && hasproperty(node_measures, :role)
+						node_measures.source_k_core = [role == "source" ? Float64(core) : missing
+													   for (role, core) in zip(node_measures.role, node_measures.k_core)]
+						node_measures.target_k_core = [role == "target" ? Float64(core) : missing
+													   for (role, core) in zip(node_measures.role, node_measures.k_core)]
+					end
+				end
+			end
+
+		#	Core-number columns present in both tables
+			pattern = bipartite ? r"^(source|target)_[ks]_core$" : r"^[ks]_core(_|$)"
+			shared = [name for name in names(node_measures_1) if occursin(pattern, name) && name in names(node_measures_2)]
+
+		#	k-core first, then s-core, each in name order
+			k_core = sort([name for name in shared if occursin("k_core", name)])
+			s_core = sort([name for name in shared if occursin("s_core", name)])
+
+		#	Assembling Result
+			return (measures = vcat(k_core, s_core),
+					types = vcat(fill("K-Core Decomposition", length(k_core)), fill("S-Core Decomposition", length(s_core))))
 	end
 
 #	Helper Function for _distribution_divergence: Typical Magnitude of Two Pooled Distributions
@@ -17187,7 +17205,8 @@ THE SOFTWARE.
 				per-measure diagnostics of the node-level comparison
 		Notes:
 			- Replaces the node-moment rows with one distribution feature per node measure (jsd_<measure>)
-			- Applies category weights to multi-indicator measures
+			- Replaces the per-level k-core and s-core shares with one distribution feature per decomposition
+			- Weights the Triad Census so that the whole census counts as one feature
 			- Adds the normalized two-step reach columns to the node tables
 		"""
 
@@ -17238,6 +17257,16 @@ THE SOFTWARE.
 			mean_rows = unique(mean_rows, :measure)
 			base_measures = String.(chopsuffix.(mean_rows.measure, "_mean"))
 			base_types = String.(mean_rows.type)
+
+		#	Core numbers are node measures too: one distribution per decomposition
+			core = _add_core_measures!(node_measures_1, node_measures_2, bipartite)
+			if !isempty(core.measures)
+				#	The per-level shares give way to the distribution features
+					filter!(row -> !(row.type in ("K-Core Decomposition", "S-Core Decomposition")), fv1)
+					filter!(row -> !(row.type in ("K-Core Decomposition", "S-Core Decomposition")), fv2)
+					append!(base_measures, core.measures)
+					append!(base_types, core.types)
+			end
 
 		#	Compare the node-level distributions
 			divergences = _js_divergence_computation(node_measures_1, node_measures_2, base_measures; bin_width = bin_width)
@@ -17424,8 +17453,46 @@ THE SOFTWARE.
 			)
 	end
 
+#	Helper Function for network_comparator: Test a Network's Type from Its Links
+	function _found_network_type(edges::DataFrame, nodes::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}})
+		"""
+		Args:
+			edges::DataFrame: edge list with :src, :dst, and optionally :weight
+			nodes::Union{Nothing,DataFrame,AbstractVector}: node universe, or nothing
+		Returns:
+			NamedTuple:
+				- symmetric::Bool: every link between two different nodes has a reverse link of the same weight
+				- binary::Bool: every link weight is 1
+				- undirected_edges::DataFrame: one link per pair at that weight when symmetric; edges otherwise
+				- description::String: what was found, for the comparison record
+		Notes:
+			The tests are _is_symmetric and _is_binary_matrix, run on the network's adjacency matrix.
+			A network without a link between two different nodes is not called symmetric.
+			Rows that repeat a link are summed before testing, as the constructors sum them.
+		"""
+
+		#	Adjacency matrix
+			adj, node_map, _ = _graph_to_sparse_matrix(edges; nodes = nodes, weighted = hasproperty(edges, :weight))
+
+		#	Links between two different nodes
+			n_loops = count(i -> adj[i, i] != 0.0, 1:size(adj, 1))
+			n_off_diagonal = nnz(adj) - n_loops
+
+		#	Tests
+			symmetric = n_off_diagonal > 0 && _is_symmetric(adj; directed = nothing)
+			binary = _is_binary_matrix(adj; directed = true)
+
+		#	One link per pair for a symmetric network
+			undirected_edges = symmetric ?
+				_symmetric_sparse_to_undirected_edgelist(adj; include_diagonal = true, node_map = node_map) : edges
+
+		#	Assembling Result
+			description = (symmetric ? "symmetric" : "not symmetric") * ", " * (binary ? "all weights 1" : "weights vary")
+			return (symmetric = symmetric, binary = binary, undirected_edges = undirected_edges, description = description)
+	end
+
 #	Version Recorded with Each Comparison
-	const LGS_VERSION = "0.2.0"
+	const LGS_VERSION = "0.3.0"
 
 #	Network Comparator: Compare Two Networks
 	function network_comparator(edges_1::DataFrame, nodes_1::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}},
@@ -17474,8 +17541,11 @@ THE SOFTWARE.
 				  noise level, and the scaled Wasserstein-1 distance (not part of the score)
 				- undefined_features: Features undefined (NaN) in one or both networks,
 				  which are excluded from the distance, with the side that lacks them
-				- comparison_info: Feature set, binning, bin width, version, and the modes of each network
+				- comparison_info: Feature set, binning, bin width, version, the type declared and the
+				  type found for each network, and the modes of each network
 		Notes:
+			- Tests each network's links: two symmetric networks are compared as undirected and two
+			  networks whose weights are all 1 as binary, whatever was declared
 			- Returns individual network analyses alongside comparison results
 			- Applies category weights to multi-indicator measures
 			- Node-level distributions are compared on a geometric axis with bins of fixed width
@@ -17500,11 +17570,46 @@ THE SOFTWARE.
 				throw(ArgumentError(MIXED_MODE_MESSAGE))
 			end
 
+		#	Test each network's type from its links
+			declared_type = (bipartite_1 ? "" : (directed ? "directed " : "undirected ")) * (weighted ? "weighted" : "binary")
+			found_1 = _found_network_type(clean_edges_1, clean_nodes_1)
+			found_2 = _found_network_type(clean_edges_2, clean_nodes_2)
+			type_notes = String[]
+
+		#	Two symmetric networks are undirected, whatever was declared
+			if !bipartite_1 && directed
+				if found_1.symmetric && found_2.symmetric
+					directed = false
+					clean_edges_1 = found_1.undirected_edges
+					clean_edges_2 = found_2.undirected_edges
+					push!(type_notes, "declared directed; both networks are symmetric and are compared as undirected")
+				elseif found_1.symmetric || found_2.symmetric
+					push!(type_notes, "declared directed; network $(found_1.symmetric ? 1 : 2) is symmetric and the other is not, so both are compared as directed")
+				end
+			end
+
+		#	Two networks whose weights are all 1 are binary, whatever was declared
+			if weighted
+				if found_1.binary && found_2.binary
+					weighted = false
+					push!(type_notes, "declared weighted; every weight in both networks is 1 and they are compared as binary")
+				elseif found_1.binary || found_2.binary
+					push!(type_notes, "declared weighted; every weight in network $(found_1.binary ? 1 : 2) is 1 and the other's weights vary, so both are compared as weighted")
+				end
+			end
+
+		#	A declaration that sets weight aside is a choice: it is kept, and recorded
+			if endswith(declared_type, "binary") && !(found_1.binary && found_2.binary)
+				push!(type_notes, "declared binary; weights vary and are not used")
+			end
+
 		#	Record which feature set is used
 			feature_set = bipartite_1 ? "two-mode " * (weighted ? "weighted" : "binary") :
 						  "one-mode " * (directed ? "directed " : "undirected ") * (weighted ? "weighted" : "binary")
-			comparison_info = DataFrame(item = ["feature_set", "node_measure_binning", "bin_width", "lgs_version"],
-										value = [feature_set, "geometric axis, fixed bin width, linear binning", string(bin_width), LGS_VERSION])
+			comparison_info = DataFrame(item = ["feature_set", "node_measure_binning", "bin_width", "lgs_version",
+												"declared_type", "found_type_1", "found_type_2", "type_note"],
+										value = [feature_set, "geometric axis, fixed bin width, linear binning", string(bin_width), LGS_VERSION,
+												 declared_type, found_1.description, found_2.description, join(type_notes, "; ")])
 
 		#	Select appropriate constructor and builder based on configuration
 			if bipartite_1
@@ -17903,8 +18008,8 @@ THE SOFTWARE.
 	- `nodes_1, nodes_2::Union{Nothing,DataFrame,Vector}`: Optional node universes to include isolates
 	- `resolution_sweep::Bool`: Use CHAMP multi-resolution community detection (default false)
 	- `resolution::Float64`: Resolution parameter for modularity optimization (default 1.0)
-	- `directed::Bool`: Treat networks as directed (default true)
-	- `weighted::Bool`: Use edge weights if present (default true)
+	- `directed::Bool`: Treat networks as directed (default true). Two networks that are both symmetric are compared as undirected. See Details.
+	- `weighted::Bool`: Use edge weights if present (default true). Two networks whose weights are all 1 are compared as binary. See Details.
 	- `n_resolutions::Int`: Number of resolutions for CHAMP sweep (default 15)
 	- `n_runs_per_gamma::Int`: Leiden algorithm runs per resolution (default 5)
 	- `n_iterations_per_run::Int`: Iterations per Leiden run (default 10)
@@ -17918,19 +18023,32 @@ THE SOFTWARE.
 	**Details**
 	Each network is reduced to a feature vector. The score is `1 / (1 + d)`, where `d` is the weighted Euclidean distance between the two vectors.
 
+	*Network type.* Each network's links are tested before a feature set is chosen, so the comparison does not rest on the declaration alone. 
+    A network is symmetric when every link between two different nodes has a reverse link of the same weight. 
+    When both networks are symmetric they are compared as undirected, with one link per pair at that weight, even if `directed = true`: 
+    a symmetric network has no direction to measure, and the directed feature set would count each of its node measures several times over. 
+    When every weight in both networks is 1 they are compared as binary, even if `weighted = true`. 
+    Both networks are always measured on one feature set, so if only one of them is symmetric (or binary) the declaration stands. 
+    A declaration that sets direction or weight aside (`directed = false` on links that run one way, `weighted = false` on weights that vary) is a choice and is kept. 
+    `comparison_info` records the type declared, the type found for each network, and any change.
+
 	*Global features.* Density, components, reciprocity, and the other network-level measures enter as they are, with three adjustments. 
     Node and link counts are put through `asinh`. The mean and standard deviation of link weights are divided by the larger of the two networks' values. The triad census is weighted so that the whole census counts as one feature. 
     For weighted networks the census is taken over a grid of weight thresholds, and each triad type contributes the area under its density curve, 
     its peak density, and the position of its peak within the grid (0 at the lowest threshold, 1 at the highest). 
     The peak position is compared only where the type occurs in both networks.
 
-	*Node-level distributions.* Each node measure (degree, reach, clustering, PageRank, and so on) contributes one feature: 
+	*Node-level distributions.* Each node measure (degree, reach, clustering, PageRank, core number, and so on) contributes one feature: 
      the distance between the two networks' distributions of that measure. Every measure is compared in the same way:
 	1. *Scale.* The typical value `s` is the median nonzero magnitude of the two distributions pooled, with the two networks weighted equally.
 	2. *Geometric axis.* Each node value `x` is placed at `u = asinh(x / s)`. The axis is linear near zero and logarithmic in the tails, so a heavy tail does not empty the bins that hold most nodes. Zeros and negative values keep their place.
 	3. *Bins.* The range runs from the joint minimum to the joint maximum and always includes zero. It is divided into bins of width `bin_width`, so a wider distribution gets more bins and not wider ones. At least two bins are used.
 	4. *Linear binning.* Each node is shared between the two nearest bin centres in proportion to its closeness. A small change in a value then moves a small amount of mass, where a hard bin edge would move the whole node.
 	5. *Divergence.* The feature is the square root of the Jensen-Shannon divergence (natural logarithm) between the two binned distributions. It lies between 0 and 0.83 and is a metric.
+
+	The k-core and s-core decompositions are compared in this way, one feature per decomposition (`jsd_k_core_in`, `jsd_s_core_undirected`, and so on). 
+    A node's core number is a node-level measure, and neighbouring core levels share mass under linear binning. 
+    Versions before 0.3.0 used one feature per core level, which treated a move from level 12 to level 13 as two unrelated differences.
 
 	A smaller `bin_width` resolves finer differences and raises the noise from small networks by the same proportion. 
     Scores computed with different bin widths are not comparable. `comparison_info` records the width that was used.
@@ -17995,9 +18113,12 @@ THE SOFTWARE.
 	  table alongside it.
 
 	- `comparison_info::DataFrame`: Columns [:item, :value]. Rows `feature_set`
-	  ("one-mode directed weighted", "two-mode binary", and so on),
-	  `node_measure_binning`, `bin_width`, and `lgs_version`. For two-mode
-	  networks, further rows give the source and target mode of each network.
+	  (the set actually used: "one-mode directed weighted", "two-mode binary",
+	  and so on), `node_measure_binning`, `bin_width`, `lgs_version`,
+	  `declared_type`, `found_type_1`, `found_type_2` (for example "symmetric,
+	  weights vary"), and `type_note` (what was changed, or why the declaration
+	  stands; empty when declaration and links agree). For two-mode networks,
+	  further rows give the source and target mode of each network.
 
 	Note: The overall similarity is computed from the full weighted Euclidean distance
 	over all features and is **not** a simple average of the per-type `type_similarity`

@@ -1216,12 +1216,12 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 					default = "network_2"
 					
 				"--directed"
-					help = "Treat networks as directed"
+					help = "Treat networks as directed. A network whose links are symmetric is analysed as undirected"
 					arg_type = Bool
 					default = true
 					
 				"--weighted"
-					help = "Use edge weights if present"
+					help = "Use edge weights if present. A network whose weights are all 1 is analysed as binary"
 					arg_type = Bool
 					default = true
 					
@@ -1478,6 +1478,18 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 					if verbose
 						println("\n=== Running Network Analysis ===")
 					end
+
+				#	Test the network's type from its links (the comparator does this for a comparison)
+					found = Large_Graph_Similarity._found_network_type(edges_1, nodes_1)
+					if !bipartite_1 && run_directed && found.symmetric
+						run_directed = false
+						edges_1 = found.undirected_edges
+						println("Declared directed; the network is symmetric and is analysed as undirected")
+					end
+					if run_weighted && found.binary
+						run_weighted = false
+						println("Declared weighted; every weight is 1 and the network is analysed as binary")
+					end
 				
 				#	Generating Data based on Network Type
 					if bipartite_1
@@ -1589,7 +1601,7 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 						provided_membership_2 = partition_2,
 						bipartite             = (bipartite_1, bipartite_2),
 						match_modes           = parsed_args["match-modes"],
-					bin_width             = parsed_args["bin-width"]
+						bin_width             = parsed_args["bin-width"]
 					)
 
 				#	Ensure output directory exists for per-network tables

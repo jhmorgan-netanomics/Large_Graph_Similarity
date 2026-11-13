@@ -754,4 +754,137 @@ const LGS = Large_Graph_Similarity
 			#	A position that is undefined adds nothing and is not reported as undefined
 				@test !any(endswith.(rescaled.undefined_features.measure, "_peak_position"))
 		end
+
+	#	Network Type: Every Network Is Tested for Direction and Weight
+		@testset "Network type is tested, not assumed" begin
+			#	A network of 40 nodes with links that run one way and weights that vary
+				rng = MersenneTwister(20261113)
+				ids = ["n" * lpad(i, 2, "0") for i in 1:40]
+				pairs = unique([(rand(rng, 1:40), rand(rng, 1:40)) for _ in 1:220])
+				pairs = [(i, j) for (i, j) in pairs if i < j]
+				one_way = DataFrame(src = [ids[i] for (i, j) in pairs], dst = [ids[j] for (i, j) in pairs],
+									weight = Float64.(rand(rng, 1:6, length(pairs))))
+				nodes = DataFrame(id = ids, label = ids)
+
+			#	The same ties listed in both directions at the same weight: a symmetric network
+				both_ways = vcat(one_way, DataFrame(src = one_way.dst, dst = one_way.src, weight = one_way.weight))
+
+			#	A second symmetric network: the first with eight ties removed
+				fewer = one_way[9:end, :]
+				fewer_both_ways = vcat(fewer, DataFrame(src = fewer.dst, dst = fewer.src, weight = fewer.weight))
+
+			#	The tests themselves
+				@test LGS._found_network_type(both_ways, nodes).symmetric
+				@test !LGS._found_network_type(one_way, nodes).symmetric
+				@test !LGS._found_network_type(both_ways, nodes).binary
+				@test LGS._found_network_type(select(one_way, :src, :dst), nodes).binary
+				@test nrow(LGS._found_network_type(both_ways, nodes).undirected_edges) == nrow(one_way)
+
+			#	A link whose reverse has another weight is not symmetric
+				uneven = copy(both_ways)
+				uneven.weight[1] += 1.0
+				@test !LGS._found_network_type(uneven, nodes).symmetric
+
+			#	Declared directed, both symmetric: compared as undirected
+				declared_directed = network_comparator(both_ways, nodes, fewer_both_ways, nodes; directed = true, weighted = true, seed = 7)
+				info = declared_directed.comparison_info
+				value_of(item) = info.value[findfirst(==(item), info.item)]
+				@test value_of("feature_set") == "one-mode undirected weighted"
+				@test value_of("declared_type") == "directed weighted"
+				@test value_of("found_type_1") == "symmetric, weights vary"
+				@test occursin("compared as undirected", value_of("type_note"))
+
+			#	The score is that of the same ties declared undirected, listed once
+				declared_undirected = network_comparator(one_way, nodes, fewer, nodes; directed = false, weighted = true, seed = 7)
+				@test declared_directed.overall_similarity == declared_undirected.overall_similarity
+				@test 0.0 < declared_directed.overall_similarity < 1.0
+
+			#	A symmetric network against itself scores exactly 1
+				@test network_comparator(both_ways, nodes, both_ways, nodes; directed = true, weighted = true, seed = 7).overall_similarity == 1.0
+
+			#	Only one network symmetric: the declaration stands, and the record says so
+				mixed = network_comparator(both_ways, nodes, one_way, nodes; directed = true, weighted = true, seed = 7)
+				mixed_info = mixed.comparison_info
+				@test mixed_info.value[findfirst(==("feature_set"), mixed_info.item)] == "one-mode directed weighted"
+				@test occursin("network 1 is symmetric and the other is not", mixed_info.value[findfirst(==("type_note"), mixed_info.item)])
+
+			#	Declared weighted, every weight 1 in both: compared as binary
+				ones_1 = DataFrame(src = one_way.src, dst = one_way.dst, weight = ones(nrow(one_way)))
+				ones_2 = DataFrame(src = fewer.src, dst = fewer.dst, weight = ones(nrow(fewer)))
+				declared_weighted = network_comparator(ones_1, nodes, ones_2, nodes; directed = true, weighted = true, seed = 7)
+				weighted_info = declared_weighted.comparison_info
+				@test weighted_info.value[findfirst(==("feature_set"), weighted_info.item)] == "one-mode directed binary"
+				@test occursin("compared as binary", weighted_info.value[findfirst(==("type_note"), weighted_info.item)])
+				declared_binary = network_comparator(ones_1, nodes, ones_2, nodes; directed = true, weighted = false, seed = 7)
+				@test declared_weighted.overall_similarity == declared_binary.overall_similarity
+
+			#	Declared binary on weights that vary: a choice, kept and recorded
+				ignoring_weights = network_comparator(one_way, nodes, fewer, nodes; directed = true, weighted = false, seed = 7)
+				ignoring_info = ignoring_weights.comparison_info
+				@test ignoring_info.value[findfirst(==("feature_set"), ignoring_info.item)] == "one-mode directed binary"
+				@test occursin("weights vary and are not used", ignoring_info.value[findfirst(==("type_note"), ignoring_info.item)])
+
+			#	Declaration and links agree: nothing to note
+				agreeing = network_comparator(one_way, nodes, fewer, nodes; directed = true, weighted = true, seed = 7)
+				@test agreeing.comparison_info.value[findfirst(==("type_note"), agreeing.comparison_info.item)] == ""
+
+			#	The same tests run in the app's analysis of one network
+				mktempdir() do output_dir
+					edge_path = joinpath(output_dir, "both_ways.csv")
+					node_path = joinpath(output_dir, "nodes.csv")
+					CSV.write(edge_path, both_ways)
+					CSV.write(node_path, nodes)
+					LGS.CLI.cli_main(["--mode", "analysis", "--edgelist-1", edge_path, "--nodelist-1", node_path, "--name-1", "symmetric",
+									  "--output-dir", output_dir, "--directed", "true", "--weighted", "true", "--verbose", "false"])
+					analysed = CSV.read(joinpath(output_dir, "symmetric_node_measures.csv"), DataFrame)
+					@test "k_core_all" in names(analysed) && !("k_core_in" in names(analysed))
+				end
+		end
+
+	#	Core Decompositions: One Feature per Decomposition
+		@testset "Core numbers are compared as node measures" begin
+			#	Two directed weighted networks that differ
+				rng = MersenneTwister(20261114)
+				ids = ["n" * lpad(i, 2, "0") for i in 1:50]
+				arcs = unique([(rand(rng, 1:50), rand(rng, 1:50)) for _ in 1:400])
+				arcs = [(i, j) for (i, j) in arcs if i != j]
+				first_network = DataFrame(src = [ids[i] for (i, j) in arcs], dst = [ids[j] for (i, j) in arcs],
+										  weight = Float64.(rand(rng, 1:5, length(arcs))))
+				second_network = first_network[21:end, :]
+				nodes = DataFrame(id = ids, label = ids)
+				result = network_comparator(first_network, nodes, second_network, nodes; directed = true, weighted = true, seed = 7)
+				features = result.combined_features
+
+			#	One distribution feature per decomposition, and no feature per level
+				core_rows = features[in.(features.type, Ref(["K-Core Decomposition", "S-Core Decomposition"])), :]
+				@test Set(core_rows.measure) == Set("jsd_" .* ["k_core_in", "k_core_out", "k_core_undirected", "s_core_in", "s_core_out", "s_core_undirected"])
+				@test !any(occursin.(r"_core_(in|out|undirected|all)_[0-9]", features.measure))
+
+			#	They are in the diagnostics, on the scale of every other node measure
+				diagnostics = result.node_measure_diagnostics
+				@test issubset(["k_core_in", "s_core_undirected"], diagnostics.measure)
+				@test all(abs.(core_rows.network_1_values .- core_rows.network_2_values) .<= sqrt(log(2)) + 1e-12)
+				@test any(core_rows.network_1_values .!= core_rows.network_2_values)
+
+			#	Only the triad census carries a group weight
+				@test all(features.weight[features.type .!= "Triad Census"] .== 1.0)
+				@test sum(features.weight[features.type .== "Triad Census"]) ≈ 1.0
+
+			#	Undirected networks: one k-core and one s-core feature
+				undirected = network_comparator(first_network, nodes, second_network, nodes; directed = false, weighted = true, seed = 7)
+				undirected_cores = undirected.combined_features.measure[in.(undirected.combined_features.type, Ref(["K-Core Decomposition", "S-Core Decomposition"]))]
+				@test Set(undirected_cores) == Set(["jsd_k_core_all", "jsd_s_core_all"])
+
+			#	Two-mode networks: each mode's core numbers against its counterpart
+				agents = ["a" * string(i) for i in 1:12]
+				tags = ["h" * string(i) for i in 1:6]
+				links = unique([(rand(rng, 1:12), rand(rng, 1:6)) for _ in 1:40])
+				two_mode_1 = DataFrame(src = [agents[i] for (i, j) in links], dst = [tags[j] for (i, j) in links], weight = ones(length(links)))
+				two_mode_2 = two_mode_1[5:end, :]
+				mode_nodes = DataFrame(id = vcat(agents, tags), label = vcat(agents, tags), mode = vcat(fill("Agent", 12), fill("Hashtag", 6)))
+				two_mode = network_comparator(two_mode_1, mode_nodes, two_mode_2, mode_nodes; weighted = false, bipartite = true)
+				two_mode_cores = two_mode.combined_features.measure[two_mode.combined_features.type .== "K-Core Decomposition"]
+				@test Set(two_mode_cores) == Set(["jsd_source_k_core", "jsd_target_k_core"])
+				@test network_comparator(two_mode_1, mode_nodes, two_mode_1, mode_nodes; weighted = false, bipartite = true).overall_similarity == 1.0
+		end
 end

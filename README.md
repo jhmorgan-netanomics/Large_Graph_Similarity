@@ -8,7 +8,7 @@ Large_Graph_Similarity (LGS) reduces two networks to a similarity score between 
 |---|---|
 | `julia_env/src/Large_Graph_Similarity.jl` | The measures, constructors, feature builders, and `network_comparator` |
 | `julia_env/src/CLI.jl` | The command-line interface |
-| `julia_env/Self_Identity_Tests.jl` | Regression tests: self-identity, undefined measures, two-mode networks, node measure comparison |
+| `julia_env/Self_Identity_Tests.jl` | Regression tests: self-identity, undefined measures, two-mode networks, node measure comparison, network type, core decompositions |
 | `julia_env/Benchmark_Replication_Tests.jl` | Each measure against results saved from ORA, igraph, scoredec, Pajek, Python, and R |
 | `julia_env/Comparator_Tests.jl`, `CLI_Tests.jl`, `Graph_Comparison_Tests.jl` | Development scripts. The first two predate version 0.2.0 and still refer to the raw and asinh scores |
 | `julia_env/build_app_*.jl` | PackageCompiler build scripts |
@@ -34,9 +34,24 @@ Rebuild the app after any change to `src`; the compiled app does not pick up sou
 
 - `node_measure_diagnostics` gives, for each node measure, the divergence that entered the score, the divergence expected from sampling alone, and the scaled Wasserstein-1 distance.
 - `undefined_features` lists every feature that is undefined (NaN) in one or both networks. Those features are left out of the score. One that is undefined in only one network is a difference the score does not contain.
-- `comparison_info` names the feature set, the bin width, and the version that were used.
+- `comparison_info` names the feature set, the bin width, and the version that were used, with the network type that was declared and the type found in each network's links.
 
 The CLI writes one file of each kind: `<name_1>_<name_2>_similarity_scores.csv`, `_comparison.csv`, `_type_contributions.csv`, `_node_measure_diagnostics.csv`, `_undefined_features.csv`, and `_comparison_info.csv`.
+
+### Network type is tested, not assumed
+
+Before a feature set is chosen, each network's links are tested for direction and for weight, whatever was declared and however the network was read (edge lists or ORA XML).
+
+| Declared | Found in both networks | Compared as |
+|---|---|---|
+| Directed | Symmetric: every link between two different nodes has a reverse link of the same weight | Undirected, one link per pair at that weight |
+| Weighted | Every weight is 1 | Binary |
+| Directed or weighted | Only one network is symmetric, or only one has all weights 1 | As declared, because both networks are measured on one feature set |
+| Undirected or binary | Links run one way, or weights vary | As declared: setting direction or weight aside is a choice |
+
+A symmetric network has no direction to measure. On the directed feature set its in and out measures are copies of one another, so one difference is counted several times. ORA writes co-occurrence networks as directed with both arcs; they are found symmetric and compared as undirected.
+
+`comparison_info` records `declared_type`, `found_type_1`, `found_type_2`, and a `type_note` saying what was changed or why the declaration stands. The app's single-network analysis runs the same tests. The constructors, called directly, do what they are told.
 
 ### How node measures are compared
 
@@ -48,7 +63,11 @@ Each node measure (degree, reach, clustering, PageRank, and so on) contributes o
 4. **Linear binning.** Each node is shared between the two nearest bin centres, so a small change in a value moves a small amount of mass.
 5. **Divergence.** The feature is the square root of the Jensen-Shannon divergence between the two binned distributions.
 
-Scores computed with different bin widths are not comparable. Versions before 0.2.0 returned two scores (`overall_similarity_raw`, `overall_similarity_asinh`) from equal-width histograms with 20 bins; those scores are not comparable with the present one.
+The k-core and s-core decompositions are compared in the same way, one feature per decomposition (`jsd_k_core_in`, `jsd_s_core_undirected`, and so on; `jsd_source_k_core` and `jsd_target_k_core` for two-mode networks). A node's core number is a node-level measure, and under linear binning neighbouring core levels share mass. Versions before 0.3.0 used one feature per core level, which treated a move from level 12 to level 13 as two unrelated differences.
+
+Only the triad census carries a group weight. The community features (the share of nodes in each community) are left at one feature each: they sum to 1, so their combined size is bounded, and they supply little of the distance.
+
+Scores computed with different bin widths are not comparable. Scores from versions 0.2.0 and 0.3.0 are not comparable with each other. Versions before 0.2.0 returned two scores (`overall_similarity_raw`, `overall_similarity_asinh`) from equal-width histograms with 20 bins; those scores are not comparable with the present one.
 
 ### The weighted triad census in the score
 

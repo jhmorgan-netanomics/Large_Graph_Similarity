@@ -1,0 +1,100 @@
+Network comparison: ION bundle against the final export
+Written 2026-11-12 18:38; Large_Graph_Similarity app 0.3.0, resolution 1.0, seed 20261027, bin width 0.125
+
+Per network (final = network 1, ION = network 2; similarity 1 = no loss;
+edges: shared / final only / ION only / shared with a different weight):
+    day0  Agent x Agent - All Communication       similarity 0.4632  edge angular 0.7226  edges 3687 / 420 / 70 / 629  [one-mode directed weighted]
+    day0  Agent x Agent - All Propagation         similarity 0.713   edge angular 0.9336  edges 3388 / 17 / 14 / 29  [one-mode directed weighted]
+    day0  Agent x Agent - Mentioned-By            similarity 0.3628  edge angular 0.424   edges 875 / 836 / 145 / 123  [one-mode directed weighted]
+    day0  Agent x Agent - Quoted-By               similarity 1.0     edge angular 1.0     edges 820 / 0 / 0 / 0  [one-mode directed weighted]
+    day0  Agent x Agent - Reciprocal              similarity 0.504   edge angular 0.6737  edges 70 / 22 / 1 / 12  [one-mode undirected weighted]
+    day0  Agent x Agent - Replied-By              similarity 0.4385  edge angular 0.6997  edges 340 / 22 / 28 / 10  [one-mode directed weighted]
+    day0  Agent x Agent - Retweeted-By            similarity 1.0     edge angular 1.0     edges 2314 / 0 / 0 / 0  [one-mode directed weighted]
+    day0  Agent x Hashtag                         similarity 0.8717  edge angular 0.9784  edges 6412 / 0 / 13 / 10  [two-mode weighted]
+    day0  Agent x Tweet - Sender                  similarity 1.0     edge angular 1.0     edges 9251 / 0 / 0 / 0  [two-mode binary]
+    day0  Hashtag x Hashtag - Co-Occurrence       similarity 0.8073  edge angular 0.9915  edges 1366 / 0 / 16 / 4  [one-mode undirected weighted]  TYPE: declared directed; both networks are symmetric and are compared as undirected
+    day0  Tweet x Agent - Mentions                similarity 0.3355  edge angular 0.4102  edges 1225 / 1553 / 272 / 0  [two-mode binary]
+    day0  Tweet x Hashtag                         similarity 0.805   edge angular 0.968   edges 9481 / 0 / 24 / 0  [two-mode binary]
+    day0  Tweet x Tweet - Quoted-By               similarity 1.0     edge angular 1.0     edges 1194 / 0 / 0 / 0  [one-mode directed binary]
+    day0  Tweet x Tweet - Replied-By              similarity 0.5608  edge angular 0.7225  edges 349 / 36 / 36 / 0  [one-mode directed binary]
+    day0  Tweet x Tweet - Retweeted-By            similarity 1.0     edge angular 1.0     edges 3047 / 0 / 0 / 0  [one-mode directed binary]
+    day4  Agent x Agent - All Communication       similarity 0.4541  edge angular 0.7134  edges 3506 / 438 / 54 / 716  [one-mode directed weighted]
+    day4  Agent x Agent - All Propagation         similarity 0.5351  edge angular 0.8841  edges 3171 / 68 / 21 / 51  [one-mode directed weighted]
+    day4  Agent x Agent - Mentioned-By            similarity 0.3899  edge angular 0.4321  edges 925 / 568 / 533 / 86  [one-mode directed weighted]
+    day4  Agent x Agent - Quoted-By               similarity 0.6628  edge angular 0.8413  edges 746 / 51 / 0 / 18  [one-mode directed weighted]
+    day4  Agent x Agent - Reciprocal              similarity 0.4807  edge angular 0.6597  edges 69 / 13 / 2 / 14  [one-mode undirected weighted]
+    day4  Agent x Agent - Replied-By              similarity 0.4413  edge angular 0.7345  edges 430 / 30 / 36 / 9  [one-mode directed weighted]
+    day4  Agent x Agent - Retweeted-By            similarity 1.0     edge angular 1.0     edges 2047 / 0 / 0 / 0  [one-mode directed weighted]
+    day4  Agent x Hashtag                         similarity 0.7735  edge angular 0.8904  edges 6454 / 94 / 40 / 184  [two-mode weighted]
+    day4  Agent x Tweet - Sender                  similarity 0.9625  edge angular 0.9495  edges 6503 / 38 / 3 / 0  [two-mode binary]
+    day4  Hashtag x Hashtag - Co-Occurrence       similarity 0.777   edge angular 0.9606  edges 1644 / 24 / 46 / 192  [one-mode undirected weighted]  TYPE: declared directed; both networks are symmetric and are compared as undirected
+    day4  Tweet x Agent - Mentions                similarity 0.4325  edge angular 0.4028  edges 1029 / 764 / 660 / 0  [two-mode binary]
+    day4  Tweet x Hashtag                         similarity 0.7757  edge angular 0.8609  edges 7994 / 272 / 118 / 0  [two-mode binary]
+    day4  Tweet x Tweet - Quoted-By               similarity 0.6033  edge angular 0.8208  edges 873 / 73 / 0 / 0  [one-mode directed binary]  UNDEFINED ON ONE SIDE: degree assortativity (undefined in ION)
+    day4  Tweet x Tweet - Replied-By              similarity 0.6804  edge angular 0.735   edges 439 / 41 / 41 / 0  [one-mode directed binary]
+    day4  Tweet x Tweet - Retweeted-By            similarity 1.0     edge angular 1.0     edges 2335 / 0 / 0 / 0  [one-mode directed binary]
+
+What drives each difference (share of the squared distance; jsd_<measure> is the
+difference between the two networks' distributions of a node measure):
+    day0  Agent x Agent - All Communication       largest type: Influence
+                                                  largest features: jsd_salsa_authority (27.4%); jsd_page_rank (20.7%); jsd_s_core_undirected (8.8%)
+    day0  Agent x Agent - All Propagation         largest type: Influence
+                                                  largest features: jsd_page_rank (41.8%); jsd_modularity_vitality_hub (35.5%); jsd_modularity_vitality_bridge (5.9%)
+    day0  Agent x Agent - Mentioned-By            largest type: Influence
+                                                  largest features: jsd_page_rank (18.8%); jsd_in_degree_normalized (14.6%); jsd_salsa_authority (11.9%)
+    day0  Agent x Agent - Reciprocal              largest type: Local Reach
+                                                  largest features: jsd_undirected_reach_2_normalized (25.0%); jsd_modularity_vitality_bridge (10.3%); jsd_modularity_vitality_hub (10.1%)
+    day0  Agent x Agent - Replied-By              largest type: Influence
+                                                  largest features: jsd_in_degree_normalized (29.6%); jsd_page_rank (18.8%); jsd_modularity_vitality_hub (11.9%)
+    day0  Agent x Hashtag                         largest type: Degree Measures
+                                                  largest features: jsd_target_two_step_reach_normalized (20.1%); jsd_target_salsa_authority (13.2%); jsd_target_in_strength_normalized (12.5%)
+    day0  Hashtag x Hashtag - Co-Occurrence       largest type: Influence
+                                                  largest features: jsd_modularity_vitality_bridge (35.1%); jsd_modularity_vitality_hub (25.0%); Community_1 (12.5%)
+    day0  Tweet x Agent - Mentions                largest type: Influence
+                                                  largest features: jsd_source_page_rank (14.8%); jsd_source_salsa_hub (14.7%); jsd_source_out_degree_normalized (14.5%)
+    day0  Tweet x Hashtag                         largest type: Component Measure
+                                                  largest features: num_groups_proportion (34.8%); num_triads_proportion (34.8%); jsd_target_pairwise_clustering (8.2%)
+    day0  Tweet x Tweet - Replied-By              largest type: Influence
+                                                  largest features: jsd_modularity_vitality_hub (37.8%); jsd_modularity_vitality_bridge (20.0%); jsd_out_reach_2_normalized (9.6%)
+    day4  Agent x Agent - All Communication       largest type: Degree Measures
+                                                  largest features: jsd_in_degree_normalized (41.6%); jsd_page_rank (22.5%); jsd_s_core_undirected (12.5%)
+    day4  Agent x Agent - All Propagation         largest type: Influence
+                                                  largest features: jsd_in_degree_normalized (42.7%); jsd_page_rank (31.0%); jsd_modularity_vitality_hub (9.1%)
+    day4  Agent x Agent - Mentioned-By            largest type: Influence
+                                                  largest features: jsd_page_rank (23.6%); jsd_in_degree_normalized (12.5%); jsd_out_reach_2_normalized (12.2%)
+    day4  Agent x Agent - Quoted-By               largest type: Influence
+                                                  largest features: jsd_page_rank (14.7%); jsd_modularity_vitality_hub (12.2%); jsd_s_core_undirected (10.7%)
+    day4  Agent x Agent - Reciprocal              largest type: Link Measure
+                                                  largest features: jsd_total_degree_normalized (14.4%); jsd_s_core_all (12.2%); jsd_modularity_vitality_bridge (10.8%)
+    day4  Agent x Agent - Replied-By              largest type: Degree Measures
+                                                  largest features: jsd_in_degree_normalized (32.7%); jsd_page_rank (17.6%); all_link_std (9.3%)
+    day4  Agent x Hashtag                         largest type: Degree Measures
+                                                  largest features: jsd_source_out_strength_normalized (24.4%); jsd_source_out_degree_normalized (17.2%); jsd_target_salsa_authority (8.6%)
+    day4  Agent x Tweet - Sender                  largest type: Influence
+                                                  largest features: jsd_source_out_degree_normalized (44.1%); jsd_source_page_rank (31.7%); jsd_target_page_rank (13.7%)
+    day4  Hashtag x Hashtag - Co-Occurrence       largest type: Influence
+                                                  largest features: jsd_modularity_vitality_bridge (25.8%); jsd_modularity_vitality_hub (20.2%); jsd_total_degree_normalized (11.8%)
+    day4  Tweet x Agent - Mentions                largest type: Degree Measures
+                                                  largest features: jsd_source_out_degree_normalized (38.1%); jsd_target_two_step_reach_normalized (17.3%); jsd_target_salsa_authority (12.8%)
+    day4  Tweet x Hashtag                         largest type: Component Measure
+                                                  largest features: jsd_source_out_degree_normalized (20.8%); num_groups_proportion (15.9%); num_triads_proportion (15.9%)
+    day4  Tweet x Tweet - Quoted-By               largest type: Influence
+                                                  largest features: jsd_salsa_authority (28.1%); jsd_in_reach_2_normalized (14.4%); jsd_in_degree_normalized (13.3%)
+    day4  Tweet x Tweet - Replied-By              largest type: Influence
+                                                  largest features: jsd_modularity_vitality_bridge (26.4%); jsd_modularity_vitality_hub (21.3%); jsd_undirected_reach_2_normalized (11.8%)
+
+Networks in the ION file only:
+    none
+
+Networks in the final file only:
+    none
+
+Networks left out (URL node sets):
+    day0  Agent x Url
+    day0  Hashtag x Url - Co-Occurrence
+    day0  Tweet x Url
+    day0  Url x Url - Co-Occurrence
+    day4  Agent x Url
+    day4  Hashtag x Url - Co-Occurrence
+    day4  Tweet x Url
+    day4  Url x Url - Co-Occurrence
