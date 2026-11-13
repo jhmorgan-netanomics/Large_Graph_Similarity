@@ -6171,7 +6171,8 @@ THE SOFTWARE.
 	**Arguments**
 	- `edges::DataFrame`: Edge list with `:src`, `:dst`, optional `:weight`.
 	- `nodes::Union{Nothing,DataFrame,Vector}`: Node universe (includes isolates if provided).
-	- `resolution::Float64|nothing`: If supplied, run Leiden at this single γ and skip the sweep. If `nothing` (default), perform a full resolution sweep.
+	- `resolution::Float64|nothing`: If supplied, run Leiden at this single γ and skip the sweep. 
+       If `nothing` (default), perform a full resolution sweep.
 	- `resolution_range::Tuple`: Range `(γ_min, γ_max)` for the sweep (default `(0.1, 1.8)`).
 	- `n_resolutions::Int`: Number of γ values in the sweep grid (default `30`).
 	- `n_runs_per_gamma::Int`: Number of independent Leiden multi-starts per γ value (default `5`).
@@ -6218,10 +6219,15 @@ THE SOFTWARE.
 	- `modularities::Vector{Float64}`: Modularity for each γ partition (computed at each partition's own γ).
 	- `n_communities_per_gamma::Vector{Int}`: Community count for each γ partition.
 	- `dominant::Vector{Bool}`: `true` for partitions in the admissible set (on the convex hull).
-	- `dominance_lower::Vector{Float64}`, `dominance_upper::Vector{Float64}`: the interval of γ over which each admissible partition is optimal; `NaN` for inadmissible ones. A wide interval is a partition that holds against its neighbours; a sliver is an artifact of where the grid points fell.
+	- `dominance_lower::Vector{Float64}`, `dominance_upper::Vector{Float64}`: the interval of γ over which each admissible partition is optimal; 
+      `NaN` for inadmissible ones. A wide interval is a partition that holds against its neighbours; 
+       a sliver is an artifact of where the grid points fell.
 	- `best_index::Int`: Index into `gammas` of the selected partition.
 
-	The sweep data fields let the selected partition be checked against the full envelope: with `m` the arc total, the envelope at γ is the maximum over admissible rows of `(A - γP) / m`, and the elbow should sit where the dominance intervals change width most sharply. A graph whose intervals are all of comparable width has no clear elbow, and `best_index` should then be treated as a reporting choice rather than a selection.
+	The sweep data fields let the selected partition be checked against the full envelope: with `m` the arc total, 
+    the envelope at γ is the maximum over admissible rows of `(A - γP) / m`, and the elbow should sit where the dominance intervals 
+    change width most sharply. A graph whose intervals are all of comparable width has no clear elbow, and `best_index` should then be treated 
+    as a reporting choice rather than a selection.
 
 	**Examples**
 
@@ -16654,8 +16660,10 @@ THE SOFTWARE.
 	- `hub_warning::Int`: Warn when a single node of the dropped mode has more links than this (default `1_000`).
 
 	**Details**
-	A projection is an analytic choice, so it is never made automatically. Three consequences should be kept in mind when a projection is compared with an observed one-mode network:
-	1. Every node of the dropped mode becomes a clique among its neighbours, so a projection has far more clustering and density than an observed network of the same size.
+	A projection is an analytic choice, so it is never made automatically. 
+    Three consequences should be kept in mind when a projection is compared with an observed one-mode network:
+	1. Every node of the dropped mode becomes a clique among its neighbours, so a projection has far more clustering and density than 
+       an observed network of the same size.
 	2. A node of the dropped mode with `k` links creates `k(k-1)/2` ties. One hashtag used by 10,000 agents creates about 50 million.
 	3. Direction is given up. Ties stand for association, and the result is undirected. Link weights of the two-mode network are not used.
 
@@ -17491,8 +17499,208 @@ THE SOFTWARE.
 			return (symmetric = symmetric, binary = binary, undirected_edges = undirected_edges, description = description)
 	end
 
+#	Helper Function for _edge_agreement: The Identity of Each Node of One Network
+	function _node_identities(edges::DataFrame, nodes, match_nodes_on::Union{Symbol,AbstractString}, network_number::Int)
+		"""
+		Args:
+			edges::DataFrame: edge list with :src and :dst
+			nodes: node table (DataFrame), vector of node ids, or nothing
+			match_nodes_on::Union{Symbol,AbstractString}: :id, or the node-table column that holds each node's identity
+			network_number::Int: 1 or 2, used in error messages
+		Returns:
+			Dict{String,String}: node id => identity, for every node in the node table or on a link
+		Notes:
+			With :id the identity of a node is its id.
+			With a column name the identity is the node's value in that column. Use it when ids were
+			changed, for example to meet an external standard, and a column carries the common identity.
+			A node on a link that is absent from the node table keeps its id as its identity.
+			Two nodes with one identity would have their links merged, so that is an error.
+		"""
+
+		#	Every node: the node table and the link endpoints
+			ids = String[]
+			if nodes isa DataFrame
+				id_column = hasproperty(nodes, :id) ? :id : Symbol(first(names(nodes)))
+				append!(ids, string.(nodes[!, id_column]))
+			elseif nodes !== nothing
+				append!(ids, string.(nodes))
+			end
+			append!(ids, string.(edges.src))
+			append!(ids, string.(edges.dst))
+			identity_of = Dict{String,String}(id => id for id in ids)
+
+		#	Early return
+			if Symbol(match_nodes_on) == :id
+				return identity_of
+			end
+
+		#	Validation
+			if !(nodes isa DataFrame) || !hasproperty(nodes, Symbol(match_nodes_on))
+				throw(ArgumentError("match_nodes_on = $(match_nodes_on): network $network_number has no node-table column of that name. " *
+									"Give a node table with that column, or use match_nodes_on = :id."))
+			end
+
+		#	Identity from the named column
+			id_column = hasproperty(nodes, :id) ? :id : Symbol(first(names(nodes)))
+			for (id, identity) in zip(string.(nodes[!, id_column]), nodes[!, Symbol(match_nodes_on)])
+				if !ismissing(identity)
+					identity_of[id] = string(identity)
+				end
+			end
+
+		#	Each identity belongs to one node
+			seen = Dict{String,String}()
+			for (id, identity) in identity_of
+				if haskey(seen, identity) && seen[identity] != id
+					throw(ArgumentError("match_nodes_on = $(match_nodes_on): nodes $(seen[identity]) and $id of network $network_number share the identity " *
+										"\"$identity\". Each node needs its own identity, or its links would be merged with another node's."))
+				end
+				seen[identity] = id
+			end
+
+		#	Assembling Result
+			return identity_of
+	end
+
+#	Helper Function for _edge_agreement: Link Weights Keyed by the Identities of Their Endpoints
+	function _keyed_link_weights(edges::DataFrame, identity_of::Dict{String,String}, directed::Bool)
+		"""
+		Args:
+			edges::DataFrame: edge list with :src, :dst, and optionally :weight
+			identity_of::Dict{String,String}: node id => identity
+			directed::Bool: whether a link from a to b differs from a link from b to a
+		Returns:
+			Dict{Tuple{String,String},Float64}: (identity, identity) => summed weight
+		Notes:
+			For an undirected network the two identities are put in sorted order.
+			Rows that repeat a link are summed, as the constructors sum them.
+			A link without a weight column counts 1.
+		"""
+
+		#	Sum the weight of each link
+			weights = hasproperty(edges, :weight) ? Float64.(edges.weight) : ones(Float64, nrow(edges))
+			keyed = Dict{Tuple{String,String},Float64}()
+			for (src, dst, weight) in zip(string.(edges.src), string.(edges.dst), weights)
+				a = identity_of[src]
+				b = identity_of[dst]
+				key = (directed || a <= b) ? (a, b) : (b, a)
+				keyed[key] = get(keyed, key, 0.0) + weight
+			end
+
+		#	Assembling Result
+			return keyed
+	end
+
+#	Helper Function for _edge_agreement: Angular Similarity of Two Non-Negative Vectors
+	function _angular_similarity(x::Vector{Float64}, y::Vector{Float64})
+		"""
+		Args:
+			x::Vector{Float64}: first vector
+			y::Vector{Float64}: second vector, aligned with the first
+		Returns:
+			Float64: 1 - 2 acos(cosine) / pi, between 0 and 1; NaN when either vector is all zero
+		Notes:
+			For non-negative vectors the angle lies between 0 and a right angle.
+			1 means the same direction; 0 means no shared non-zero entry.
+		"""
+
+		#	Early return
+			norm_x = sqrt(sum(abs2, x))
+			norm_y = sqrt(sum(abs2, y))
+			if norm_x == 0.0 || norm_y == 0.0
+				return NaN
+			end
+
+		#	Assembling Result
+			cosine = clamp(sum(x .* y) / (norm_x * norm_y), 0.0, 1.0)
+			return x == y ? 1.0 : 1.0 - 2.0 * acos(cosine) / pi
+	end
+
+#	Helper Function for network_comparator: Link-by-Link Agreement of Two Networks on the Same Nodes
+	function _edge_agreement(edges_1::DataFrame, nodes_1, edges_2::DataFrame, nodes_2;
+							 directed::Bool,
+							 match_nodes_on::Union{Symbol,AbstractString,Nothing} = :id,
+							 min_node_overlap::Float64 = 0.75)
+		"""
+		Args:
+			edges_1::DataFrame: edge list of network 1 (:src, :dst, optionally :weight), as compared
+			nodes_1: node table, vector of ids, or nothing
+			edges_2::DataFrame: edge list of network 2
+			nodes_2: node table, vector of ids, or nothing
+			directed::Bool: whether the networks are compared as directed
+			match_nodes_on::Union{Symbol,AbstractString,Nothing}: :id (default), a node-table column, or nothing to skip
+			min_node_overlap::Float64: least share of nodes in both networks for the similarity to be computed (default = 0.75)
+		Returns:
+			NamedTuple:
+				- computed::Bool: whether the angular similarity was computed
+				- angular_similarity::Float64: angular similarity of the link weights (NaN when not computed)
+				- angular_similarity_binary::Float64: the same on link presence
+				- node_overlap::Float64: nodes in both networks / nodes in either
+				- nodes_both, nodes_1_only, nodes_2_only::Int
+				- links_both, links_1_only, links_2_only, links_reweighted::Int (0 when not computed)
+				- note::String: how nodes were matched, and why the similarity was not computed if it was not
+		Notes:
+			The angular similarity compares the networks link by link, so it means something only when
+			the nodes are the same entities: each pair of nodes must have been able to be tied in both.
+			It is computed when node_overlap is at least min_node_overlap.
+			A node present in one network only is treated as having no links in the other.
+			The vectors hold one entry for every link present in either network.
+			This is a second, independent reading. It is not part of the similarity score.
+		"""
+
+		#	Not requested
+			if match_nodes_on === nothing
+				return (computed = false, angular_similarity = NaN, angular_similarity_binary = NaN, node_overlap = NaN,
+						nodes_both = 0, nodes_1_only = 0, nodes_2_only = 0,
+						links_both = 0, links_1_only = 0, links_2_only = 0, links_reweighted = 0,
+						note = "not computed: node matching was switched off (match_nodes_on = nothing)")
+			end
+
+		#	Node identities and their overlap
+			identity_1 = _node_identities(edges_1, nodes_1, match_nodes_on, 1)
+			identity_2 = _node_identities(edges_2, nodes_2, match_nodes_on, 2)
+			set_1 = Set(values(identity_1))
+			set_2 = Set(values(identity_2))
+			nodes_both = length(intersect(set_1, set_2))
+			nodes_1_only = length(set_1) - nodes_both
+			nodes_2_only = length(set_2) - nodes_both
+			n_either = nodes_both + nodes_1_only + nodes_2_only
+			node_overlap = n_either == 0 ? NaN : nodes_both / n_either
+			matched_on = "nodes matched on " * string(match_nodes_on)
+
+		#	Too few nodes in common for a link-by-link comparison
+			if !(node_overlap >= min_node_overlap) || nodes_both == 0
+				return (computed = false, angular_similarity = NaN, angular_similarity_binary = NaN, node_overlap = node_overlap,
+						nodes_both = nodes_both, nodes_1_only = nodes_1_only, nodes_2_only = nodes_2_only,
+						links_both = 0, links_1_only = 0, links_2_only = 0, links_reweighted = 0,
+						note = "not computed: $(nodes_both) of $(n_either) nodes are in both networks " *
+							   "($(round(100 * (isnan(node_overlap) ? 0.0 : node_overlap); digits = 1))%), below min_node_overlap = $(min_node_overlap); " * matched_on)
+			end
+
+		#	Link weights under the shared identity
+			links_1 = _keyed_link_weights(edges_1, identity_1, directed)
+			links_2 = _keyed_link_weights(edges_2, identity_2, directed)
+			all_links = sort!(collect(union(keys(links_1), keys(links_2))))
+			x = Float64[get(links_1, link, 0.0) for link in all_links]
+			y = Float64[get(links_2, link, 0.0) for link in all_links]
+
+		#	Link counts
+			links_both = count(i -> x[i] != 0.0 && y[i] != 0.0, eachindex(x))
+			links_1_only = count(i -> x[i] != 0.0 && y[i] == 0.0, eachindex(x))
+			links_2_only = count(i -> x[i] == 0.0 && y[i] != 0.0, eachindex(x))
+			links_reweighted = count(i -> x[i] != 0.0 && y[i] != 0.0 && x[i] != y[i], eachindex(x))
+
+		#	Assembling Result
+			return (computed = true,
+					angular_similarity = _angular_similarity(x, y),
+					angular_similarity_binary = _angular_similarity(Float64.(x .!= 0.0), Float64.(y .!= 0.0)),
+					node_overlap = node_overlap, nodes_both = nodes_both, nodes_1_only = nodes_1_only, nodes_2_only = nodes_2_only,
+					links_both = links_both, links_1_only = links_1_only, links_2_only = links_2_only, links_reweighted = links_reweighted,
+					note = matched_on * "; a node in one network only has no links in the other")
+	end
+
 #	Version Recorded with Each Comparison
-	const LGS_VERSION = "0.3.0"
+	const LGS_VERSION = "0.3.1"
 
 #	Network Comparator: Compare Two Networks
 	function network_comparator(edges_1::DataFrame, nodes_1::Union{Nothing,DataFrame,AbstractVector{<:AbstractString}},
@@ -17505,7 +17713,9 @@ THE SOFTWARE.
 								bipartite::Union{Bool,Tuple{Bool,Bool}} = false,
 								mode_column::Union{Symbol,AbstractString} = :mode,
 								match_modes::Bool = true,
-								bin_width::Float64 = 0.125)
+								bin_width::Float64 = 0.125,
+								match_nodes_on::Union{Symbol,AbstractString,Nothing} = :id,
+								min_node_overlap::Float64 = 0.75)
 		"""
 		Compare two networks and return one similarity score.
 		
@@ -17525,6 +17735,10 @@ THE SOFTWARE.
 			mode_column: Column of the node tables naming each node's mode (two-mode only)
 			match_modes::Bool: Require the two networks' mode names to agree (two-mode only)
 			bin_width::Float64: Bin width for comparing node-level distributions (default = 0.125)
+			match_nodes_on::Union{Symbol,AbstractString,Nothing}: How nodes of the two networks are identified as the
+				same entity for the angular similarity: :id (default), a node-table column, or nothing to skip it
+			min_node_overlap::Float64: Least share of nodes in both networks for the angular similarity
+				to be computed (default = 0.75)
 		Returns:
 			NamedTuple with fields:
 				- global_stats_1: DataFrame of global statistics for network 1
@@ -17539,6 +17753,9 @@ THE SOFTWARE.
 				- type_contributions: Per-type breakdown of the distance
 				- node_measure_diagnostics: Per node measure, the divergence, its expected
 				  noise level, and the scaled Wasserstein-1 distance (not part of the score)
+				- edge_angular_similarity, edge_angular_similarity_binary: Angular similarity of the two
+				  networks' link weights and link presence (not part of the score; NaN when not computed)
+				- edge_agreement: Node overlap and link counts behind the angular similarity
 				- undefined_features: Features undefined (NaN) in one or both networks,
 				  which are excluded from the distance, with the side that lacks them
 				- comparison_info: Feature set, binning, bin width, version, the type declared and the
@@ -17554,6 +17771,9 @@ THE SOFTWARE.
 		#	Validation
 			if !(isfinite(bin_width) && bin_width > 0.0)
 				throw(ArgumentError("bin_width must be a positive number; got $bin_width."))
+			end
+			if !(0.0 <= min_node_overlap <= 1.0)
+				throw(ArgumentError("min_node_overlap must lie between 0 and 1; got $min_node_overlap."))
 			end
 		
 		#	Create working copies
@@ -17603,13 +17823,28 @@ THE SOFTWARE.
 				push!(type_notes, "declared binary; weights vary and are not used")
 			end
 
+		#	Link-by-link agreement, when the two networks are on the same nodes (not part of the score)
+			agreement = _edge_agreement(clean_edges_1, clean_nodes_1, clean_edges_2, clean_nodes_2;
+										directed = bipartite_1 || directed,
+										match_nodes_on = match_nodes_on, min_node_overlap = min_node_overlap)
+			edge_agreement = DataFrame(
+				item = ["computed", "angular_similarity", "angular_similarity_binary", "node_overlap", "min_node_overlap",
+						"nodes_both", "nodes_1_only", "nodes_2_only", "links_both", "links_1_only", "links_2_only", "links_reweighted", "note"],
+				value = [string(agreement.computed), string(agreement.angular_similarity), string(agreement.angular_similarity_binary),
+						 string(agreement.node_overlap), string(min_node_overlap),
+						 string(agreement.nodes_both), string(agreement.nodes_1_only), string(agreement.nodes_2_only),
+						 string(agreement.links_both), string(agreement.links_1_only), string(agreement.links_2_only),
+						 string(agreement.links_reweighted), agreement.note])
+
 		#	Record which feature set is used
 			feature_set = bipartite_1 ? "two-mode " * (weighted ? "weighted" : "binary") :
 						  "one-mode " * (directed ? "directed " : "undirected ") * (weighted ? "weighted" : "binary")
 			comparison_info = DataFrame(item = ["feature_set", "node_measure_binning", "bin_width", "lgs_version",
-												"declared_type", "found_type_1", "found_type_2", "type_note"],
+												"declared_type", "found_type_1", "found_type_2", "type_note",
+												"node_overlap", "min_node_overlap", "edge_agreement_note"],
 										value = [feature_set, "geometric axis, fixed bin width, linear binning", string(bin_width), LGS_VERSION,
-												 declared_type, found_1.description, found_2.description, join(type_notes, "; ")])
+												 declared_type, found_1.description, found_2.description, join(type_notes, "; "),
+												 string(agreement.node_overlap), string(min_node_overlap), agreement.note])
 
 		#	Select appropriate constructor and builder based on configuration
 			if bipartite_1
@@ -17992,6 +18227,9 @@ THE SOFTWARE.
 					overall_similarity = overall.similarity,
 					type_contributions = type_contributions,
 					node_measure_diagnostics = node_measure_diagnostics,
+					edge_angular_similarity = agreement.angular_similarity,
+					edge_angular_similarity_binary = agreement.angular_similarity_binary,
+					edge_agreement = edge_agreement,
 					undefined_features = _undefined_features(combined_measures),
 					comparison_info = comparison_info)
 	end
@@ -18001,7 +18239,7 @@ THE SOFTWARE.
     The individual network analyses, the aligned features, and the tables that explain the score are returned with it.
 
 	**Usage**
-	`network_comparator(edges_1, nodes_1, edges_2, nodes_2; resolution_sweep=false, resolution=1.0, directed=true, weighted=true, n_resolutions=15, n_runs_per_gamma=5, n_iterations_per_run=10, seed=nothing, provided_membership_1=nothing, provided_membership_2=nothing, bipartite=false, mode_column=:mode, match_modes=true, bin_width=0.125)`
+	`network_comparator(edges_1, nodes_1, edges_2, nodes_2; resolution_sweep=false, resolution=1.0, directed=true, weighted=true, n_resolutions=15, n_runs_per_gamma=5, n_iterations_per_run=10, seed=nothing, provided_membership_1=nothing, provided_membership_2=nothing, bipartite=false, mode_column=:mode, match_modes=true, bin_width=0.125, match_nodes_on=:id, min_node_overlap=0.75)`
 
 	**Arguments**
 	- `edges_1, edges_2::DataFrame`: Edge lists with `:src` and `:dst` columns (string IDs), optional `:weight` column
@@ -18019,6 +18257,10 @@ THE SOFTWARE.
 	- `mode_column::Union{Symbol,AbstractString}`: Column of the node tables that names each node's mode (default `:mode`). Two-mode only.
 	- `match_modes::Bool`: Require the two networks' mode names to agree (default true). Two-mode only.
 	- `bin_width::Float64`: Bin width used to compare node-level distributions (default 0.125). See Details.
+	- `match_nodes_on::Union{Symbol,AbstractString,Nothing}`: How a node of one network is identified with a node of the other, for the angular similarity. 
+    `:id` (default) matches on node id. A node-table column name matches on that column; use it when ids were changed, 
+    for example to meet an external standard, and a column carries the common identity. `nothing` skips the angular similarity.
+	- `min_node_overlap::Float64`: Least share of nodes that must be in both networks for the angular similarity to be computed (default 0.75). See Details.
 
 	**Details**
 	Each network is reduced to a feature vector. The score is `1 / (1 + d)`, where `d` is the weighted Euclidean distance between the two vectors.
@@ -18052,6 +18294,21 @@ THE SOFTWARE.
 
 	A smaller `bin_width` resolves finer differences and raises the noise from small networks by the same proportion. 
     Scores computed with different bin widths are not comparable. `comparison_info` records the width that was used.
+
+	*Angular similarity of the links.* Beside its own score, the comparison reports a second, independent reading: 
+    the angular similarity of the two networks' link weights, `1 - 2 acos(c) / pi`, where `c` is the cosine between the two weight vectors. 
+    The vectors hold one entry for every link present in either network. It is given on the weights and on link presence (binary). 
+    It is not part of the similarity score. The two readings answer different questions: the angular similarity asks whether the same links are present at the same weights, 
+    and the score asks whether the two networks have the same structure. When the links largely agree and the score is low, the type contributions, 
+    the feature table, and the node measure diagnostics show which measures a small change in links has moved. The two are not on the same scale, 
+    so a gap between them is a prompt to read those tables and is not an error in either.
+
+	The angular similarity compares link by link, so it means something only when the nodes of the two networks are the same entities: 
+    each pair of nodes must have been able to be tied in both. This is checked, not assumed. Nodes are matched on their ids, or on the node-table column named by `match_nodes_on`. 
+    The node overlap is the number of nodes in both networks divided by the number in either, counting every node in a node table or on a link. 
+    The angular similarity is computed only when the overlap is at least `min_node_overlap` (default 0.75); otherwise it is `NaN` and `edge_agreement` says why. 
+    The node sets need not be identical: a node present in one network only is treated as having no links in the other, so its links count as links found in one network only. 
+    Two nodes of one network with the same identity are an error, because their links would be merged.
 
 	*Diagnostics.* `node_measure_diagnostics` reports, for each node measure, the divergence, the divergence expected from sampling alone, 
      and the scaled Wasserstein-1 distance. They explain a score and are not part of it. 
@@ -18102,6 +18359,17 @@ THE SOFTWARE.
 	  it is a rough reference level. A `js_divergence` near it is not evidence of a
 	  difference. `wasserstein` is the scaled Wasserstein-1 distance.
 
+	- `edge_angular_similarity::Float64`, `edge_angular_similarity_binary::Float64`: Angular similarity
+	  of the two networks' link weights and of link presence, between 0 and 1. Not part of the
+	  score. `NaN` when the node overlap is below `min_node_overlap`, when no node matches, when
+	  a network has no links, or when `match_nodes_on = nothing`.
+	- `edge_agreement::DataFrame`: Columns [:item, :value]. Rows `computed`, `angular_similarity`,
+	  `angular_similarity_binary`, `node_overlap`, `min_node_overlap`, `nodes_both`, `nodes_1_only`,
+	  `nodes_2_only`, `links_both`, `links_1_only`, `links_2_only`, `links_reweighted` (links in both
+	  networks at different weights), and `note` (how nodes were matched, and the reason when the
+	  similarity was not computed). Links are counted as compared: one per pair for networks
+	  compared as undirected.
+
 	- `undefined_features::DataFrame`: Features that are undefined (NaN) in one or both
 	  networks, with columns [:measure, :type, :network_1_values, :network_2_values,
 	  :undefined_in], where `undefined_in` is "both", "network_1", or "network_2".
@@ -18117,7 +18385,8 @@ THE SOFTWARE.
 	  and so on), `node_measure_binning`, `bin_width`, `lgs_version`,
 	  `declared_type`, `found_type_1`, `found_type_2` (for example "symmetric,
 	  weights vary"), and `type_note` (what was changed, or why the declaration
-	  stands; empty when declaration and links agree). For two-mode networks,
+	  stands; empty when declaration and links agree), `node_overlap`,
+	  `min_node_overlap`, and `edge_agreement_note`. For two-mode networks,
 	  further rows give the source and target mode of each network.
 
 	Note: The overall similarity is computed from the full weighted Euclidean distance

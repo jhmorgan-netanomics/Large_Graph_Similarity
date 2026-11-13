@@ -397,6 +397,42 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 			return result
 	end
 
+#	Helper Function for CLI: Attach Node Identities from a Node List Column
+	function _attach_node_identity(nodes::DataFrame, filepath::String, identity_column::String)
+		"""
+		Args:
+			nodes::DataFrame: node list from _load_node_list (:id, :label)
+			filepath::String: the node list file
+			identity_column::String: name of the column holding each node's identity
+		Returns:
+			DataFrame: nodes with an added :node_identity column
+		Notes:
+			The identity matches a node of one network with a node of the other for the
+			angular similarity of their links, when ids differ between the two networks.
+			Rows of the file and of nodes are in the same order.
+			Throws ArgumentError when the column is absent.
+		"""
+
+		#	Read the File
+			first_line = readline(filepath)
+			delimiter = occursin("\t", first_line) ? '\t' : ','
+			df = CSV.read(filepath, DataFrame; delim = delimiter)
+
+		#	Validation
+			column = findfirst(name -> lowercase(strip(name)) == lowercase(strip(identity_column)), names(df))
+			if column === nothing
+				throw(ArgumentError("Column '$identity_column' (--match-nodes-on) not found in $filepath. Columns: $(join(names(df), ", "))"))
+			end
+			if nrow(df) != nrow(nodes)
+				throw(ArgumentError("Node list $filepath could not be aligned with its '$identity_column' column"))
+			end
+
+		#	Assembling Result
+			result = copy(nodes)
+			result.node_identity = strip.(string.(df[!, column]))
+			return result
+	end
+
 #	Helper Function for CLI: Settle Whether a Network Is Two-Mode and Project It if Asked
 	function _prepare_network_kind(edges::DataFrame, nodes::DataFrame, bipartite::Bool,
 								   project_onto::Union{Nothing,String}, weighting::String;
@@ -920,7 +956,8 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 			that encode both network names, e.g.:
 				name_1_name_2_comparison.csv
 			One table of each kind is written: the aligned features, the similarity
-			score, the type contributions, and the node measure diagnostics.
+			score (with the angular similarity of the links), the type contributions,
+			the edge agreement, and the node measure diagnostics.
 		"""
 		
 		#	Create output directory if needed
@@ -938,8 +975,9 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 		
 		#	Write the similarity score
 			scores = DataFrame(
-				metric = ["overall_distance", "overall_similarity"],
-				value = [comparison_result.overall_distance, comparison_result.overall_similarity]
+				metric = ["overall_distance", "overall_similarity", "edge_angular_similarity", "edge_angular_similarity_binary"],
+				value = [comparison_result.overall_distance, comparison_result.overall_similarity,
+						 comparison_result.edge_angular_similarity, comparison_result.edge_angular_similarity_binary]
 			)
 			scores_path = joinpath(output_dir, "$(pair_prefix)_similarity_scores.csv")
 			CSV.write(scores_path, scores)
@@ -952,6 +990,13 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 			CSV.write(contributions_path, comparison_result.type_contributions)
 			if verbose
 				println("Wrote type contributions to: $contributions_path")
+			end
+		
+		#	Write the link-by-link agreement behind the angular similarity (not part of the score)
+			agreement_path = joinpath(output_dir, "$(pair_prefix)_edge_agreement.csv")
+			CSV.write(agreement_path, comparison_result.edge_agreement)
+			if verbose
+				println("Wrote edge agreement to: $agreement_path")
 			end
 		
 		#	Write the node measure diagnostics (not part of the score)
@@ -1244,6 +1289,16 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 				arg_type = Float64
 				default = 0.125
 				
+			"--match-nodes-on"
+				help = "How nodes of the two networks are matched for the angular similarity of their links (comparison mode): 'id', a node-list column name, or 'none' to skip it"
+				arg_type = String
+				default = "id"
+
+			"--min-node-overlap"
+				help = "Least share of nodes that must be in both networks for the angular similarity to be computed (comparison mode)"
+				arg_type = Float64
+				default = 0.75
+				
 			"--project-onto"
 					help = "Project two-mode networks onto this mode (its name, or 'source' / 'target') and analyse the projection as an undirected one-mode network"
 					arg_type = String
@@ -1348,6 +1403,9 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 						if bipartite_1 && parsed_args["mode-column"] !== nothing
 							nodes_1 = _attach_node_modes(nodes_1, parsed_args["nodelist-1"], parsed_args["mode-column"])
 						end
+						if !(lowercase(parsed_args["match-nodes-on"]) in ("id", "label", "none"))
+							nodes_1 = _attach_node_identity(nodes_1, parsed_args["nodelist-1"], parsed_args["match-nodes-on"])
+						end
 					else
 						#	Construct canonical node list from edge endpoints
 							all_ids = union(edges_1.src, edges_1.dst)
@@ -1413,6 +1471,9 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 							nodes_2 = _load_node_list(parsed_args["nodelist-2"]; verbose = verbose)
 							if bipartite_2 && parsed_args["mode-column"] !== nothing
 								nodes_2 = _attach_node_modes(nodes_2, parsed_args["nodelist-2"], parsed_args["mode-column"])
+							end
+							if !(lowercase(parsed_args["match-nodes-on"]) in ("id", "label", "none"))
+								nodes_2 = _attach_node_identity(nodes_2, parsed_args["nodelist-2"], parsed_args["match-nodes-on"])
 							end
 						else
 							#	Construct canonical node list from edge endpoints
@@ -1581,6 +1642,14 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 						verbose = verbose
 					)
 			else  # comparison mode
+				#	How nodes of the two networks are matched for the angular similarity
+					requested_match = lowercase(strip(parsed_args["match-nodes-on"]))
+					match_nodes_on = requested_match == "none" ? nothing :
+									 requested_match == "id" ? :id :
+									 requested_match == "label" ? :label :
+									 (hasproperty(nodes_1, :node_identity) && hasproperty(nodes_2, :node_identity)) ? :node_identity :
+									 Symbol(parsed_args["match-nodes-on"])
+
 				#	Announcing Comparator Mode
 					if verbose
 						println("\n=== Running Network Comparison ===")
@@ -1601,7 +1670,9 @@ using ..Large_Graph_Similarity  # Parent module that exports all the functions
 						provided_membership_2 = partition_2,
 						bipartite             = (bipartite_1, bipartite_2),
 						match_modes           = parsed_args["match-modes"],
-						bin_width             = parsed_args["bin-width"]
+						bin_width             = parsed_args["bin-width"],
+						match_nodes_on        = match_nodes_on,
+						min_node_overlap      = parsed_args["min-node-overlap"]
 					)
 
 				#	Ensure output directory exists for per-network tables

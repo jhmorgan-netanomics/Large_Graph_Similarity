@@ -36,7 +36,23 @@ Rebuild the app after any change to `src`; the compiled app does not pick up sou
 - `undefined_features` lists every feature that is undefined (NaN) in one or both networks. Those features are left out of the score. One that is undefined in only one network is a difference the score does not contain.
 - `comparison_info` names the feature set, the bin width, and the version that were used, with the network type that was declared and the type found in each network's links.
 
-The CLI writes one file of each kind: `<name_1>_<name_2>_similarity_scores.csv`, `_comparison.csv`, `_type_contributions.csv`, `_node_measure_diagnostics.csv`, `_undefined_features.csv`, and `_comparison_info.csv`.
+- `edge_agreement` holds the node overlap and link counts behind the angular similarity of the links (see below).
+
+The CLI writes one file of each kind: `<name_1>_<name_2>_similarity_scores.csv` (the score, with the angular similarity of the links), `_comparison.csv`, `_type_contributions.csv`, `_node_measure_diagnostics.csv`, `_edge_agreement.csv`, `_undefined_features.csv`, and `_comparison_info.csv`.
+
+### Angular similarity of the links: a second reading
+
+Beside its own score, the comparison reports the angular similarity of the two networks' link weights, `1 - 2 acos(c) / pi`, where `c` is the cosine between the two weight vectors, on the weights and on link presence (`edge_angular_similarity`, `edge_angular_similarity_binary`). It is not part of the score.
+
+The two readings answer different questions. The angular similarity asks whether the same links are present at the same weights. The score asks whether the two networks have the same structure. When the links largely agree and the score is low, the type contributions, the feature table, and the node measure diagnostics show which measures a small change in links has moved. The two are not on the same scale, so a gap between them is a prompt to read those tables, not an error in either.
+
+The angular similarity compares link by link, so it means something only when the nodes of the two networks are the same entities: each pair of nodes must have been able to be tied in both. This is checked.
+
+- **Matching.** Nodes are matched on their ids. If ids were changed, for example to meet an external standard, `match_nodes_on` (CLI `--match-nodes-on`) names the node-table column that carries the common identity. Two nodes of one network with the same identity are an error.
+- **Overlap.** The node overlap is the number of nodes in both networks divided by the number in either, counting every node in a node table or on a link.
+- **Threshold.** The angular similarity is computed only when the overlap is at least `min_node_overlap` (default 0.75; CLI `--min-node-overlap`). Below it the value is `NaN`, and `edge_agreement` gives the overlap and the reason.
+- **Unequal node sets.** The node sets need not be identical. A node present in one network only is treated as having no links in the other, so its links count as links found in one network only.
+- **Switching it off.** `match_nodes_on = nothing` (CLI `--match-nodes-on none`) skips it, for networks that are not on the same nodes.
 
 ### Network type is tested, not assumed
 

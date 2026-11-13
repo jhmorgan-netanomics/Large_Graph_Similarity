@@ -887,4 +887,132 @@ const LGS = Large_Graph_Similarity
 				@test Set(two_mode_cores) == Set(["jsd_source_k_core", "jsd_target_k_core"])
 				@test network_comparator(two_mode_1, mode_nodes, two_mode_1, mode_nodes; weighted = false, bipartite = true).overall_similarity == 1.0
 		end
+
+	#	Angular Similarity of the Links: Reported When the Two Networks Are on the Same Nodes
+		@testset "Angular similarity of the links" begin
+			#	The measure itself
+				@test LGS._angular_similarity([1.0, 2.0, 3.0], [1.0, 2.0, 3.0]) == 1.0
+				@test LGS._angular_similarity([1.0, 0.0], [0.0, 1.0]) == 0.0
+				@test LGS._angular_similarity([1.0, 0.0], [1.0, 1.0]) ≈ 0.5
+				@test LGS._angular_similarity([2.0, 4.0], [1.0, 2.0]) ≈ 1.0 atol = 1e-7
+				@test isnan(LGS._angular_similarity([0.0, 0.0], [1.0, 1.0]))
+
+			#	Two directed weighted networks on the same 40 nodes: the second lacks eight links and reweights three
+				rng = MersenneTwister(20261115)
+				ids = ["n" * lpad(i, 2, "0") for i in 1:40]
+				arcs = unique([(rand(rng, 1:40), rand(rng, 1:40)) for _ in 1:260])
+				arcs = [(i, j) for (i, j) in arcs if i != j]
+				first_network = DataFrame(src = [ids[i] for (i, j) in arcs], dst = [ids[j] for (i, j) in arcs],
+										  weight = Float64.(rand(rng, 1:5, length(arcs))))
+				second_network = first_network[9:end, :]
+				second_network.weight[1:3] .+= 1.0
+				nodes = DataFrame(id = ids, label = ids)
+				result = network_comparator(first_network, nodes, second_network, nodes; directed = true, weighted = true, seed = 7)
+				agreement = result.edge_agreement
+				value_of(item) = agreement.value[findfirst(==(item), agreement.item)]
+
+			#	Computed, with the counts behind it
+				@test value_of("computed") == "true"
+				@test value_of("node_overlap") == "1.0"
+				@test value_of("links_1_only") == "8" && value_of("links_2_only") == "0"
+				@test value_of("links_both") == string(nrow(first_network) - 8)
+				@test value_of("links_reweighted") == "3"
+
+			#	The value is the angular similarity of the two aligned weight vectors
+				x = first_network.weight
+				y = vcat(zeros(8), second_network.weight)
+				expected = 1.0 - 2.0 * acos(sum(x .* y) / sqrt(sum(abs2, x) * sum(abs2, y))) / pi
+				@test result.edge_angular_similarity ≈ expected
+				@test result.edge_angular_similarity_binary ≈ 1.0 - 2.0 * acos(sqrt((nrow(first_network) - 8) / nrow(first_network))) / pi
+				@test 0.0 < result.edge_angular_similarity < 1.0
+
+			#	A network against itself
+				itself = network_comparator(first_network, nodes, first_network, nodes; directed = true, weighted = true, seed = 7)
+				@test itself.edge_angular_similarity == 1.0 && itself.edge_angular_similarity_binary == 1.0
+
+			#	It is not part of the score
+				without = network_comparator(first_network, nodes, second_network, nodes; directed = true, weighted = true, seed = 7,
+											 match_nodes_on = nothing)
+				@test without.overall_similarity == result.overall_similarity
+				@test isnan(without.edge_angular_similarity)
+				@test occursin("switched off", without.edge_agreement.value[findfirst(==("note"), without.edge_agreement.item)])
+
+			#	Below the node overlap threshold it is not computed, and the record says why
+				half_network = first_network[in.(first_network.src, Ref(ids[1:24])) .& in.(first_network.dst, Ref(ids[1:24])), :]
+				half_nodes = DataFrame(id = ids[1:24], label = ids[1:24])
+				low = network_comparator(first_network, nodes, half_network, half_nodes; directed = true, weighted = true, seed = 7)
+				low_value(item) = low.edge_agreement.value[findfirst(==(item), low.edge_agreement.item)]
+				@test isnan(low.edge_angular_similarity)
+				@test low_value("computed") == "false"
+				@test low_value("node_overlap") == "0.6"
+				@test occursin("below min_node_overlap = 0.75", low_value("note"))
+				@test occursin("not computed", low.comparison_info.value[findfirst(==("edge_agreement_note"), low.comparison_info.item)])
+
+			#	The threshold is an argument; a node in one network only has no links in the other
+				lowered = network_comparator(first_network, nodes, half_network, half_nodes; directed = true, weighted = true, seed = 7,
+											 min_node_overlap = 0.5)
+				@test 0.0 < lowered.edge_angular_similarity < 1.0
+				@test lowered.edge_agreement.value[findfirst(==("nodes_1_only"), lowered.edge_agreement.item)] == "16"
+				@test_throws ArgumentError network_comparator(first_network, nodes, second_network, nodes; min_node_overlap = 1.5)
+
+			#	Ids changed by a transformation: matched on a column that carries the identity
+				new_id = Dict(id => "ext-" * string(1000 + i) for (i, id) in enumerate(ids))
+				relabelled = DataFrame(src = [new_id[s] for s in second_network.src], dst = [new_id[d] for d in second_network.dst],
+									   weight = second_network.weight)
+				relabelled_nodes = DataFrame(id = [new_id[id] for id in ids], label = ids, original_id = ids)
+				keyed_nodes = DataFrame(id = ids, label = ids, original_id = ids)
+				by_id = network_comparator(first_network, keyed_nodes, relabelled, relabelled_nodes; directed = true, weighted = true, seed = 7)
+				@test isnan(by_id.edge_angular_similarity)
+				by_column = network_comparator(first_network, keyed_nodes, relabelled, relabelled_nodes; directed = true, weighted = true, seed = 7,
+											   match_nodes_on = :original_id)
+				@test by_column.edge_angular_similarity ≈ result.edge_angular_similarity
+				@test by_column.edge_agreement.value[findfirst(==("links_1_only"), by_column.edge_agreement.item)] == "8"
+
+			#	Two nodes with one identity, or a column that is absent, are errors
+				clashing_nodes = copy(relabelled_nodes)
+				clashing_nodes.original_id[2] = clashing_nodes.original_id[1]
+				@test_throws ArgumentError network_comparator(first_network, keyed_nodes, relabelled, clashing_nodes; directed = true, weighted = true,
+															  match_nodes_on = :original_id)
+				@test_throws ArgumentError network_comparator(first_network, nodes, second_network, nodes; directed = true, weighted = true,
+															  match_nodes_on = :no_such_column)
+
+			#	A symmetric network gives the same value listed both ways or once
+				pairs = [(i, j) for (i, j) in arcs if i < j]
+				once = DataFrame(src = [ids[i] for (i, j) in pairs], dst = [ids[j] for (i, j) in pairs], weight = Float64.(rand(rng, 1:4, length(pairs))))
+				once_fewer = once[6:end, :]
+				twice = vcat(once, DataFrame(src = once.dst, dst = once.src, weight = once.weight))
+				twice_fewer = vcat(once_fewer, DataFrame(src = once_fewer.dst, dst = once_fewer.src, weight = once_fewer.weight))
+				listed_twice = network_comparator(twice, nodes, twice_fewer, nodes; directed = true, weighted = true, seed = 7)
+				listed_once = network_comparator(once, nodes, once_fewer, nodes; directed = false, weighted = true, seed = 7)
+				@test listed_twice.edge_angular_similarity ≈ listed_once.edge_angular_similarity
+				@test listed_twice.edge_agreement.value[findfirst(==("links_1_only"), listed_twice.edge_agreement.item)] == "5"
+
+			#	Two-mode networks: nodes of both modes are matched
+				agents = ["a" * string(i) for i in 1:12]
+				tags = ["h" * string(i) for i in 1:6]
+				links = unique([(rand(rng, 1:12), rand(rng, 1:6)) for _ in 1:40])
+				two_mode_1 = DataFrame(src = [agents[i] for (i, j) in links], dst = [tags[j] for (i, j) in links], weight = ones(length(links)))
+				two_mode_2 = two_mode_1[4:end, :]
+				mode_nodes = DataFrame(id = vcat(agents, tags), label = vcat(agents, tags), mode = vcat(fill("Agent", 12), fill("Hashtag", 6)))
+				two_mode = network_comparator(two_mode_1, mode_nodes, two_mode_2, mode_nodes; weighted = false, bipartite = true)
+				@test two_mode.edge_angular_similarity ≈ 1.0 - 2.0 * acos(sqrt((length(links) - 3) / length(links))) / pi
+
+			#	The app writes both values with the score, and the agreement table; ids can be matched on a node-list column
+				mktempdir() do output_dir
+					paths = Dict(name => joinpath(output_dir, name * ".csv") for name in ("edges_1", "nodes_1", "edges_2", "nodes_2"))
+					CSV.write(paths["edges_1"], first_network)
+					CSV.write(paths["nodes_1"], keyed_nodes)
+					CSV.write(paths["edges_2"], relabelled)
+					CSV.write(paths["nodes_2"], relabelled_nodes)
+					LGS.CLI.cli_main(["--mode", "comparison", "--edgelist-1", paths["edges_1"], "--nodelist-1", paths["nodes_1"], "--name-1", "first",
+									  "--edgelist-2", paths["edges_2"], "--nodelist-2", paths["nodes_2"], "--name-2", "second",
+									  "--output-dir", output_dir, "--directed", "true", "--weighted", "true", "--seed", "7",
+									  "--match-nodes-on", "original_id", "--verbose", "false"])
+					scores = CSV.read(joinpath(output_dir, "first_second_similarity_scores.csv"), DataFrame)
+					@test scores.value[findfirst(==("edge_angular_similarity"), scores.metric)] ≈ result.edge_angular_similarity
+					@test "edge_angular_similarity_binary" in scores.metric
+					written = CSV.read(joinpath(output_dir, "first_second_edge_agreement.csv"), DataFrame; types = String)
+					@test written.value[findfirst(==("computed"), written.item)] == "true"
+				end
+		end
 end
